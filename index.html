@@ -131,6 +131,53 @@ kbd{
 /* ── CODE TAB ── */
 #code-tab{flex-direction:column;}
 
+/* ── CODE SUBTABS ── */
+#subtab-wrap{position:relative;flex-shrink:0;z-index:6;}
+#subtabs{
+  display:flex;align-items:stretch;height:32px;
+  background:var(--bg2);border-bottom:1px solid var(--bdr2);
+  overflow-x:auto;overflow-y:hidden;scrollbar-width:none;
+}
+#subtabs::-webkit-scrollbar{display:none;}
+.subtab{
+  display:flex;align-items:center;gap:8px;flex-shrink:0;
+  padding:0 8px 0 14px;cursor:pointer;user-select:none;white-space:nowrap;
+  font:12px var(--font-code);color:var(--txt2);
+  border-right:1px solid var(--bdr2);border-bottom:2px solid transparent;
+  transition:color .12s,background .12s;
+}
+.subtab:first-child{padding-right:14px;}
+.subtab:hover{color:var(--txt);background:var(--bg3);}
+.subtab.active{color:var(--txt);background:var(--bg);border-bottom-color:var(--blue);}
+.subtab-x{
+  width:16px;height:16px;padding:0;border:none;border-radius:3px;background:transparent;
+  color:var(--txt3);font:14px/1 var(--font-code);cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+}
+.subtab:hover .subtab-x,.subtab.active .subtab-x{color:var(--txt2);}
+.subtab-x:hover{background:var(--bg4);color:var(--txt);}
+.subtab-x.armed{width:auto;padding:0 5px;background:#220f0e;color:var(--red);font:600 10px var(--font-ui);}
+.subtab-edit,.subtab-edit:hover{cursor:text;gap:0;padding:0 12px;background:var(--bg);border-bottom-color:var(--blue);color:var(--txt);}
+.subtab-edit.invalid{border-bottom-color:var(--red);}
+.subtab-input{min-width:4ch;padding:0;border:none;outline:none;background:transparent;color:var(--txt);font:12px var(--font-code);}
+.subtab-input::placeholder{color:var(--txt3);}
+.subtab-ext{color:var(--txt3);}
+#subtab-add{
+  position:sticky;right:0;flex-shrink:0;width:34px;
+  border:none;border-left:1px solid var(--bdr2);background:var(--bg2);
+  color:var(--txt2);font:400 18px/1 var(--font-code);cursor:pointer;
+  transition:color .12s,background .12s;
+}
+#subtab-add:hover{color:var(--blue);background:var(--bg3);}
+#subtab-msg{
+  display:none;position:absolute;top:calc(100% + 4px);left:0;
+  max-width:min(440px,calc(100vw - 16px));padding:6px 10px;border-radius:5px;
+  background:#220f0e;border:1px solid #5c1e1c;color:var(--red);
+  font:12px/1.4 var(--font-ui);box-shadow:0 6px 18px #0009;pointer-events:none;
+}
+#subtab-msg.show{display:block;}
+@media (pointer:coarse){#subtabs{height:40px;}#subtab-add{width:44px;}}
+
 /* ── EDITOR ── */
 #editor-wrap{
   flex:1;display:flex;overflow:hidden;min-height:0;
@@ -227,7 +274,7 @@ kbd{
 
 /* ── SCREEN TAB ── */
 #screen-tab{background:#000;position:relative;overflow:hidden;}
-#screen{display:block;position:absolute;top:0;left:0;touch-action:none;}
+#screen{display:block;position:absolute;top:0;left:0;}
 
 /* ── ASSETS TAB ── */
 #assets-tab{flex-direction:column;background:var(--bg2);}
@@ -427,6 +474,10 @@ body.dropping #drop-overlay{display:flex;}
   </div>
 
   <div class="tab-view active" id="code-tab">
+    <div id="subtab-wrap">
+      <div id="subtabs" role="tablist" aria-label="Code tabs"></div>
+      <div id="subtab-msg" role="alert"></div>
+    </div>
     <div id="editor-wrap">
       <div id="lnums">1</div>
       <div id="ed-inner">
@@ -455,8 +506,6 @@ body.dropping #drop-overlay{display:flex;}
   <div class="tab-view" id="assets-tab">
     <div id="asset-bar">
       <span id="asset-bar-title">Assets</span>
-      <button class="btn btn-io" id="asset-add-btn" onclick="chooseAssetFiles()">+ Add Asset</button>
-      <input type="file" id="asset-file-inp" accept="image/*,audio/*,.txt,.json,.bpy,.py" multiple style="display:none"/>
       <span id="asset-bar-hint">Drag &amp; drop images/audio anywhere — click an asset to copy its Python usage</span>
     </div>
     <div id="asset-grid"></div>
@@ -517,7 +566,6 @@ let mx = 0, my = 0;
 const btnsHeld = new Set(), btnsPress = new Set(), btnsRel = new Set();
 let wheelUp = 0, wheelDown = 0;
 let _bpCapsLock = false;
-let _bpVibeTimer = null;
 let stdinWait = null;
 const stdinQ = [];
 
@@ -540,8 +588,6 @@ function _resetRuntimeState() {
     }
     window._bpActiveNodes = [];
   }
-  if (_bpVibeTimer) { clearInterval(_bpVibeTimer); _bpVibeTimer = null; }
-  if (navigator.vibrate) navigator.vibrate(0);
 }
 
 function _normalizeAssetRecord(name, raw) {
@@ -753,19 +799,6 @@ function _renderAssets() {
     grid.appendChild(card);
   }
 }
-
-// ── "Choose file" button for Assets tab ─────────────────────────
-function chooseAssetFiles() {
-  const inp = document.getElementById('asset-file-inp');
-  inp.value = '';
-  inp.click();
-}
-document.getElementById('asset-file-inp').addEventListener('change', async e => {
-  const files = Array.from(e.target.files || []).filter(f => { const t = (f.type || '').toLowerCase(); const n = (f.name || '').toLowerCase(); return t.startsWith('image/') || t.startsWith('audio/') || t.startsWith('text/') || t === 'application/json' || n.endsWith('.txt') || n.endsWith('.json') || n.endsWith('.bpy') || n.endsWith('.py'); });
-  for (const f of files) await _addAsset(f);
-  if (files.length > 0) { switchTab('assets'); window.appendConsole('Added ' + files.length + ' asset(s).', 'ok'); }
-  else if (e.target.files.length > 0) { window.appendConsole('No supported files selected — use images, audio, .txt, .json, .bpy or .py.', 'err'); }
-});
 
 document.addEventListener('dragover', e => { e.preventDefault(); document.body.classList.add('dropping'); });
 document.addEventListener('dragleave', e => { if (!e.relatedTarget || !document.body.contains(e.relatedTarget)) document.body.classList.remove('dropping'); });
@@ -1038,14 +1071,320 @@ function syncHLScroll() {
   $lnums.scrollTop = $ed.scrollTop;
 }
 
-const _LS = 'bowpy_code';
+const _LS = 'bowpy_code';              // main.bpy
 const _LS_NAME = 'bowpy_fname';
+const _LS_TABS = 'bowpy_tabs';         // every other tab: [{name, code}, ...]
+const _LS_ACTIVE = 'bowpy_active_tab';
 let _saveTimer = null;
 function _schedSave() {
   clearTimeout(_saveTimer);
-  _saveTimer = setTimeout(() => {
-    try { localStorage.setItem(_LS, $ed.value); } catch(e) {}
-  }, 4000);
+  _saveTimer = setTimeout(_saveNow, 4000);
+}
+
+// ══════════════════════════════════════════════════════════════
+//  Code subtabs
+//  main.bpy is the program (setup / update). Every other tab acts like a module:
+//  a tab called  utils.bpy  is reachable from all tabs as  utils.<function_or_variable>
+// ══════════════════════════════════════════════════════════════
+const MAIN_TAB = 'main.bpy';
+const _PY_HARD_KEYWORDS = new Set([
+  'False','None','True','and','as','assert','async','await','break','class','continue',
+  'def','del','elif','else','except','finally','for','from','global','if','import','in',
+  'is','lambda','nonlocal','not','or','pass','raise','return','try','while','with','yield'
+]);
+const $subtabs   = document.getElementById('subtabs');
+const $subtabMsg = document.getElementById('subtab-msg');
+
+let _tabs = [{ name: MAIN_TAB, code: '' }];   // _tabs[0] is always main.bpy
+let _activeTab = MAIN_TAB;
+let _pending = null;          // { mode: 'new' | 'rename', old } while a tab name is being typed
+let _armedDelete = null;      // tab whose close button is waiting for a second click
+let _armedTimer = null;
+let _bpReservedNames = null;  // names Python/BowPy already use — filled in once Python has loaded
+
+const _tabBase = name => String(name).replace(/\.bpy$/i, '');
+const _getTab  = name => _tabs.find(t => t.name === name);
+
+// Structural rules every tab name must follow (no UI state involved).
+function _tabNameProblem(base) {
+  if (!base) return 'Type a name for the tab.';
+  if (base.toLowerCase() === 'main') return '"main.bpy" is reserved for your program. Pick another name.';
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(base))
+    return 'Use only letters, digits and _ (not starting with a digit), so the tab can be used as ' + (base.replace(/[^A-Za-z0-9_]/g, '') || 'name') + '.function';
+  if (_PY_HARD_KEYWORDS.has(base)) return '"' + base + '" is a Python keyword. Pick another name.';
+  return null;
+}
+
+// Full check used when the user names or renames a tab.
+function validateTabName(input, ignoreName) {
+  const base = String(input || '').trim().replace(/\.bpy$/i, '').trim();
+  const problem = _tabNameProblem(base);
+  if (problem) return { ok: false, error: problem };
+  const lower = base.toLowerCase();
+  if (_tabs.some(t => t.name !== ignoreName && _tabBase(t.name).toLowerCase() === lower))
+    return { ok: false, error: 'A tab named "' + base + '.bpy" already exists.' };
+  if (_bpReservedNames && _bpReservedNames.has(base))
+    return { ok: false, error: '"' + base + '" is already used by Python or BowPy. Pick another name.' };
+  return { ok: true, name: base + '.bpy' };
+}
+
+// ── Editor <-> tab model ──────────────────────────────────────
+function _commitActiveCode() {
+  const t = _getTab(_activeTab);
+  if (!t) return;
+  t.code = $ed.value;
+  t.ss = $ed.selectionStart; t.se = $ed.selectionEnd;
+  t.st = $ed.scrollTop;      t.sl = $ed.scrollLeft;
+}
+
+function _loadActiveIntoEditor() {
+  const t = _getTab(_activeTab) || _tabs[0];
+  $ed.value = t.code;
+  syncEditor();
+  try { $ed.selectionStart = t.ss || 0; $ed.selectionEnd = t.se || 0; } catch(e) {}
+  $ed.scrollTop = t.st || 0; $ed.scrollLeft = t.sl || 0;
+  syncHLScroll();
+}
+
+function _saveNow() {
+  clearTimeout(_saveTimer);
+  _commitActiveCode();
+  try {
+    localStorage.setItem(_LS, _tabs[0].code);
+    localStorage.setItem(_LS_TABS, JSON.stringify(_tabs.slice(1).map(t => ({ name: t.name, code: t.code }))));
+    localStorage.setItem(_LS_ACTIVE, _activeTab);
+  } catch(e) {}
+}
+
+// The whole program as the runtime needs it: main code + one entry per extra tab (tab-bar order).
+function _bpGetProgram() {
+  _commitActiveCode();
+  return { main: _tabs[0].code, tabs: _tabs.slice(1).map(t => ({ name: t.name, code: t.code })) };
+}
+
+// Replace every tab at once (startup, New, Import). Entries with bad or duplicate names are skipped.
+function _setProject(mainCode, extraTabs, activeName) {
+  _pending = null; _armedDelete = null;
+  _tabs = [{ name: MAIN_TAB, code: String(mainCode) }];
+  const skipped = [];
+  for (const t of (Array.isArray(extraTabs) ? extraTabs : [])) {
+    const nm   = t && typeof t.name === 'string' ? t.name : '';
+    const base = nm.trim().replace(/\.bpy$/i, '');
+    const dup  = _tabs.some(x => _tabBase(x.name).toLowerCase() === base.toLowerCase());
+    if (!t || typeof t.code !== 'string' || _tabNameProblem(base) || dup) { skipped.push(nm || '(unnamed)'); continue; }
+    _tabs.push({ name: base + '.bpy', code: t.code });
+  }
+  _activeTab = _tabs.some(x => x.name === activeName) ? activeName : MAIN_TAB;
+  _loadActiveIntoEditor();
+  _renderSubtabs();
+  if (skipped.length) window.appendConsole('Skipped tab(s) with an invalid or duplicate name: ' + skipped.join(', '), 'warn');
+}
+
+function _loadSavedProject() {
+  let main = null, extra = [], active = null;
+  try { main = localStorage.getItem(_LS); } catch(e) {}
+  try { extra = JSON.parse(localStorage.getItem(_LS_TABS) || '[]'); } catch(e) { extra = []; }
+  try { active = localStorage.getItem(_LS_ACTIVE); } catch(e) {}
+  _setProject(main !== null ? main : DEFAULT_CODE, extra, active);
+}
+
+// ── Tab actions ───────────────────────────────────────────────
+function _selectTab(name) {
+  if (_pending) _pending.finish('blur');       // keep a valid name / drop an invalid one, then carry on with the click
+  if (name === _activeTab || !_getTab(name)) return;
+  _commitActiveCode();
+  _activeTab = name;
+  _loadActiveIntoEditor();
+  _renderSubtabs();
+  _saveNow();
+}
+
+function _beginNewTab() {
+  if (_pending) {                       // already naming a tab: just put the cursor back
+    const inp = $subtabs.querySelector('.subtab-input'); if (inp) inp.focus();
+    return;
+  }
+  _armedDelete = null;
+  _pending = { mode: 'new', old: null };
+  _renderSubtabs();
+}
+
+function _beginRename(name) {
+  if (_pending || name === MAIN_TAB || !_getTab(name)) return;
+  _pending = { mode: 'rename', old: name };
+  _renderSubtabs();
+}
+
+function _deleteTab(name) {
+  if (_pending) _pending.finish('blur');
+  const t = _getTab(name);
+  if (!t || name === MAIN_TAB) return;
+  if (name === _activeTab) _commitActiveCode();
+  if (t.code.trim() && _armedDelete !== name) {      // non-empty tab: ask for a second click
+    _armedDelete = name;
+    clearTimeout(_armedTimer);
+    _armedTimer = setTimeout(() => { _armedDelete = null; if (!_pending) _renderSubtabs(); }, 2500);
+    _renderSubtabs();
+    return;
+  }
+  clearTimeout(_armedTimer); _armedDelete = null;
+  const idx = _tabs.indexOf(t);
+  _tabs.splice(idx, 1);
+  if (_activeTab === name) { _activeTab = (_tabs[idx - 1] || _tabs[0]).name; _loadActiveIntoEditor(); }
+  _renderSubtabs();
+  _saveNow();
+  window.appendConsole('Deleted ' + name, 'sys');
+}
+
+// ── Naming (new tab / rename) ─────────────────────────────────
+function _showTabError(msg, anchor) {
+  $subtabMsg.textContent = msg;
+  $subtabMsg.classList.add('show');
+  const wrap = $subtabMsg.parentElement;
+  const left = anchor.getBoundingClientRect().left - wrap.getBoundingClientRect().left;
+  $subtabMsg.style.left = Math.max(0, Math.min(left, wrap.clientWidth - $subtabMsg.offsetWidth)) + 'px';
+}
+function _hideTabError() { $subtabMsg.classList.remove('show'); }
+
+// how: 'enter' | 'blur' | 'cancel'
+function _finishNameEdit(p, inp, box, how) {
+  if (_pending !== p) return;
+  const cancel = () => { _pending = null; _hideTabError(); _renderSubtabs(); };
+  if (how === 'cancel') return cancel();
+
+  const raw = inp.value;
+  if (p.mode === 'rename' && raw.trim().replace(/\.bpy$/i, '').trim() === _tabBase(p.old)) return cancel();  // unchanged
+
+  const v = validateTabName(raw, p.old);
+  if (!v.ok) {
+    if (how === 'enter') { box.classList.add('invalid'); _showTabError(v.error, box); return; }   // stay and fix it
+    if (raw.trim()) window.appendConsole((p.mode === 'new' ? 'Tab not created: ' : 'Tab not renamed: ') + v.error, 'warn');
+    return cancel();
+  }
+
+  _pending = null; _hideTabError();
+  if (p.mode === 'new') {
+    _commitActiveCode();
+    _tabs.push({ name: v.name, code: '' });
+    _activeTab = v.name;
+    _loadActiveIntoEditor();
+    window.appendConsole('Created ' + v.name + ' — use it from any tab as ' + _tabBase(v.name) + '.<function_or_variable>', 'sys');
+  } else {
+    const t = _getTab(p.old);
+    t.name = v.name;
+    if (_activeTab === p.old) _activeTab = v.name;
+    window.appendConsole('Renamed ' + p.old + ' → ' + v.name + '. Update any ' + _tabBase(p.old) + '.… references in your code.', 'sys');
+  }
+  _renderSubtabs();
+  _saveNow();
+  if (how === 'enter') $ed.focus();
+}
+
+function _nameEditor(p) {
+  const box = document.createElement('div');
+  box.className = 'subtab subtab-edit';
+  const inp = document.createElement('input');
+  inp.className = 'subtab-input'; inp.type = 'text'; inp.maxLength = 40; inp.placeholder = 'name';
+  inp.spellcheck = false; inp.autocomplete = 'off'; inp.autocapitalize = 'off';
+  inp.setAttribute('autocorrect', 'off'); inp.setAttribute('aria-label', 'Tab name');
+  inp.value = p.old ? _tabBase(p.old) : '';
+  const fit = () => { inp.style.width = Math.max(4, inp.value.length + 1) + 'ch'; };
+  fit();
+  const ext = document.createElement('span');
+  ext.className = 'subtab-ext'; ext.textContent = '.bpy';
+  box.onclick = () => inp.focus();
+  inp.addEventListener('input', () => {
+    fit();
+    const v = validateTabName(inp.value, p.old);
+    const bad = !!inp.value.trim() && !v.ok;
+    box.classList.toggle('invalid', bad);
+    if (bad) _showTabError(v.error, box); else _hideTabError();
+  });
+  inp.addEventListener('keydown', e => {
+    e.stopPropagation();                // typing a name must not reach the game's key tracking
+    if (e.key === 'Enter')       { e.preventDefault(); _finishNameEdit(p, inp, box, 'enter'); }
+    else if (e.key === 'Escape') { e.preventDefault(); _finishNameEdit(p, inp, box, 'cancel'); }
+  });
+  inp.addEventListener('keyup', e => e.stopPropagation());
+  inp.addEventListener('blur', () => _finishNameEdit(p, inp, box, 'blur'));
+  p.finish = how => _finishNameEdit(p, inp, box, how);
+  box.appendChild(inp); box.appendChild(ext);
+  return box;
+}
+
+// ── Rendering ─────────────────────────────────────────────────
+function _renderSubtabs() {
+  $subtabs.innerHTML = '';
+  const p = _pending;
+  for (const t of _tabs) {
+    if (p && p.mode === 'rename' && p.old === t.name) { $subtabs.appendChild(_nameEditor(p)); continue; }
+    const el = document.createElement('div');
+    const active = t.name === _activeTab;
+    el.className = 'subtab' + (active ? ' active' : '');
+    el.setAttribute('role', 'tab');
+    el.setAttribute('aria-selected', String(active));
+    el.dataset.tab = t.name;
+    el.title = t.name === MAIN_TAB
+      ? 'main.bpy — your program (setup / update)'
+      : t.name + ' — use it as ' + _tabBase(t.name) + '.name  (double-click to rename)';
+    const label = document.createElement('span');
+    label.textContent = t.name;
+    el.appendChild(label);
+    el.onclick = () => _selectTab(t.name);
+    el.onmousedown = e => { if (_pending) e.preventDefault(); };   // no focus loss -> the click below is not lost
+    if (t.name !== MAIN_TAB) {
+      el.ondblclick = e => { e.preventDefault(); _beginRename(t.name); };
+      const x = document.createElement('button');
+      const armed = _armedDelete === t.name;
+      x.type = 'button';
+      x.className = 'subtab-x' + (armed ? ' armed' : '');
+      x.textContent = armed ? 'delete?' : '×';
+      x.title = armed ? 'Click again to delete this tab' : 'Delete tab';
+      x.setAttribute('aria-label', 'Delete ' + t.name);
+      x.onmousedown = e => { if (_pending) e.preventDefault(); };
+      x.onclick = e => { e.stopPropagation(); _deleteTab(t.name); };
+      el.appendChild(x);
+    }
+    $subtabs.appendChild(el);
+  }
+  if (p && p.mode === 'new') $subtabs.appendChild(_nameEditor(p));
+
+  const add = document.createElement('button');
+  add.id = 'subtab-add'; add.type = 'button'; add.textContent = '+';
+  add.title = 'New tab'; add.setAttribute('aria-label', 'New tab');
+  add.onmousedown = e => e.preventDefault();      // keep the cursor in the name box
+  add.onclick = _beginNewTab;
+  $subtabs.appendChild(add);
+
+  const inp = $subtabs.querySelector('.subtab-input');
+  if (inp) { inp.focus(); inp.select(); } else _hideTabError();
+  const cur = $subtabs.querySelector('.subtab-edit') || $subtabs.querySelector('.subtab.active');
+  if (cur && cur.scrollIntoView) cur.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+
+// Make the extra tabs visible to Python as modules (see _bp_install_tabs in the prelude).
+function _bpInstallTabs(prog) {
+  const fn = pyodide.globals.get('_bp_install_tabs');
+  try { fn(JSON.stringify(prog.tabs)); } finally { fn.destroy(); }
+}
+
+// Split a .bpy file into its optional header lines and the main code.
+function _bpSplitHeaders(text) {
+  const AP = '# BOWPY_ASSETS: ', TP = '# BOWPY_TABS: ';
+  const out = { assets: null, tabs: null, code: text, errors: [] };
+  for (;;) {
+    const isA = out.code.startsWith(AP), isT = out.code.startsWith(TP);
+    if (!isA && !isT) break;
+    let nl = out.code.indexOf('\n');
+    if (nl === -1) nl = out.code.length;
+    const payload = out.code.slice((isA ? AP : TP).length, nl);
+    out.code = out.code.slice(nl + 1);
+    try {
+      const v = JSON.parse(payload);
+      if (isA) out.assets = v; else out.tabs = v;
+    } catch (e) { out.errors.push((isA ? 'Asset' : 'Tab') + ' parse error: ' + e.message); }
+  }
+  return out;
 }
 $ed.addEventListener('input', () => { syncEditor(); _schedSave(); });
 document.getElementById('fname').addEventListener('input', () => {
@@ -1232,42 +1571,6 @@ $canvas.addEventListener('mousemove', e => {
 $canvas.addEventListener('mousedown', e => { btnsHeld.add(e.button); btnsPress.add(e.button); });
 $canvas.addEventListener('mouseup',   e => { btnsHeld.delete(e.button); btnsRel.add(e.button); });
 $canvas.addEventListener('contextmenu', e => e.preventDefault());
-
-// ── Touch support ────────────────────────────────────────────
-// Maps single-finger touches onto the same mx/my/btnsHeld state used by the
-// mouse listeners above, so mouse_x()/mouse_y()/mouse_pos()/mouse_down()/
-// mouse_pressed()/mouse_released() all work on mobile/tablet taps & drags
-// (a touch is treated as MOUSE_LEFT / button 0).
-function _bpSyncTouch(e) {
-  const t = e.touches[0] || e.changedTouches[0];
-  if (!t) return;
-  const r = $canvas.getBoundingClientRect();
-  mx = t.clientX - r.left; my = t.clientY - r.top;
-}
-function _bpTouchRelease(e) {
-  // Only release the button once every finger has lifted, so a stray second
-  // touch (e.g. a resting palm) doesn't cut a drag short.
-  if (e.touches.length === 0) { btnsHeld.delete(0); btnsRel.add(0); }
-  else _bpSyncTouch(e);
-}
-$canvas.addEventListener('touchstart', e => {
-  e.preventDefault();
-  _bpSyncTouch(e);
-  btnsHeld.add(0); btnsPress.add(0);
-}, { passive: false });
-$canvas.addEventListener('touchmove', e => {
-  e.preventDefault();
-  _bpSyncTouch(e);
-}, { passive: false });
-$canvas.addEventListener('touchend', e => {
-  e.preventDefault();
-  _bpTouchRelease(e);
-}, { passive: false });
-$canvas.addEventListener('touchcancel', e => {
-  e.preventDefault();
-  _bpTouchRelease(e);
-}, { passive: false });
-
 $canvas.addEventListener('wheel', e => {
   e.preventDefault();
   if (e.deltaY < 0) wheelUp  += 1;
@@ -1357,6 +1660,23 @@ function _bpSolveHomography(srcPts, dstPts) {
   return B;
 }
 
+// True on phones / tablets, false on desktops and laptops (touch-screen laptops included).
+function _bpIsMobile() {
+  try {
+    const nav = navigator;
+    // 1. User-Agent Client Hints (Chromium)
+    if (nav.userAgentData && nav.userAgentData.mobile === true) return true;
+    // 2. Classic user-agent sniffing
+    const ua = nav.userAgent || '';
+    if (/Android|iPhone|iPad|iPod|Windows Phone|IEMobile|BlackBerry|BB10|Opera Mini|webOS|Silk|Kindle|Mobile/i.test(ua)) return true;
+    // 3. iPadOS 13+ reports itself as a Mac — tell it apart by its touch screen
+    if (/Macintosh/i.test(ua) && (nav.maxTouchPoints || 0) > 1) return true;
+    // 4. Touch-first device whose browser asked for the "desktop site"
+    if (window.matchMedia && matchMedia('(pointer: coarse)').matches && matchMedia('(hover: none)').matches) return true;
+  } catch (e) {}
+  return false;
+}
+
 window._py = {
   sw()  { return $canvas.width; },  sh()  { return $canvas.height; },
   fps() { return fpsSmooth; },      dt()  { return deltaTime; },
@@ -1364,19 +1684,6 @@ window._py = {
   mx()  { return mx; },             my()  { return my; },
   kd(k) { return keysHeld.has(k); }, kp(k) { return keysPress.has(k); }, kr(k) { return keysRel.has(k); },
   bd(b) { return btnsHeld.has(b); }, bp(b) { return btnsPress.has(b); }, br(b) { return btnsRel.has(b); },
-  vibrate(activate) {
-    if (!navigator.vibrate) return false;
-    if (activate) {
-      if (!_bpVibeTimer) {
-        navigator.vibrate(200);
-        _bpVibeTimer = setInterval(() => navigator.vibrate(200), 250);
-      }
-    } else {
-      if (_bpVibeTimer) { clearInterval(_bpVibeTimer); _bpVibeTimer = null; }
-      navigator.vibrate(0);
-    }
-    return true;
-  },
   clear(c) {
     ctx.save();
     ctx.setTransform(1,0,0,1,0,0);
@@ -1763,6 +2070,7 @@ window._py = {
   },
   surface_w(sfc) { return sfc ? sfc._canvas.width  : 0; },
   surface_h(sfc) { return sfc ? sfc._canvas.height : 0; },
+  is_mobile() { return _bpIsMobile(); },
   // ── File I/O (IDE) ────────────────────────────────────────────
   file_write(name, content) {
     const n = String(name);
@@ -2158,6 +2466,14 @@ def delta_time(): return float(_py.dt())
 def dt(): return float(_py.dt())
 def get_time(): return _tm.time()
 
+def is_mobile():
+    """Return True if the program is running on a mobile device (phone or tablet), otherwise False.
+
+    Example:
+        speed = 4 if is_mobile() else 8
+    """
+    return bool(_py.is_mobile())
+
 def key_down(k):
     if _any_focused_recorder(): return False
     return bool(_py.kd(str(k).lower()))
@@ -2186,15 +2502,6 @@ def keys_pressed():  return set(_py.keys_pressed().to_py())
 def keys_released_set(): return set(_py.keys_released().to_py())
 def mouse_buttons_held():    return set(int(b) for b in _py.btns_held().to_py())
 def mouse_buttons_pressed(): return set(int(b) for b in _py.btns_pressed().to_py())
-
-def vibrate(activate=True):
-    """Vibrate compatible devices (phones/tablets with a vibration motor).
-
-    activate=True (default) turns vibration on and keeps it running until
-    turned off; activate=False turns it off. Does nothing on desktop
-    browsers or devices without vibration support.
-    """
-    return bool(_py.vibrate(bool(activate)))
 
 def lerp(a,b,t):           return a+(b-a)*t
 def clamp(v,lo,hi):        return max(lo,min(hi,v))
@@ -2827,14 +3134,22 @@ def include(name):
             f'Asset {name!r} is not a .bpy/.py file (type={t!r})')
     code = str(info.get('text', info.get('url', '')))
 
-    # ── 1. Register any assets embedded in the file's header ─────
+    # ── 1. Register anything embedded in the file's header ───────
     # A file exported from BowPy may start with:
     #   # BOWPY_ASSETS: {"name.png": {...}, ...}
-    # Loading those assets makes nested include() and Image()/Sound()
-    # calls inside the file work correctly.
-    if code.startswith('# BOWPY_ASSETS: '):
-        nl = code.index('\\n')
-        _py.asset_register_bulk(code[len('# BOWPY_ASSETS: '):nl])
+    #   # BOWPY_TABS: [{"name": "utils.bpy", "code": "..."}, ...]
+    # Loading those makes nested include() and Image()/Sound() calls work, and
+    # gives the file's own code tabs back as modules (utils.something).
+    _hdr_assets = '# BOWPY_ASSETS: '
+    _hdr_tabs   = '# BOWPY_TABS: '
+    while code.startswith(_hdr_assets) or code.startswith(_hdr_tabs):
+        nl = code.find('\\n')
+        if nl == -1:
+            nl = len(code)
+        if code.startswith(_hdr_assets):
+            _py.asset_register_bulk(code[len(_hdr_assets):nl])
+        else:
+            _bp_install_tabs(code[len(_hdr_tabs):nl], True)
         code = code[nl + 1:]
 
     # ── 2. Strip top-level setup() / update() definitions ────────
@@ -3579,7 +3894,109 @@ def draw_surface(surface, x, y):
 
 # ── Timer-aware frame runner ───────────────────────────────────
 
+# ── Code tabs: every extra tab (e.g. utils.bpy) becomes a module (utils) ─────────
+import types as _types, keyword as _keyword
+
+_BP_API      = {}   # the untouched BowPy API; copied into every tab module (filled in below)
+_BP_TAB_MODS = {}   # tab name without .bpy -> module object
+_BP_TAB_SRC  = {}   # tab name without .bpy -> [file name, source code, state]
+
+class _BPTab(_types.ModuleType):
+    """Module object that backs one code tab."""
+    def __getattr__(self, attr):
+        # Only reached when the normal lookup fails.  If this tab has not been run yet
+        # (another tab used it first) run it now, so the order of the tabs never matters.
+        if not attr.startswith('__'):
+            src = _BP_TAB_SRC.get(self.__name__)
+            if src is not None and src[2] == 'pending':
+                _bp_exec_tab(self.__name__)
+                if attr in self.__dict__:
+                    return self.__dict__[attr]
+        raise AttributeError("module '%s' has no attribute '%s'" % (self.__name__, attr))
+
+def _bp_exec_tab(name):
+    src = _BP_TAB_SRC.get(name)
+    if src is None or src[2] != 'pending':
+        return
+    src[2] = 'running'
+    try:
+        exec(compile(src[1], src[0], 'exec'), _BP_TAB_MODS[name].__dict__)
+    except BaseException:
+        src[2] = 'failed'
+        raise
+    src[2] = 'done'
+
+def _bp_clear_tabs():
+    g = globals()
+    for n, m in list(_BP_TAB_MODS.items()):
+        if sys.modules.get(n) is m:
+            del sys.modules[n]
+        if g.get(n) is m:
+            del g[n]
+    _BP_TAB_MODS.clear()
+    _BP_TAB_SRC.clear()
+
+def _bp_tab_blocked():
+    """Names a tab may not use, because they would shadow Python itself or the BowPy API."""
+    import builtins as _bi
+    names = {k for k in _BP_RESERVED if not k.startswith('__')}
+    names.update(dir(_bi))
+    names.update(_keyword.kwlist)
+    names.update(getattr(sys, 'stdlib_module_names', ()))
+    names.update(k for k in sys.modules if '.' not in k and k not in _BP_TAB_MODS)
+    names.add('main')
+    return names
+
+def _bp_reserved_names():
+    return sorted(_bp_tab_blocked())
+
+def _bp_install_tabs(tabs_json, merge=False):
+    """Create one module per extra code tab and run it.
+
+    tabs_json is a JSON list of {"name": "utils.bpy", "code": "..."}.
+    merge=False replaces every installed tab (a normal run);
+    merge=True adds to the installed tabs (used by include()).
+    """
+    import json as _json
+    tabs = _json.loads(tabs_json)
+    if not merge:
+        _bp_clear_tabs()
+    blocked = _bp_tab_blocked()
+    g = globals()
+    fresh = []
+    for t in tabs:
+        fname = str(t.get('name', ''))
+        base = fname[:-4] if fname.lower().endswith('.bpy') else fname
+        why = None
+        if not base.isidentifier() or _keyword.iskeyword(base):
+            why = 'is not a valid name (use letters, digits and _)'
+        elif base in _BP_TAB_MODS:
+            why = 'is used by more than one tab'
+        elif base in blocked:
+            why = 'is already used by Python or BowPy'
+        if why:
+            msg = 'Tab "%s": the name "%s" %s - rename the tab.' % (fname, base, why)
+            if merge:
+                print('include(): skipped. ' + msg)
+                continue
+            raise ValueError(msg)
+        mod = _BPTab(base)
+        mod.__file__ = fname
+        mod.__dict__.update(_BP_API)
+        _BP_TAB_MODS[base] = mod
+        _BP_TAB_SRC[base] = [fname, str(t.get('code', '')), 'pending']
+        fresh.append(base)
+    for base in fresh:                      # reachable from main.bpy and by  import <name>
+        sys.modules[base] = g[base] = _BP_TAB_MODS[base]
+    for m in _BP_TAB_MODS.values():         # every tab can reach every other tab by name
+        for other, om in _BP_TAB_MODS.items():
+            if om is not m:
+                m.__dict__[other] = om
+    for base in fresh:                      # run them (a tab used earlier by another tab has already run)
+        _bp_exec_tab(base)
+
 _BP_RESERVED = set(globals().keys())
+_BP_API.update({k: v for k, v in globals().items() if not k.startswith('__')})
 _HAS_UPDATE=False; _HAS_SETUP=False
 def _check():
     global _HAS_UPDATE,_HAS_SETUP
@@ -3617,14 +4034,16 @@ async function initPyodide() {
   try {
     pyodide = await loadPyodide();
     await pyodide.runPythonAsync(PRELUDE);
+    // Names a tab may not use (Python + BowPy API) — checked live while a tab is being named
+    try {
+      const _pr = pyodide.runPython('_bp_reserved_names()');
+      try { _bpReservedNames = new Set(_pr.toJs()); } finally { _pr.destroy(); }
+    } catch(e) {}
     setStatus('Ready', 's-ready');
     $runBtn.disabled = false;
     document.getElementById('hint').style.display = '';
-    const _saved = (() => { try { return localStorage.getItem(_LS); } catch(e) { return null; } })();
-    $ed.value = (_saved !== null) ? _saved : DEFAULT_CODE;
     const _savedName = (() => { try { return localStorage.getItem(_LS_NAME); } catch(e) { return null; } })();
     if (_savedName !== null) document.getElementById('fname').value = _savedName;
-    syncEditor();
     window.appendConsole('Python ready — run help() to see the full API.', 'ok');
   } catch(err) {
     setStatus('Failed to load', 's-err');
@@ -3668,15 +4087,18 @@ function frame(ts) {
 async function runCode() {
   if (running) stopCode();
   clearCon();
-  try { localStorage.setItem(_LS, $ed.value); } catch(e) {}
+  _saveNow();
   $runBtn.disabled = true; $stpBtn.disabled = false;
   switchTab('screen'); fitCanvas();
   ctx.clearRect(0, 0, $canvas.width, $canvas.height);
   running = true; setStatus('Running', 's-run');
   try {
-    window._bpLastUserCode = $ed.value;
+    const prog = _bpGetProgram();
+    window._bpLastProgram = prog;
+    window._bpLastUserCode = prog.main;
     pyodide.runPython('_reset_controlled()');
-    await pyodide.runPythonAsync($ed.value);
+    _bpInstallTabs(prog);   // every extra tab becomes a module (utils.bpy -> utils)
+    await pyodide.runPythonAsync(prog.main);
     pyodide.runPython('_check()');
     if (pyodide.runPython('_HAS_UPDATE')) {
       pyodide.runPython('_setup()');
@@ -3718,8 +4140,6 @@ function stopCode(msg = true) {
     }
     window._bpActiveNodes = [];
   }
-  if (_bpVibeTimer) { clearInterval(_bpVibeTimer); _bpVibeTimer = null; }
-  if (navigator.vibrate) navigator.vibrate(0);
   $runBtn.disabled = false; $stpBtn.disabled = true;
   setStatus('Ready', 's-ready');
   if (msg) window.appendConsole('— stopped —', 'sys');
@@ -3728,8 +4148,10 @@ function stopCode(msg = true) {
 window._bp_reset = function() {
   _resetRuntimeState();
   ctx.clearRect(0, 0, $canvas.width, $canvas.height);
-  const code = window._bpCurrentCode || $ed.value;
+  const prog = _bpGetProgram();
+  const code = window._bpCurrentCode || prog.main;
   try {
+    _bpInstallTabs(prog);
     pyodide.runPython(code);
     pyodide.runPython('_check()');
     if (pyodide.runPython('_HAS_SETUP')) pyodide.runPython('_setup()');
@@ -3749,6 +4171,7 @@ for _k in list(globals().keys()):
 `);
   if (window._bpLastUserCode !== undefined) {
     pyodide.runPython('_reset_controlled()');
+    if (window._bpLastProgram) _bpInstallTabs(window._bpLastProgram);
     await pyodide.runPythonAsync(window._bpLastUserCode);
     pyodide.runPython('__bp_restore_keep(js._bpResetSnapshot)');
     pyodide.runPython('_check()');
@@ -3810,7 +4233,7 @@ def update():
 //  Import / Export
 // ══════════════════════════════════════════════════════════════
 async function exportFile() {
-  const code = $ed.value;
+  const prog = _bpGetProgram();
   const raw  = (document.getElementById('fname').value || 'sketch').trim();
   const slug = raw.replace(/\.bpy$/i, '').replace(/[<>:"/\\|?*]/g, '_') || 'sketch';
   // Embed asset store as a JSON comment block at the top of the file
@@ -3820,7 +4243,9 @@ async function exportFile() {
     for (const [name, rec] of _bpAssets) assetObj[name] = rec;
     assetBlock = '# BOWPY_ASSETS: ' + JSON.stringify(assetObj) + '\n';
   }
-  const blob = new Blob([assetBlock + code], { type: 'text/plain' });
+  // Extra code tabs travel in a second header line (restored by Import, and by include())
+  const tabBlock = prog.tabs.length ? '# BOWPY_TABS: ' + JSON.stringify(prog.tabs) + '\n' : '';
+  const blob = new Blob([assetBlock + tabBlock + prog.main], { type: 'text/plain' });
   if (window.showSaveFilePicker) {
     try {
       const fh = await window.showSaveFilePicker({
@@ -3858,10 +4283,9 @@ function newFile() {
     _newClickTimer = setTimeout(() => { _newClicks=0; btn.textContent='✦ New'; btn.className='btn btn-io'; }, 2500);
   } else {
     _newClicks = 0; btn.textContent = '✦ New'; btn.className = 'btn btn-io';
-    $ed.value = DEFAULT_CODE;
+    _setProject(DEFAULT_CODE, [], MAIN_TAB);   // back to a single main.bpy tab
     document.getElementById('fname').value = 'sketch';
-    try { localStorage.removeItem(_LS); } catch(e) {}
-    syncEditor();
+    try { localStorage.removeItem(_LS); localStorage.removeItem(_LS_TABS); localStorage.removeItem(_LS_ACTIVE); } catch(e) {}
     switchTab('code');
     window.appendConsole('New file created.', 'sys');
   }
@@ -3880,14 +4304,11 @@ function importFile() {
     }
     const reader = new FileReader();
     reader.onload = ev => {
-      let text = ev.target.result;
-      // Parse embedded asset block if present
-      if (text.startsWith('# BOWPY_ASSETS: ')) {
-        const nl = text.indexOf('\n');
-        const assetJson = text.slice('# BOWPY_ASSETS: '.length, nl);
-        text = text.slice(nl + 1);
+      const parsed = _bpSplitHeaders(ev.target.result);   // optional # BOWPY_ASSETS / # BOWPY_TABS header lines
+      parsed.errors.forEach(m => window.appendConsole(m, 'err'));
+      if (parsed.assets && typeof parsed.assets === 'object') {
         try {
-          const assetObj = JSON.parse(assetJson);
+          const assetObj = parsed.assets;
           for (const [name, raw] of Object.entries(assetObj)) {
             const rec = _normalizeAssetRecord(name, raw);
             if (rec) { _bpAssets.set(name, rec); try { localStorage.setItem('bpa:' + name, JSON.stringify(rec)); } catch(e) {} }
@@ -3895,8 +4316,9 @@ function importFile() {
           window.appendConsole('Loaded ' + Object.keys(assetObj).length + ' embedded asset(s).', 'ok');
         } catch(e) { window.appendConsole('Asset parse error: ' + e.message, 'err'); }
       }
-      $ed.value = text;
-      syncEditor();
+      _setProject(parsed.code, parsed.tabs, MAIN_TAB);
+      if (_tabs.length > 1) window.appendConsole('Loaded ' + (_tabs.length - 1) + ' extra tab(s).', 'ok');
+      _saveNow();
       switchTab('code');
       const baseName = file.name.replace(/\.(bpy|py)$/i, '');
       document.getElementById('fname').value = baseName;
@@ -3921,11 +4343,15 @@ function buildFile() {
   for (const [name, rec] of _bpAssets) assetObj[name] = rec;
   const assetJson = JSON.stringify(assetObj);
 
-  // Embed the user code safely inside a JS template literal
-  const userCode = $ed.value
+  // Embed the code safely inside JS template literals: the main code, and one JSON list for the extra tabs
+  const prog = _bpGetProgram();
+  const _esc = s => String(s)
     .replace(/\\/g, '\\\\')
     .replace(/`/g, '\\`')
-    .replace(/\$\{/g, '\\${');
+    .replace(/\$\{/g, '\\${')
+    .replace(/<\/(script)/gi, '<\\/$1');
+  const userCode = _esc(prog.main);
+  const userTabs = _esc(JSON.stringify(prog.tabs));
   const prelude = PRELUDE
     .replace(/\\/g, '\\\\')
     .replace(/`/g, '\\`')
@@ -3941,7 +4367,7 @@ function buildFile() {
 <style>
 *{margin:0;padding:0;box-sizing:border-box;}
 html,body{width:100%;height:100%;overflow:hidden;background:#000;}
-#screen{display:none;position:fixed;top:0;left:0;width:100%;height:100%;touch-action:none;}
+#screen{display:none;position:fixed;top:0;left:0;width:100%;height:100%;}
 #load{
   position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
   background:#0b0d11;color:#6a738f;font:13px/1 'IBM Plex Mono',monospace;
@@ -3960,13 +4386,14 @@ const $canvas=document.getElementById('screen');
 let ctx=$canvas.getContext('2d');
 const _mainCtx=ctx;let _bpTargetCanvas=$canvas;
 let running=false,lastTs=0,deltaTime=0.016,fpsSmooth=60,fpsLimit=0;
+let pyodide=null;
 const keysHeld=new Set(),keysPress=new Set(),keysRel=new Set();
 let mx=0,my=0;
 const btnsHeld=new Set(),btnsPress=new Set(),btnsRel=new Set();
 let wheelUp=0,wheelDown=0;
 let _bpCapsLock=false;
-let _bpVibeTimer=null;
 const _builtAssets=__BUILT_ASSETS__;
+function _bpIsMobile(){try{const n=navigator;if(n.userAgentData&&n.userAgentData.mobile===true)return true;const ua=n.userAgent||'';if(/Android|iPhone|iPad|iPod|Windows Phone|IEMobile|BlackBerry|BB10|Opera Mini|webOS|Silk|Kindle|Mobile/i.test(ua))return true;if(/Macintosh/i.test(ua)&&(n.maxTouchPoints||0)>1)return true;if(window.matchMedia&&matchMedia('(pointer: coarse)').matches&&matchMedia('(hover: none)').matches)return true;}catch(e){}return false;}
 function _assetRecord(name){const v=_builtAssets[String(name)];return v&&typeof v==='object'?v:(v?{url:v,type:(String(v).startsWith('data:image')?'image':String(v).startsWith('data:audio')?'audio':'text'),text:String(v)}:null);}
 function _assetText(name){const a=_assetRecord(name);return a?a.text!=null?String(a.text):(a.url!=null?String(a.url):null):null;}
 function fitCanvas(){$canvas.width=window.innerWidth;$canvas.height=window.innerHeight;}
@@ -3975,12 +4402,6 @@ $canvas.addEventListener('mousemove',e=>{mx=e.clientX;my=e.clientY;});
 $canvas.addEventListener('mousedown',e=>{btnsHeld.add(e.button);btnsPress.add(e.button);});
 $canvas.addEventListener('mouseup',e=>{btnsHeld.delete(e.button);btnsRel.add(e.button);});
 $canvas.addEventListener('contextmenu',e=>e.preventDefault());
-function _bpSyncTouch(e){const t=e.touches[0]||e.changedTouches[0];if(!t)return;const r=$canvas.getBoundingClientRect();mx=t.clientX-r.left;my=t.clientY-r.top;}
-function _bpTouchRelease(e){if(e.touches.length===0){btnsHeld.delete(0);btnsRel.add(0);}else _bpSyncTouch(e);}
-$canvas.addEventListener('touchstart',e=>{e.preventDefault();_bpSyncTouch(e);btnsHeld.add(0);btnsPress.add(0);},{passive:false});
-$canvas.addEventListener('touchmove',e=>{e.preventDefault();_bpSyncTouch(e);},{passive:false});
-$canvas.addEventListener('touchend',e=>{e.preventDefault();_bpTouchRelease(e);},{passive:false});
-$canvas.addEventListener('touchcancel',e=>{e.preventDefault();_bpTouchRelease(e);},{passive:false});
 document.addEventListener('keydown',e=>{if(e.getModifierState)_bpCapsLock=e.getModifierState('CapsLock');const k=e.key.toLowerCase();if(!keysHeld.has(k))keysPress.add(k);keysHeld.add(k);});
 document.addEventListener('keyup',e=>{const k=e.key.toLowerCase();keysHeld.delete(k);keysRel.add(k);});
 window.appendConsole=(t,type)=>{if(type==='err')console.error(t);else console.log(t);};
@@ -4000,11 +4421,11 @@ function _bpSourcePixels(img){let cached=_bpImgDataCache.get(img);if(cached&&cac
 function _bpSolveHomography(srcPts,dstPts){const A=[];const B=[];for(let i=0;i<4;i++){const sx=srcPts[i][0],sy=srcPts[i][1],dx=dstPts[i][0],dy=dstPts[i][1];A.push([dx,dy,1,0,0,0,-sx*dx,-sx*dy]);B.push(sx);A.push([0,0,0,dx,dy,1,-sy*dx,-sy*dy]);B.push(sy);}for(let i=0;i<8;i++){let piv=i;for(let r=i+1;r<8;r++)if(Math.abs(A[r][i])>Math.abs(A[piv][i]))piv=r;if(Math.abs(A[piv][i])<1e-12)return null;if(piv!==i){const tr=A[i];A[i]=A[piv];A[piv]=tr;const tb=B[i];B[i]=B[piv];B[piv]=tb;}const div=A[i][i];for(let j=i;j<8;j++)A[i][j]/=div;B[i]/=div;for(let r=0;r<8;r++){if(r===i)continue;const f=A[r][i];if(!f)continue;for(let j=i;j<8;j++)A[r][j]-=f*A[i][j];B[r]-=f*B[i];}}return B;}
 window._py={
   sw(){return $canvas.width;},sh(){return $canvas.height;},
+  is_mobile(){return _bpIsMobile();},
   fps(){return fpsSmooth;},dt(){return deltaTime;},limit_fps(fps){fpsLimit=Number(fps)||0;return fpsLimit;},
   mx(){return mx;},my(){return my;},
   kd(k){return keysHeld.has(k);},kp(k){return keysPress.has(k);},kr(k){return keysRel.has(k);},
   bd(b){return btnsHeld.has(b);},bp(b){return btnsPress.has(b);},br(b){return btnsRel.has(b);},
-  vibrate(activate){if(!navigator.vibrate)return false;if(activate){if(!_bpVibeTimer){navigator.vibrate(200);_bpVibeTimer=setInterval(()=>navigator.vibrate(200),250);}}else{if(_bpVibeTimer){clearInterval(_bpVibeTimer);_bpVibeTimer=null;}navigator.vibrate(0);}return true;},
   clear(c){ctx.save();ctx.setTransform(1,0,0,1,0,0);ctx.fillStyle=c;ctx.fillRect(0,0,_bpTargetCanvas.width,_bpTargetCanvas.height);ctx.restore();},
   rect(x,y,w,h,c,f,lw){if(f){ctx.fillStyle=c;ctx.fillRect(x,y,w,h);}else{ctx.strokeStyle=c;ctx.lineWidth=lw;ctx.strokeRect(x,y,w,h);}},
   circ(x,y,r,c,f,lw){ctx.beginPath();ctx.arc(x,y,r,0,6.283185307);if(f){ctx.fillStyle=c;ctx.fill();}else{ctx.strokeStyle=c;ctx.lineWidth=lw;ctx.stroke();}},
@@ -4055,16 +4476,18 @@ window._py={
 };
 const PRELUDE=\`${prelude}\`;
 const USER_CODE=\`${userCode}\`;
+const USER_TABS=\`${userTabs}\`;
+function _bpInstallTabs(){const f=pyodide.globals.get('_bp_install_tabs');try{f(USER_TABS);}finally{f.destroy();}}
 window._bp_reset = function() {
   keysHeld.clear();keysPress.clear();keysRel.clear();
   btnsHeld.clear();btnsPress.clear();btnsRel.clear();
   lastTs=performance.now();deltaTime=0.016;fpsSmooth=60;
   _applyScreenTransform();
   if(window._bpActiveNodes){for(const n of window._bpActiveNodes){try{n.src.stop(0);}catch(e){}}window._bpActiveNodes=[];}
-  if(_bpVibeTimer){clearInterval(_bpVibeTimer);_bpVibeTimer=null;}if(navigator.vibrate)navigator.vibrate(0);
   ctx.clearRect(0, 0, $canvas.width, $canvas.height);
   const code = USER_CODE;
   try {
+    _bpInstallTabs();
     pyodide.runPython(code);
     pyodide.runPython('_check()');
     if (pyodide.runPython('_HAS_SETUP')) pyodide.runPython('_setup()');
@@ -4074,10 +4497,11 @@ window._bp_reset = function() {
 };
 
 async function main(){
-  const pyodide=await loadPyodide();
+  pyodide=await loadPyodide();
   await pyodide.runPythonAsync(PRELUDE);
   running=true;
   pyodide.runPython('_reset_controlled()');
+  _bpInstallTabs();
   await pyodide.runPythonAsync(USER_CODE);
   pyodide.runPython('_check()');
   pyodide.runPython('_setup()');
@@ -4116,7 +4540,7 @@ main().catch(e=>{document.getElementById('load-txt').textContent='Error: '+e.mes
   a.download = slug + '.html';
   a.click();
   URL.revokeObjectURL(a.href);
-  window.appendConsole('Built: ' + slug + '.html (' + _bpAssets.size + ' assets embedded)', 'ok');
+  window.appendConsole('Built: ' + slug + '.html (' + _bpAssets.size + ' assets, ' + (prog.tabs.length + 1) + ' code tab(s) embedded)', 'ok');
 }
 
 
@@ -4272,6 +4696,7 @@ def update():
         <div class="wiki-member" onclick="openWikiPage('delta_time')"><div class="wiki-member-name">delta_time() / dt()</div><div class="wiki-member-desc">Seconds elapsed since last frame.</div></div>
         <div class="wiki-member" onclick="openWikiPage('get_time')"><div class="wiki-member-name">get_time()</div><div class="wiki-member-desc">Wall-clock seconds since epoch.</div></div>
         <div class="wiki-member" onclick="openWikiPage('limit_fps')"><div class="wiki-member-name">limit_fps()</div><div class="wiki-member-desc">Cap the game loop to a maximum FPS.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('is_mobile_fn')"><div class="wiki-member-name">is_mobile()</div><div class="wiki-member-desc">True when running on a phone or tablet.</div></div>
         <div class="wiki-member" onclick="openWikiPage('reset_fn')"><div class="wiki-member-name">reset()</div><div class="wiki-member-desc">Restart the program, optionally preserving globals.</div></div>
         <div class="wiki-member" onclick="openWikiPage('screen_pos_fn')"><div class="wiki-member-name">screen_pos()</div><div class="wiki-member-desc">Get or set the canvas offset position.</div></div>
         <div class="wiki-member" onclick="openWikiPage('screen_rot_fn')"><div class="wiki-member-name">screen_rot()</div><div class="wiki-member-desc">Get or set the canvas rotation.</div></div>
@@ -4360,6 +4785,38 @@ def update():
       <div class="wiki-ref-list">
         <div class="wiki-ref" onclick="openWikiPage('H')">H()</div>
         <div class="wiki-ref" onclick="openWikiPage('screen_width')">screen_width()</div>
+      </div>
+    `
+  },
+
+  "is_mobile_fn": {
+    title: "is_mobile()",
+    category: "Utils",
+    type: "function",
+    desc: "Returns True when the program is running on a mobile device (phone or tablet), otherwise False.",
+    signature: `<span class="ws-fn">is_mobile</span><span class="ws-pun">() →</span> <span class="ws-cls">bool</span>`,
+    body: `
+      <p class="wiki-p">Use <code>is_mobile()</code> to adapt a program to the device it runs on, for example bigger buttons and text on a phone, or different controls. It works in the editor and in exported (built) HTML games.</p>
+
+      <h2 class="wiki-h2">How It Decides</h2>
+      <p class="wiki-p">It returns <code>True</code> for phones and tablets (Android, iPhone, iPad, including iPads that ask for the desktop site) and for touch-first devices whose main input is a finger. Desktops and laptops return <code>False</code>, even when they have a touch screen.</p>
+
+      <div class="wiki-example">
+        <div class="wiki-example-title">Pick a UI size for the device</div>
+<pre>
+def update():
+    clear("black")
+    size = 28 if is_mobile() else 14
+    label = "Mobile device" if is_mobile() else "Desktop"
+    draw_text(8, 8, label, "lime", size)
+</pre>
+      </div>
+
+      <div class="wiki-note"><b>Tip:</b> Phones usually have no physical keyboard, so offer controls that can be tapped.</div>
+
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('W')">W()</div>
+        <div class="wiki-ref" onclick="openWikiPage('H')">H()</div>
       </div>
     `
   },
@@ -6312,11 +6769,6 @@ def update():
         <div class="wiki-member" onclick="openWikiPage('mouse_wheel_fn')"><div class="wiki-member-name">mouse_wheel()</div><div class="wiki-member-desc">Scroll wheel direction this frame.</div></div>
         <div class="wiki-member" onclick="openWikiPage('mouse_btn_sets')"><div class="wiki-member-name">mouse_buttons_held/pressed()</div><div class="wiki-member-desc">Set of currently held/pressed button indices.</div></div>
       </div>
-      <h2 class="wiki-h2">Touch &amp; Device</h2>
-      <div class="wiki-members">
-        <div class="wiki-member" onclick="openWikiPage('vibrate_fn')"><div class="wiki-member-name">vibrate()</div><div class="wiki-member-desc">Turn haptic vibration on/off on compatible devices.</div></div>
-      </div>
-      <p class="wiki-p">On touchscreens, taps and drags on the screen also drive <code>mouse_x()</code>, <code>mouse_y()</code>, <code>mouse_down()</code>, <code>mouse_pressed()</code> and <code>mouse_released()</code> — a touch is treated as the left mouse button (button 0).</p>
     `
   },
 
@@ -6510,29 +6962,6 @@ def update():
     held = mouse_buttons_held()
     label = "Held: " + str(held) if held else "No buttons"
     draw_text(20, 20, label, "white", 14)
-</pre>
-      </div>
-    `
-  },
-
-  "vibrate_fn": {
-    title: "vibrate()",
-    category: "Input",
-    type: "function",
-    desc: "Turns haptic vibration on or off on compatible devices (phones/tablets). No effect where vibration isn't supported, like most desktop browsers.",
-    signature: `<span class="ws-fn">vibrate</span><span class="ws-pun">(</span><span class="ws-param">activate</span><span class="ws-pun">=</span><span class="ws-lit">True</span><span class="ws-pun">) →</span> <span class="ws-cls">bool</span>`,
-    body: `
-      <p class="wiki-p">Call <code>vibrate()</code> or <code>vibrate(True)</code> to start vibrating, and <code>vibrate(False)</code> to stop it. Vibration also stops automatically when the program is stopped or reset, so it never keeps buzzing after your game ends.</p>
-      <div class="wiki-example">
-        <div class="wiki-example-title">Buzz while the mouse/finger is held down</div>
-<pre>
-def update():
-    clear("black")
-    if mouse_pressed():
-        vibrate(True)
-    if mouse_released():
-        vibrate(False)
-    draw_circle(mouse_x(), mouse_y(), 20, "yellow")
 </pre>
       </div>
     `
@@ -8524,6 +8953,7 @@ def update():
 
       <div class="wiki-members">
         <div class="wiki-member" onclick="openWikiPage('include_fn')"><div class="wiki-member-name">include()</div><div class="wiki-member-desc">Execute a .bpy/.py file and import its globals.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('tabs_guide')"><div class="wiki-member-name">Code Tabs</div><div class="wiki-member-desc">Split your program across tabs and use them as name.function.</div></div>
       </div>
 
       <h2 class="wiki-h2">How It Works</h2>
@@ -8586,6 +9016,63 @@ def update():
       </div>
 
       <div class="wiki-note"><b>Note:</b> <code>include()</code> raises <code>FileNotFoundError</code> if the asset is missing and <code>TypeError</code> if the asset is not a <code>.bpy</code> or <code>.py</code> file.</div>
+    `
+  },
+
+  "tabs_guide": {
+    title: "Code Tabs",
+    category: "Libraries",
+    type: "guide",
+    desc: "Split your program across several tabs. Every tab except main.bpy works like a module: use it as tab_name.function_or_variable.",
+    body: `
+      <p class="wiki-p">The Code view starts with a single tab, <code>main.bpy</code>. This is your program: its <code>setup()</code> and <code>update()</code> are the ones BowPy runs. Press the <b>+</b> at the end of the tab bar to add another tab, then type its name and press Enter.</p>
+
+      <h2 class="wiki-h2">Using Another Tab</h2>
+      <p class="wiki-p">A tab named <code>utils.bpy</code> is available in every other tab as <code>utils</code>. Reach anything inside it with <code>utils.</code> followed by the function or variable name.</p>
+
+      <div class="wiki-example">
+        <div class="wiki-example-title">In the utils tab</div>
+<pre>
+GRAVITY = 0.5
+
+def draw_label(x, y, text):
+    draw_text(x, y, text, "white", 16)
+</pre>
+      </div>
+
+      <div class="wiki-example">
+        <div class="wiki-example-title">In the main tab</div>
+<pre>
+def update():
+    clear("black")
+    utils.draw_label(20, 20, "Gravity: " + str(utils.GRAVITY))
+</pre>
+      </div>
+
+      <p class="wiki-p">Normal Python imports work too: <code>import utils</code> and <code>from utils import draw_label</code>.</p>
+
+      <h2 class="wiki-h2">Naming Rules</h2>
+      <p class="wiki-p">The <code>.bpy</code> ending is added for you. A tab name is rejected when:</p>
+      <table class="wiki-param-table">
+        <tr><th>Example</th><th>Problem</th><th>Why</th></tr>
+        <tr><td>main</td><td>reserved</td><td>The <code>main.bpy</code> tab already exists and is your program.</td></tr>
+        <tr><td>Utils</td><td>duplicate</td><td>Names must be unique, and upper and lower case count as the same (so <code>Utils</code> clashes with <code>utils</code>).</td></tr>
+        <tr><td>my tab, 1st, a-b</td><td>invalid</td><td>The name is used as <code>name.function</code>, so it must be a valid Python name: letters, digits and <code>_</code>, not starting with a digit.</td></tr>
+        <tr><td>class, math, draw_rect</td><td>taken</td><td>Python keywords, and names that Python or BowPy already use, cannot be reused because the tab would replace them.</td></tr>
+      </table>
+      <p class="wiki-p">Double-click a tab to rename it, and use its <b>×</b> to delete it. Renaming does not update the <code>name.</code> references in your code.</p>
+
+      <h2 class="wiki-h2">How Tabs Run</h2>
+      <p class="wiki-p">Each tab runs once, from top to bottom, when you press Run and before <code>main.bpy</code> starts. The order of the tabs does not matter: if one tab uses another at the top level, the other one is run first.</p>
+      <p class="wiki-p">A tab can use the whole BowPy API (<code>draw_rect()</code>, <code>Image()</code>, <code>Vec2</code> and so on) and can use the other tabs, but it cannot see the variables of <code>main.bpy</code>. Pass values in as arguments, or keep shared values in a tab (<code>utils.score = 10</code>). A <code>setup()</code> or <code>update()</code> inside another tab is just a normal function: call it yourself, for example <code>enemy.update()</code>.</p>
+
+      <h2 class="wiki-h2">Export and Build</h2>
+      <p class="wiki-p">Export saves every tab inside the <code>.bpy</code> file, and Import brings them all back. Build embeds every tab in the finished HTML game. If you <code>include()</code> a file that was exported with tabs, its tabs become available as modules too (a tab is skipped if one with the same name already exists).</p>
+
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('include_fn')">include()</div>
+        <div class="wiki-ref" onclick="openWikiPage('libraries_overview')">Libraries Overview</div>
+      </div>
     `
   }
 
@@ -8690,6 +9177,7 @@ openWikiPage('home');
 //  Boot
 // ══════════════════════════════════════════════════════════════
 fitCanvas();
+_loadSavedProject();   // restore main.bpy + extra tabs (needs DEFAULT_CODE, so it runs here)
 initPyodide();
 </script>
 </body>
