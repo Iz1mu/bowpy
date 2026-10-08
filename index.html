@@ -274,7 +274,7 @@ kbd{
 
 /* ── SCREEN TAB ── */
 #screen-tab{background:#000;position:relative;overflow:hidden;}
-#screen{display:block;position:absolute;top:0;left:0;}
+#screen{display:block;position:absolute;top:0;left:0;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;}
 
 /* ── ASSETS TAB ── */
 #assets-tab{flex-direction:column;background:var(--bg2);}
@@ -1571,6 +1571,35 @@ $canvas.addEventListener('mousemove', e => {
 $canvas.addEventListener('mousedown', e => { btnsHeld.add(e.button); btnsPress.add(e.button); });
 $canvas.addEventListener('mouseup',   e => { btnsHeld.delete(e.button); btnsRel.add(e.button); });
 $canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+// ── Touch: one finger acts as the left mouse button ──────────
+// Browsers only send their emulated mousedown/mouseup AFTER the finger has lifted (both at once), so without
+// this mouse_down() could never be True while a finger is held. Touch events are handled directly instead,
+// and preventDefault() stops the emulated mouse events so nothing fires twice (or scrolls/zooms the page).
+let _touchId = null;
+const _findTouch = list => { for (const t of list) if (t.identifier === _touchId) return t; return null; };
+function _touchPos(t) { const r = $canvas.getBoundingClientRect(); mx = t.clientX - r.left; my = t.clientY - r.top; }
+$canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  if (e.touches.length === e.changedTouches.length) _touchId = null;   // first finger down: forget any stale touch
+  if (_touchId !== null) return;                                        // a finger is already acting as the mouse
+  const t = e.changedTouches[0];
+  _touchId = t.identifier; _touchPos(t);
+  btnsHeld.add(0); btnsPress.add(0);
+}, { passive: false });
+$canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  const t = _findTouch(e.changedTouches); if (t) _touchPos(t);
+}, { passive: false });
+const _touchEnd = e => {
+  if (e.cancelable) e.preventDefault();
+  const t = _findTouch(e.changedTouches); if (!t) return;
+  _touchPos(t); _touchId = null;
+  btnsHeld.delete(0); btnsRel.add(0);
+};
+$canvas.addEventListener('touchend', _touchEnd, { passive: false });
+$canvas.addEventListener('touchcancel', _touchEnd, { passive: false });
+
 $canvas.addEventListener('wheel', e => {
   e.preventDefault();
   if (e.deltaY < 0) wheelUp  += 1;
@@ -2203,7 +2232,7 @@ def _pts(points):
             out.append([float(p[0]), float(p[1])])
     return out
 
-def regular_polygon(cx, cy, radius, sides, angle_offset=0):
+def regular_poly(cx, cy, radius, sides, angle_offset=0):
     """Return a tuple of (x,y) tuples for a regular polygon.
     cx,cy = center;  radius = circumradius;  sides = number of sides;
     angle_offset = rotation in radians (0 = first vertex pointing right)."""
@@ -2225,7 +2254,7 @@ def _to_pts(polygon):
             out.append((float(p[0]), float(p[1])))
     return out
 
-def point_in_area(point, polygon):
+def point_in_poly(point, polygon):
     """Return True if *point* (Vec2 or (x,y)) lies inside *polygon*.
 
     *polygon* is a sequence of Vec2 / (x,y) tuples describing the vertices
@@ -2235,9 +2264,9 @@ def point_in_area(point, polygon):
     Uses the ray-casting (even-odd rule) algorithm.
 
     Example:
-        pts = regular_polygon(200, 200, 80, 6)
-        if point_in_area(mouse_pos(), pts):
-            draw_polygon(pts, GREEN)
+        pts = regular_poly(200, 200, 80, 6)
+        if point_in_poly(mouse_pos(), pts):
+            draw_poly(pts, GREEN)
     """
     if hasattr(point, 'x') and hasattr(point, 'y'):
         px, py = float(point.x), float(point.y)
@@ -2298,7 +2327,7 @@ def _segs_intersect(ax, ay, bx, by, cx, cy, dx, dy):
     return False
 
 
-def area_in_area(poly, *polys):
+def poly_in_poly(poly, *polys):
     """Return True if *poly* overlaps any of the other polygons in *polys*.
 
     Works for both convex and concave polygons.  Two polygons are considered
@@ -2309,13 +2338,13 @@ def area_in_area(poly, *polys):
     Each polygon is a sequence of Vec2 / (x,y) vertices.
 
     Example:
-        player = regular_polygon(px, py, 20, 4)
-        walls  = [regular_polygon(wx, wy, 30, 6) for wx, wy in wall_pos]
-        if area_in_area(player, *walls):
-            draw_polygon(player, RED)
+        player = regular_poly(px, py, 20, 4)
+        walls  = [regular_poly(wx, wy, 30, 6) for wx, wy in wall_pos]
+        if poly_in_poly(player, *walls):
+            draw_poly(player, RED)
 
     You can also test against a single other polygon:
-        if area_in_area(poly_a, poly_b):
+        if poly_in_poly(poly_a, poly_b):
             ...
     """
     a = _to_pts(poly)
@@ -2347,15 +2376,146 @@ def area_in_area(poly, *polys):
             return True
 
         # 2. Containment: a single vertex of A inside B (A ⊂ B)
-        if point_in_area(a[0], b):
+        if point_in_poly(a[0], b):
             return True
 
         # 3. Containment: a single vertex of B inside A (B ⊂ A)
-        if point_in_area(b[0], a):
+        if point_in_poly(b[0], a):
             return True
 
     return False
 
+
+def _rect_bounds(rx, ry, rw, rh):
+    """Return (left, top, right, bottom) of a rectangle; a negative width/height is allowed."""
+    x1, x2 = sorted((float(rx), float(rx) + float(rw)))
+    y1, y2 = sorted((float(ry), float(ry) + float(rh)))
+    return x1, y1, x2, y2
+
+def point_in_rect(px, py, rx, ry, rw, rh):
+    """Return True if the point (px, py) lies inside the rectangle.
+
+    (rx, ry) is the top-left corner, rw / rh the width and height.
+    A point exactly on an edge counts as inside.
+
+    Example:
+        if point_in_rect(mouse_x(), mouse_y(), 100, 100, 200, 120):
+            draw_rect(100, 100, 200, 120, GREEN)
+    """
+    x1, y1, x2, y2 = _rect_bounds(rx, ry, rw, rh)
+    return x1 <= float(px) <= x2 and y1 <= float(py) <= y2
+
+def rect_in_rect(x1, y1, w1, h1, x2, y2, w2, h2):
+    """Return True if the first rectangle intersects the second one.
+
+    Each rectangle is (x, y, width, height) with (x, y) as its top-left corner.
+    Rectangles that only touch along an edge, and rectangles where one is
+    completely inside the other, both count as intersecting.
+
+    Example:
+        if rect_in_rect(px, py, 32, 32, wall_x, wall_y, 64, 64):
+            print("hit a wall")
+    """
+    al, at, ar, ab = _rect_bounds(x1, y1, w1, h1)
+    bl, bt, br, bb = _rect_bounds(x2, y2, w2, h2)
+    return al <= br and bl <= ar and at <= bb and bt <= ab
+
+def poly_in_rect(points, rx, ry, rw, rh):
+    """Return True if the polygon intersects the rectangle.
+
+    *points* is a sequence of Vec2 / (x, y) vertices (convex or concave).
+    Touching, crossing, and one shape being completely inside the other all
+    count as intersecting.
+
+    Example:
+        tri = regular_poly(mouse_x(), mouse_y(), 40, 3)
+        if poly_in_rect(tri, 150, 100, 200, 120):
+            draw_poly(tri, RED)
+    """
+    x1, y1, x2, y2 = _rect_bounds(rx, ry, rw, rh)
+    return poly_in_poly(points, [(x1, y1), (x2, y1), (x2, y2), (x1, y2)])
+
+def point_in_circle(px, py, cx, cy, r):
+    """Return True if the point (px, py) lies inside the circle centred at (cx, cy) with radius r.
+
+    A point exactly on the edge counts as inside.
+
+    Example:
+        if point_in_circle(mouse_x(), mouse_y(), 200, 150, 60):
+            draw_circle(200, 150, 60, GREEN)
+    """
+    dx = float(px) - float(cx)
+    dy = float(py) - float(cy)
+    r = abs(float(r))
+    return dx * dx + dy * dy <= r * r
+
+def circle_in_circle(x1, y1, r1, x2, y2, r2):
+    """Return True if the first circle overlaps the second circle.
+
+    Circles that only touch, and a circle completely inside the other one,
+    both count as overlapping.
+
+    Example:
+        if circle_in_circle(player_x, player_y, 16, coin_x, coin_y, 8):
+            score += 1
+    """
+    dx = float(x1) - float(x2)
+    dy = float(y1) - float(y2)
+    rr = abs(float(r1)) + abs(float(r2))
+    return dx * dx + dy * dy <= rr * rr
+
+def rect_in_circle(rx, ry, rw, rh, cx, cy, r):
+    """Return True if the rectangle overlaps the circle.
+
+    Touching, crossing, and one shape being completely inside the other all
+    count as overlapping.
+
+    Example:
+        if rect_in_circle(box_x, box_y, 40, 40, 200, 150, 60):
+            draw_rect(box_x, box_y, 40, 40, RED)
+    """
+    x1, y1, x2, y2 = _rect_bounds(rx, ry, rw, rh)
+    cx = float(cx)
+    cy = float(cy)
+    r = abs(float(r))
+    nx = min(max(cx, x1), x2)       # the point of the rectangle closest to the circle's centre
+    ny = min(max(cy, y1), y2)
+    return (cx - nx) ** 2 + (cy - ny) ** 2 <= r * r
+
+def poly_in_circle(points, cx, cy, r):
+    """Return True if the polygon overlaps the circle.
+
+    *points* is a sequence of Vec2 / (x, y) vertices (convex or concave).
+    Touching, crossing, and one shape being completely inside the other all
+    count as overlapping.
+
+    Example:
+        tri = regular_poly(px, py, 30, 3)
+        if poly_in_circle(tri, 200, 150, 60):
+            draw_poly(tri, RED)
+    """
+    pts = _to_pts(points)
+    n = len(pts)
+    if n < 3:
+        return False
+    cx = float(cx)
+    cy = float(cy)
+    r = abs(float(r))
+    if point_in_poly((cx, cy), pts):        # the circle's centre is inside the polygon
+        return True
+    r2 = r * r
+    for i in range(n):                      # otherwise: does any edge come within r of the centre?
+        ax, ay = pts[i]
+        bx, by = pts[(i + 1) % n]
+        dx = bx - ax
+        dy = by - ay
+        seg2 = dx * dx + dy * dy
+        t = 0.0 if seg2 == 0 else max(0.0, min(1.0, ((cx - ax) * dx + (cy - ay) * dy) / seg2))
+        qx = ax + t * dx
+        qy = ay + t * dy
+        if (cx - qx) ** 2 + (cy - qy) ** 2 <= r2:
+            return True
+    return False
 
 def draw_rect(x,y,w,h,color=WHITE,*,filled=True,line_width=1):
     _do(color, lambda c: _py.rect(float(x),float(y),float(w),float(h),c,bool(filled),float(line_width)))
@@ -2377,7 +2537,7 @@ def draw_lines(points,color=WHITE,width=1,closed=False,origin=(0,0)):
         dx=bx+bw*ox;dy=by+bh*oy
         pts=[[p[0]-dx,p[1]-dy] for p in pts]
     _do(color, lambda c: _py.lines(pts,c,float(width),bool(closed)))
-def draw_polygon(points,color=WHITE,*,filled=True,line_width=1,origin=(0,0)):
+def draw_poly(points,color=WHITE,*,filled=True,line_width=1,origin=(0,0)):
     pts=_pts(points)
     if pts and (origin[0]!=0 or origin[1]!=0):
         xs=[p[0] for p in pts];ys=[p[1] for p in pts]
@@ -4367,7 +4527,7 @@ function buildFile() {
 <style>
 *{margin:0;padding:0;box-sizing:border-box;}
 html,body{width:100%;height:100%;overflow:hidden;background:#000;}
-#screen{display:none;position:fixed;top:0;left:0;width:100%;height:100%;}
+#screen{display:none;position:fixed;top:0;left:0;width:100%;height:100%;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;}
 #load{
   position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
   background:#0b0d11;color:#6a738f;font:13px/1 'IBM Plex Mono',monospace;
@@ -4402,6 +4562,12 @@ $canvas.addEventListener('mousemove',e=>{mx=e.clientX;my=e.clientY;});
 $canvas.addEventListener('mousedown',e=>{btnsHeld.add(e.button);btnsPress.add(e.button);});
 $canvas.addEventListener('mouseup',e=>{btnsHeld.delete(e.button);btnsRel.add(e.button);});
 $canvas.addEventListener('contextmenu',e=>e.preventDefault());
+let _touchId=null;
+const _findTouch=l=>{for(const t of l)if(t.identifier===_touchId)return t;return null;};
+$canvas.addEventListener('touchstart',e=>{e.preventDefault();if(e.touches.length===e.changedTouches.length)_touchId=null;if(_touchId!==null)return;const t=e.changedTouches[0];_touchId=t.identifier;mx=t.clientX;my=t.clientY;btnsHeld.add(0);btnsPress.add(0);},{passive:false});
+$canvas.addEventListener('touchmove',e=>{e.preventDefault();const t=_findTouch(e.changedTouches);if(t){mx=t.clientX;my=t.clientY;}},{passive:false});
+const _touchEnd=e=>{if(e.cancelable)e.preventDefault();const t=_findTouch(e.changedTouches);if(!t)return;mx=t.clientX;my=t.clientY;_touchId=null;btnsHeld.delete(0);btnsRel.add(0);};
+$canvas.addEventListener('touchend',_touchEnd,{passive:false});$canvas.addEventListener('touchcancel',_touchEnd,{passive:false});
 document.addEventListener('keydown',e=>{if(e.getModifierState)_bpCapsLock=e.getModifierState('CapsLock');const k=e.key.toLowerCase();if(!keysHeld.has(k))keysPress.add(k);keysHeld.add(k);});
 document.addEventListener('keyup',e=>{const k=e.key.toLowerCase();keysHeld.delete(k);keysRel.add(k);});
 window.appendConsole=(t,type)=>{if(type==='err')console.error(t);else console.log(t);};
@@ -4812,7 +4978,7 @@ def update():
 </pre>
       </div>
 
-      <div class="wiki-note"><b>Tip:</b> Phones usually have no physical keyboard, so offer controls that can be tapped.</div>
+      <div class="wiki-note"><b>Tip:</b> Phones usually have no physical keyboard, so offer controls that can be tapped. A finger counts as the left mouse button, so <code>mouse_down()</code> and <code>mouse_pos()</code> work for touch.</div>
 
       <div class="wiki-ref-list">
         <div class="wiki-ref" onclick="openWikiPage('W')">W()</div>
@@ -5856,24 +6022,33 @@ def update():
     title: "Geometry Overview",
     category: "Geometry",
     type: "guide",
-    desc: "Functions for creating and testing geometric shapes: polygons, point-in-area, and area-in-area.",
+    desc: "Functions for creating polygons and testing whether points, rectangles, circles and polygons overlap.",
     body: `
+      <p class="wiki-p">The <code>*_in_*</code> functions return <code>True</code> when the first shape is inside or overlaps the second one. Touching counts as overlapping, and polygons can be convex or concave.</p>
+
       <div class="wiki-members">
-        <div class="wiki-member" onclick="openWikiPage('regular_polygon')"><div class="wiki-member-name">regular_polygon()</div><div class="wiki-member-desc">Generate a regular n-sided polygon as a point list.</div></div>
-        <div class="wiki-member" onclick="openWikiPage('point_in_area')"><div class="wiki-member-name">point_in_area()</div><div class="wiki-member-desc">Test if a point lies inside a polygon.</div></div>
-        <div class="wiki-member" onclick="openWikiPage('area_in_area')"><div class="wiki-member-name">area_in_area()</div><div class="wiki-member-desc">Test if one polygon intersects or is inside another.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('regular_poly')"><div class="wiki-member-name">regular_poly()</div><div class="wiki-member-desc">Generate a regular n-sided polygon as a point list.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('point_in_poly')"><div class="wiki-member-name">point_in_poly()</div><div class="wiki-member-desc">Test if a point lies inside a polygon.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('poly_in_poly')"><div class="wiki-member-name">poly_in_poly()</div><div class="wiki-member-desc">Test if one polygon intersects or is inside another.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('point_in_rect')"><div class="wiki-member-name">point_in_rect()</div><div class="wiki-member-desc">Test if a point lies inside a rectangle.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('rect_in_rect')"><div class="wiki-member-name">rect_in_rect()</div><div class="wiki-member-desc">Test if two rectangles intersect.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('poly_in_rect')"><div class="wiki-member-name">poly_in_rect()</div><div class="wiki-member-desc">Test if a polygon intersects a rectangle.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('point_in_circle')"><div class="wiki-member-name">point_in_circle()</div><div class="wiki-member-desc">Test if a point lies inside a circle.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('circle_in_circle')"><div class="wiki-member-name">circle_in_circle()</div><div class="wiki-member-desc">Test if two circles overlap.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('rect_in_circle')"><div class="wiki-member-name">rect_in_circle()</div><div class="wiki-member-desc">Test if a rectangle overlaps a circle.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('poly_in_circle')"><div class="wiki-member-name">poly_in_circle()</div><div class="wiki-member-desc">Test if a polygon overlaps a circle.</div></div>
       </div>
     `
   },
 
-  "regular_polygon": {
-    title: "regular_polygon()",
+  "regular_poly": {
+    title: "regular_poly()",
     category: "Geometry",
     type: "function",
     desc: "Generates a list of (x, y) points forming a regular n-sided polygon centerd at (cx, cy).",
-    signature: `<span class="ws-fn">regular_polygon</span><span class="ws-pun">(</span><span class="ws-param">cx</span><span class="ws-pun">, </span><span class="ws-param">cy</span><span class="ws-pun">, </span><span class="ws-param">radius</span><span class="ws-pun">, </span><span class="ws-param">sides</span><span class="ws-pun">, </span><span class="ws-param">angle_offset</span><span class="ws-pun">=</span><span class="ws-lit">0</span><span class="ws-pun">) →</span> <span class="ws-cls">list[tuple]</span>`,
+    signature: `<span class="ws-fn">regular_poly</span><span class="ws-pun">(</span><span class="ws-param">cx</span><span class="ws-pun">, </span><span class="ws-param">cy</span><span class="ws-pun">, </span><span class="ws-param">radius</span><span class="ws-pun">, </span><span class="ws-param">sides</span><span class="ws-pun">, </span><span class="ws-param">angle_offset</span><span class="ws-pun">=</span><span class="ws-lit">0</span><span class="ws-pun">) →</span> <span class="ws-cls">list[tuple]</span>`,
     body: `
-      <p class="wiki-p"><code>angle_offset</code> rotates all vertices by that many degrees. The returned list can be passed directly to <code>draw_polygon()</code>, <code>point_in_area()</code>, or <code>area_in_area()</code>.</p>
+      <p class="wiki-p"><code>angle_offset</code> rotates all vertices by that many degrees. The returned list can be passed directly to <code>draw_poly()</code>, <code>point_in_poly()</code>, or <code>poly_in_poly()</code>.</p>
 
       <div class="wiki-example">
         <div class="wiki-example-title">Spinning hexagon</div>
@@ -5884,52 +6059,52 @@ def update():
     global angle
     clear("black")
     angle += dt() * 40
-    pts = regular_polygon(W()/2, H()/2, 80, 6, angle)
-    draw_polygon(pts, "cyan", filled=False, line_width=2)
+    pts = regular_poly(W()/2, H()/2, 80, 6, angle)
+    draw_poly(pts, "cyan", filled=False, line_width=2)
 </pre>
       </div>
 
       <div class="wiki-ref-list">
-        <div class="wiki-ref" onclick="openWikiPage('draw_polygon')">draw_polygon()</div>
-        <div class="wiki-ref" onclick="openWikiPage('point_in_area')">point_in_area()</div>
+        <div class="wiki-ref" onclick="openWikiPage('draw_poly')">draw_poly()</div>
+        <div class="wiki-ref" onclick="openWikiPage('point_in_poly')">point_in_poly()</div>
       </div>
     `
   },
 
-  "point_in_area": {
-    title: "point_in_area()",
+  "point_in_poly": {
+    title: "point_in_poly()",
     category: "Geometry",
     type: "function",
     desc: "Returns True if a point lies inside a polygon, False otherwise.",
-    signature: `<span class="ws-fn">point_in_area</span><span class="ws-pun">(</span><span class="ws-param">point</span><span class="ws-pun">, </span><span class="ws-param">polygon</span><span class="ws-pun">) →</span> <span class="ws-cls">bool</span>`,
+    signature: `<span class="ws-fn">point_in_poly</span><span class="ws-pun">(</span><span class="ws-param">point</span><span class="ws-pun">, </span><span class="ws-param">polygon</span><span class="ws-pun">) →</span> <span class="ws-cls">bool</span>`,
     body: `
-      <p class="wiki-p"><code>point</code> is a <code>(x, y)</code> tuple or Vec2. <code>polygon</code> is a list of <code>(x, y)</code> tuples forming a closed shape (as returned by <code>regular_polygon()</code>).</p>
+      <p class="wiki-p"><code>point</code> is a <code>(x, y)</code> tuple or Vec2. <code>polygon</code> is a list of <code>(x, y)</code> tuples forming a closed shape (as returned by <code>regular_poly()</code>).</p>
 
       <div class="wiki-example">
         <div class="wiki-example-title">Highlight a pentagon when the mouse is inside</div>
 <pre>
 def update():
     clear("black")
-    pts = regular_polygon(W()/2, H()/2, 90, 5)
-    inside = point_in_area(mouse_pos(), pts)
+    pts = regular_poly(W()/2, H()/2, 90, 5)
+    inside = point_in_poly(mouse_pos(), pts)
     color = "lime" if inside else "red"
-    draw_polygon(pts, color, filled=False, line_width=3)
+    draw_poly(pts, color, filled=False, line_width=3)
 </pre>
       </div>
 
       <div class="wiki-ref-list">
-        <div class="wiki-ref" onclick="openWikiPage('area_in_area')">area_in_area()</div>
-        <div class="wiki-ref" onclick="openWikiPage('regular_polygon')">regular_polygon()</div>
+        <div class="wiki-ref" onclick="openWikiPage('poly_in_poly')">poly_in_poly()</div>
+        <div class="wiki-ref" onclick="openWikiPage('regular_poly')">regular_poly()</div>
       </div>
     `
   },
 
-  "area_in_area": {
-    title: "area_in_area()",
+  "poly_in_poly": {
+    title: "poly_in_poly()",
     category: "Geometry",
     type: "function",
     desc: "Returns True if polygon poly overlaps, touches, or is fully inside any of the other polygons.",
-    signature: `<span class="ws-fn">area_in_area</span><span class="ws-pun">(</span><span class="ws-param">poly</span><span class="ws-pun">, </span><span class="ws-param">*polys</span><span class="ws-pun">) →</span> <span class="ws-cls">bool</span>`,
+    signature: `<span class="ws-fn">poly_in_poly</span><span class="ws-pun">(</span><span class="ws-param">poly</span><span class="ws-pun">, </span><span class="ws-param">*polys</span><span class="ws-pun">) →</span> <span class="ws-cls">bool</span>`,
     body: `
       <p class="wiki-p">Pass the primary polygon as the first argument, then one or more polygons to test against. Uses edge-intersection and containment checks to handle all overlap cases.</p>
 
@@ -5939,17 +6114,280 @@ def update():
 def update():
     clear("black")
     mx, my = mouse_x(), mouse_y()
-    tri  = regular_polygon(mx, my, 50, 3)
-    zone = regular_polygon(W()/2, H()/2, 80, 6)
-    hit  = area_in_area(tri, zone)
-    draw_polygon(zone, "white", filled=False, line_width=2)
-    draw_polygon(tri, "lime" if hit else "red", filled=False, line_width=2)
+    tri  = regular_poly(mx, my, 50, 3)
+    zone = regular_poly(W()/2, H()/2, 80, 6)
+    hit  = poly_in_poly(tri, zone)
+    draw_poly(zone, "white", filled=False, line_width=2)
+    draw_poly(tri, "lime" if hit else "red", filled=False, line_width=2)
 </pre>
       </div>
 
       <div class="wiki-ref-list">
-        <div class="wiki-ref" onclick="openWikiPage('point_in_area')">point_in_area()</div>
-        <div class="wiki-ref" onclick="openWikiPage('regular_polygon')">regular_polygon()</div>
+        <div class="wiki-ref" onclick="openWikiPage('point_in_poly')">point_in_poly()</div>
+        <div class="wiki-ref" onclick="openWikiPage('regular_poly')">regular_poly()</div>
+      </div>
+    `
+  },
+
+  "point_in_rect": {
+    title: "point_in_rect()",
+    category: "Geometry",
+    type: "function",
+    desc: "Returns True if a point lies inside a rectangle, False otherwise.",
+    signature: `<span class="ws-fn">point_in_rect</span><span class="ws-pun">(</span><span class="ws-param">px</span><span class="ws-pun">, </span><span class="ws-param">py</span><span class="ws-pun">, </span><span class="ws-param">rx</span><span class="ws-pun">, </span><span class="ws-param">ry</span><span class="ws-pun">, </span><span class="ws-param">rw</span><span class="ws-pun">, </span><span class="ws-param">rh</span><span class="ws-pun">) →</span> <span class="ws-cls">bool</span>`,
+    body: `
+      <p class="wiki-p">Tests whether the point <code>(px, py)</code> is inside the rectangle that has its top-left corner at <code>(rx, ry)</code>.</p>
+
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>px, py</td><td>number</td><td>The point to test.</td></tr>
+        <tr><td>rx, ry</td><td>number</td><td>Top-left corner of the rectangle.</td></tr>
+        <tr><td>rw, rh</td><td>number</td><td>Width and height of the rectangle.</td></tr>
+      </table>
+
+      <div class="wiki-note"><b>Note:</b> A point exactly on an edge counts as inside.</div>
+
+      <div class="wiki-example">
+        <div class="wiki-example-title">Highlight a rectangle when the mouse is inside</div>
+<pre>
+def update():
+    clear("black")
+    inside = point_in_rect(mouse_x(), mouse_y(), 100, 100, 200, 120)
+    draw_rect(100, 100, 200, 120, "lime" if inside else "red", filled=False, line_width=3)
+</pre>
+      </div>
+
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('rect_in_rect')">rect_in_rect()</div>
+        <div class="wiki-ref" onclick="openWikiPage('poly_in_rect')">poly_in_rect()</div>
+        <div class="wiki-ref" onclick="openWikiPage('point_in_circle')">point_in_circle()</div>
+      </div>
+    `
+  },
+
+  "rect_in_rect": {
+    title: "rect_in_rect()",
+    category: "Geometry",
+    type: "function",
+    desc: "Returns True if two rectangles intersect, False otherwise.",
+    signature: `<span class="ws-fn">rect_in_rect</span><span class="ws-pun">(</span><span class="ws-param">x1</span><span class="ws-pun">, </span><span class="ws-param">y1</span><span class="ws-pun">, </span><span class="ws-param">w1</span><span class="ws-pun">, </span><span class="ws-param">h1</span><span class="ws-pun">, </span><span class="ws-param">x2</span><span class="ws-pun">, </span><span class="ws-param">y2</span><span class="ws-pun">, </span><span class="ws-param">w2</span><span class="ws-pun">, </span><span class="ws-param">h2</span><span class="ws-pun">) →</span> <span class="ws-cls">bool</span>`,
+    body: `
+      <p class="wiki-p">Tests whether the first rectangle <code>(x1, y1, w1, h1)</code> intersects the second one <code>(x2, y2, w2, h2)</code>. Each rectangle is given by its top-left corner, width and height.</p>
+
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>x1, y1, w1, h1</td><td>number</td><td>First rectangle: top-left corner, width and height.</td></tr>
+        <tr><td>x2, y2, w2, h2</td><td>number</td><td>Second rectangle: top-left corner, width and height.</td></tr>
+      </table>
+
+      <div class="wiki-note"><b>Note:</b> Touching counts: shapes that only touch along an edge or at a point, and a shape that is completely inside the other, all count as overlapping.</div>
+
+      <div class="wiki-example">
+        <div class="wiki-example-title">Move a square into a wall</div>
+<pre>
+def update():
+    clear("black")
+    mx, my = mouse_pos()
+    hit = rect_in_rect(mx - 25, my - 25, 50, 50, 150, 100, 200, 120)
+    draw_rect(150, 100, 200, 120, "white", filled=False, line_width=2)
+    draw_rect(mx - 25, my - 25, 50, 50, "lime" if hit else "red", filled=False, line_width=2)
+</pre>
+      </div>
+
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('point_in_rect')">point_in_rect()</div>
+        <div class="wiki-ref" onclick="openWikiPage('poly_in_rect')">poly_in_rect()</div>
+        <div class="wiki-ref" onclick="openWikiPage('rect_in_circle')">rect_in_circle()</div>
+      </div>
+    `
+  },
+
+  "poly_in_rect": {
+    title: "poly_in_rect()",
+    category: "Geometry",
+    type: "function",
+    desc: "Returns True if a polygon intersects a rectangle, False otherwise.",
+    signature: `<span class="ws-fn">poly_in_rect</span><span class="ws-pun">(</span><span class="ws-param">points</span><span class="ws-pun">, </span><span class="ws-param">rx</span><span class="ws-pun">, </span><span class="ws-param">ry</span><span class="ws-pun">, </span><span class="ws-param">rw</span><span class="ws-pun">, </span><span class="ws-param">rh</span><span class="ws-pun">) →</span> <span class="ws-cls">bool</span>`,
+    body: `
+      <p class="wiki-p">Tests whether a polygon intersects a rectangle. Works for convex and concave polygons.</p>
+
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>points</td><td>list</td><td>The polygon: a list of <code>(x, y)</code> tuples or Vec2 (for example from <code>regular_poly()</code>).</td></tr>
+        <tr><td>rx, ry</td><td>number</td><td>Top-left corner of the rectangle.</td></tr>
+        <tr><td>rw, rh</td><td>number</td><td>Width and height of the rectangle.</td></tr>
+      </table>
+
+      <div class="wiki-note"><b>Note:</b> Touching counts: shapes that only touch along an edge or at a point, and a shape that is completely inside the other, all count as overlapping.</div>
+
+      <div class="wiki-example">
+        <div class="wiki-example-title">Test a triangle against a rectangle</div>
+<pre>
+def update():
+    clear("black")
+    tri = regular_poly(mouse_x(), mouse_y(), 40, 3)
+    hit = poly_in_rect(tri, 150, 100, 200, 120)
+    draw_rect(150, 100, 200, 120, "white", filled=False, line_width=2)
+    draw_poly(tri, "lime" if hit else "red", filled=False, line_width=2)
+</pre>
+      </div>
+
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('point_in_rect')">point_in_rect()</div>
+        <div class="wiki-ref" onclick="openWikiPage('rect_in_rect')">rect_in_rect()</div>
+        <div class="wiki-ref" onclick="openWikiPage('poly_in_poly')">poly_in_poly()</div>
+        <div class="wiki-ref" onclick="openWikiPage('regular_poly')">regular_poly()</div>
+      </div>
+    `
+  },
+
+  "point_in_circle": {
+    title: "point_in_circle()",
+    category: "Geometry",
+    type: "function",
+    desc: "Returns True if a point lies inside a circle, False otherwise.",
+    signature: `<span class="ws-fn">point_in_circle</span><span class="ws-pun">(</span><span class="ws-param">px</span><span class="ws-pun">, </span><span class="ws-param">py</span><span class="ws-pun">, </span><span class="ws-param">cx</span><span class="ws-pun">, </span><span class="ws-param">cy</span><span class="ws-pun">, </span><span class="ws-param">r</span><span class="ws-pun">) →</span> <span class="ws-cls">bool</span>`,
+    body: `
+      <p class="wiki-p">Tests whether the point <code>(px, py)</code> is inside the circle with its centre at <code>(cx, cy)</code> and radius <code>r</code>.</p>
+
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>px, py</td><td>number</td><td>The point to test.</td></tr>
+        <tr><td>cx, cy</td><td>number</td><td>Centre of the circle.</td></tr>
+        <tr><td>r</td><td>number</td><td>Radius of the circle.</td></tr>
+      </table>
+
+      <div class="wiki-note"><b>Note:</b> A point exactly on the edge of the circle counts as inside.</div>
+
+      <div class="wiki-example">
+        <div class="wiki-example-title">Highlight a circle when the mouse is inside</div>
+<pre>
+def update():
+    clear("black")
+    inside = point_in_circle(mouse_x(), mouse_y(), W()/2, H()/2, 80)
+    draw_circle(W()/2, H()/2, 80, "lime" if inside else "red", filled=False, line_width=3)
+</pre>
+      </div>
+
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('point_in_rect')">point_in_rect()</div>
+        <div class="wiki-ref" onclick="openWikiPage('circle_in_circle')">circle_in_circle()</div>
+        <div class="wiki-ref" onclick="openWikiPage('poly_in_circle')">poly_in_circle()</div>
+      </div>
+    `
+  },
+
+  "circle_in_circle": {
+    title: "circle_in_circle()",
+    category: "Geometry",
+    type: "function",
+    desc: "Returns True if two circles overlap, False otherwise.",
+    signature: `<span class="ws-fn">circle_in_circle</span><span class="ws-pun">(</span><span class="ws-param">x1</span><span class="ws-pun">, </span><span class="ws-param">y1</span><span class="ws-pun">, </span><span class="ws-param">r1</span><span class="ws-pun">, </span><span class="ws-param">x2</span><span class="ws-pun">, </span><span class="ws-param">y2</span><span class="ws-pun">, </span><span class="ws-param">r2</span><span class="ws-pun">) →</span> <span class="ws-cls">bool</span>`,
+    body: `
+      <p class="wiki-p">Tests whether the first circle, with centre <code>(x1, y1)</code> and radius <code>r1</code>, overlaps the second one, with centre <code>(x2, y2)</code> and radius <code>r2</code>.</p>
+
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>x1, y1, r1</td><td>number</td><td>First circle: centre and radius.</td></tr>
+        <tr><td>x2, y2, r2</td><td>number</td><td>Second circle: centre and radius.</td></tr>
+      </table>
+
+      <div class="wiki-note"><b>Note:</b> Touching counts: shapes that only touch along an edge or at a point, and a shape that is completely inside the other, all count as overlapping.</div>
+
+      <div class="wiki-example">
+        <div class="wiki-example-title">Two circles</div>
+<pre>
+def update():
+    clear("black")
+    mx, my = mouse_pos()
+    hit = circle_in_circle(mx, my, 30, W()/2, H()/2, 70)
+    draw_circle(W()/2, H()/2, 70, "white", filled=False, line_width=2)
+    draw_circle(mx, my, 30, "lime" if hit else "red", filled=False, line_width=2)
+</pre>
+      </div>
+
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('point_in_circle')">point_in_circle()</div>
+        <div class="wiki-ref" onclick="openWikiPage('rect_in_circle')">rect_in_circle()</div>
+        <div class="wiki-ref" onclick="openWikiPage('poly_in_circle')">poly_in_circle()</div>
+      </div>
+    `
+  },
+
+  "rect_in_circle": {
+    title: "rect_in_circle()",
+    category: "Geometry",
+    type: "function",
+    desc: "Returns True if a rectangle overlaps a circle, False otherwise.",
+    signature: `<span class="ws-fn">rect_in_circle</span><span class="ws-pun">(</span><span class="ws-param">rx</span><span class="ws-pun">, </span><span class="ws-param">ry</span><span class="ws-pun">, </span><span class="ws-param">rw</span><span class="ws-pun">, </span><span class="ws-param">rh</span><span class="ws-pun">, </span><span class="ws-param">cx</span><span class="ws-pun">, </span><span class="ws-param">cy</span><span class="ws-pun">, </span><span class="ws-param">r</span><span class="ws-pun">) →</span> <span class="ws-cls">bool</span>`,
+    body: `
+      <p class="wiki-p">Tests whether a rectangle overlaps a circle.</p>
+
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>rx, ry</td><td>number</td><td>Top-left corner of the rectangle.</td></tr>
+        <tr><td>rw, rh</td><td>number</td><td>Width and height of the rectangle.</td></tr>
+        <tr><td>cx, cy</td><td>number</td><td>Centre of the circle.</td></tr>
+        <tr><td>r</td><td>number</td><td>Radius of the circle.</td></tr>
+      </table>
+
+      <div class="wiki-note"><b>Note:</b> Touching counts: shapes that only touch along an edge or at a point, and a shape that is completely inside the other, all count as overlapping.</div>
+
+      <div class="wiki-example">
+        <div class="wiki-example-title">A box and a circle</div>
+<pre>
+def update():
+    clear("black")
+    mx, my = mouse_pos()
+    hit = rect_in_circle(mx - 20, my - 20, 40, 40, W()/2, H()/2, 70)
+    draw_circle(W()/2, H()/2, 70, "white", filled=False, line_width=2)
+    draw_rect(mx - 20, my - 20, 40, 40, "lime" if hit else "red", filled=False, line_width=2)
+</pre>
+      </div>
+
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('point_in_circle')">point_in_circle()</div>
+        <div class="wiki-ref" onclick="openWikiPage('circle_in_circle')">circle_in_circle()</div>
+        <div class="wiki-ref" onclick="openWikiPage('rect_in_rect')">rect_in_rect()</div>
+      </div>
+    `
+  },
+
+  "poly_in_circle": {
+    title: "poly_in_circle()",
+    category: "Geometry",
+    type: "function",
+    desc: "Returns True if a polygon overlaps a circle, False otherwise.",
+    signature: `<span class="ws-fn">poly_in_circle</span><span class="ws-pun">(</span><span class="ws-param">points</span><span class="ws-pun">, </span><span class="ws-param">cx</span><span class="ws-pun">, </span><span class="ws-param">cy</span><span class="ws-pun">, </span><span class="ws-param">r</span><span class="ws-pun">) →</span> <span class="ws-cls">bool</span>`,
+    body: `
+      <p class="wiki-p">Tests whether a polygon overlaps a circle. Works for convex and concave polygons.</p>
+
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>points</td><td>list</td><td>The polygon: a list of <code>(x, y)</code> tuples or Vec2 (for example from <code>regular_poly()</code>).</td></tr>
+        <tr><td>cx, cy</td><td>number</td><td>Centre of the circle.</td></tr>
+        <tr><td>r</td><td>number</td><td>Radius of the circle.</td></tr>
+      </table>
+
+      <div class="wiki-note"><b>Note:</b> Touching counts: shapes that only touch along an edge or at a point, and a shape that is completely inside the other, all count as overlapping.</div>
+
+      <div class="wiki-example">
+        <div class="wiki-example-title">A triangle and a circle</div>
+<pre>
+def update():
+    clear("black")
+    tri = regular_poly(mouse_x(), mouse_y(), 35, 3)
+    hit = poly_in_circle(tri, W()/2, H()/2, 70)
+    draw_circle(W()/2, H()/2, 70, "white", filled=False, line_width=2)
+    draw_poly(tri, "lime" if hit else "red", filled=False, line_width=2)
+</pre>
+      </div>
+
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('point_in_circle')">point_in_circle()</div>
+        <div class="wiki-ref" onclick="openWikiPage('rect_in_circle')">rect_in_circle()</div>
+        <div class="wiki-ref" onclick="openWikiPage('poly_in_rect')">poly_in_rect()</div>
+        <div class="wiki-ref" onclick="openWikiPage('regular_poly')">regular_poly()</div>
       </div>
     `
   },
@@ -5971,7 +6409,7 @@ def update():
         <div class="wiki-member" onclick="openWikiPage('draw_arc')"><div class="wiki-member-name">draw_arc()</div><div class="wiki-member-desc">Draw a circular arc.</div></div>
         <div class="wiki-member" onclick="openWikiPage('draw_line')"><div class="wiki-member-name">draw_line()</div><div class="wiki-member-desc">Draw a straight line between two points.</div></div>
         <div class="wiki-member" onclick="openWikiPage('draw_lines')"><div class="wiki-member-name">draw_lines()</div><div class="wiki-member-desc">Draw a polyline through multiple points.</div></div>
-        <div class="wiki-member" onclick="openWikiPage('draw_polygon')"><div class="wiki-member-name">draw_polygon()</div><div class="wiki-member-desc">Draw a filled or outlined polygon.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('draw_poly')"><div class="wiki-member-name">draw_poly()</div><div class="wiki-member-desc">Draw a filled or outlined polygon.</div></div>
         <div class="wiki-member" onclick="openWikiPage('draw_bezier')"><div class="wiki-member-name">draw_bezier()</div><div class="wiki-member-desc">Draw a cubic Bézier curve.</div></div>
         <div class="wiki-member" onclick="openWikiPage('draw_quad_curve')"><div class="wiki-member-name">draw_quad_curve()</div><div class="wiki-member-desc">Draw a quadratic Bézier curve.</div></div>
         <div class="wiki-member" onclick="openWikiPage('draw_text')"><div class="wiki-member-name">draw_text()</div><div class="wiki-member-desc">Render text on the canvas.</div></div>
@@ -6192,12 +6630,12 @@ def update():
     `
   },
 
-  "draw_polygon": {
-    title: "draw_polygon()",
+  "draw_poly": {
+    title: "draw_poly()",
     category: "Graphics",
     type: "function",
     desc: "Draws a filled or outlined polygon from a list of (x, y) vertex tuples.",
-    signature: `<span class="ws-fn">draw_polygon</span><span class="ws-pun">(</span><span class="ws-param">points</span><span class="ws-pun">, </span><span class="ws-param">color</span><span class="ws-pun">=WHITE, *, </span><span class="ws-param">filled</span><span class="ws-pun">=</span><span class="ws-kw">True</span><span class="ws-pun">, </span><span class="ws-param">line_width</span><span class="ws-pun">=</span><span class="ws-lit">1</span><span class="ws-pun">, </span><span class="ws-param">origin</span><span class="ws-pun">=(</span><span class="ws-lit">0</span><span class="ws-pun">,</span><span class="ws-lit">0</span><span class="ws-pun">))</span>`,
+    signature: `<span class="ws-fn">draw_poly</span><span class="ws-pun">(</span><span class="ws-param">points</span><span class="ws-pun">, </span><span class="ws-param">color</span><span class="ws-pun">=WHITE, *, </span><span class="ws-param">filled</span><span class="ws-pun">=</span><span class="ws-kw">True</span><span class="ws-pun">, </span><span class="ws-param">line_width</span><span class="ws-pun">=</span><span class="ws-lit">1</span><span class="ws-pun">, </span><span class="ws-param">origin</span><span class="ws-pun">=(</span><span class="ws-lit">0</span><span class="ws-pun">,</span><span class="ws-lit">0</span><span class="ws-pun">))</span>`,
     body: `
       <div class="wiki-example">
         <div class="wiki-example-title">Arrow shape</div>
@@ -6206,12 +6644,12 @@ arrow = [(0,-50),(20,-20),(10,-20),(10,50),(-10,50),(-10,-20),(-20,-20)]
 
 def update():
     clear("black")
-    draw_polygon(arrow, "orange", origin=(W()/2, H()/2))
+    draw_poly(arrow, "orange", origin=(W()/2, H()/2))
 </pre>
       </div>
 
       <div class="wiki-ref-list">
-        <div class="wiki-ref" onclick="openWikiPage('regular_polygon')">regular_polygon()</div>
+        <div class="wiki-ref" onclick="openWikiPage('regular_poly')">regular_poly()</div>
       </div>
     `
   },
@@ -6890,6 +7328,8 @@ def update():
     draw_circle(mouse_x(), mouse_y(), 20, "yellow")
 </pre>
       </div>
+
+      <div class="wiki-note"><b>Touch screens:</b> a finger acts as the mouse. <code>mouse_pos()</code> follows the finger while it is down, and keeps the last touched position after it lifts.</div>
     `
   },
 
@@ -6913,6 +7353,8 @@ def update():
         draw_circle(x, y, 5, "cyan")
 </pre>
       </div>
+
+      <div class="wiki-note"><b>Touch screens:</b> a finger counts as the left mouse button (button 0). Touching the screen is <code>mouse_pressed()</code>, holding it down is <code>mouse_down()</code> and lifting it is <code>mouse_released()</code>. Only the first finger is used: a second finger is ignored while the first is down.</div>
 
       <div class="wiki-ref-list">
         <div class="wiki-ref" onclick="openWikiPage('mouse_wheel_fn')">mouse_wheel()</div>
