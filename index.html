@@ -229,6 +229,48 @@ kbd{
 }
 #editor::selection{background:#5b9cf640;}
 
+/* ── HOVER TOOLTIP (functions / methods / classes) ── */
+#hover-tip{
+  position:fixed;left:0;top:0;z-index:3000;display:none;flex-direction:column;
+  max-width:min(600px,calc(100vw - 16px));min-width:140px;
+  background:var(--bg3);border:1px solid #30374d;border-radius:6px;
+  box-shadow:0 10px 30px #000c,0 2px 6px #0008;
+  font:12.5px/1.5 var(--font-ui);color:var(--txt);overflow:hidden;
+}
+#hover-tip.show{display:flex;}
+#hover-tip .ht-scroll{overflow:auto;max-height:min(340px,56vh);scrollbar-width:thin;scrollbar-color:var(--bg4) transparent;}
+#hover-tip .ht-sig{
+  margin:0;padding:8px 12px;background:var(--bg);border-bottom:1px solid var(--bdr);
+  font:12.5px/1.55 var(--font-code);white-space:pre-wrap;word-break:break-word;color:var(--txt);
+}
+#hover-tip .ht-sig:last-child{border-bottom:none;}
+#hover-tip .ht-kind{color:var(--txt2);}
+#hover-tip .ht-param{color:var(--sy-self);}
+#hover-tip .ht-doc{padding:8px 12px 10px;}
+#hover-tip .ht-doc p{margin:0 0 7px;}
+#hover-tip .ht-doc p:last-child{margin-bottom:0;}
+#hover-tip .ht-doc code{font:11.5px var(--font-code);background:var(--bg);padding:1px 5px;border-radius:3px;color:var(--txt);}
+#hover-tip .ht-doc em{color:var(--sy-self);font-style:normal;}
+#hover-tip .ht-code{
+  margin:2px 0 8px;padding:6px 10px;background:var(--bg);border:1px solid var(--bdr);border-radius:4px;
+  font:11.5px/1.5 var(--font-code);white-space:pre;overflow-x:auto;scrollbar-width:thin;color:var(--txt);
+}
+#hover-tip .ht-label{font:600 10px var(--font-ui);letter-spacing:.6px;text-transform:uppercase;color:var(--txt2);margin:8px 0 3px;}
+#hover-tip .ht-doc > .ht-label:first-child{margin-top:0;}
+#hover-tip .ht-params{margin:0 0 6px;}
+#hover-tip .ht-prm{margin:2px 0;color:var(--txt);}
+#hover-tip .ht-prm code{color:var(--sy-self);}
+#hover-tip .ht-type{color:var(--sy-cls);font:11px var(--font-code);}
+#hover-tip .ht-li{margin:0 0 3px;}
+#hover-tip .ht-note{color:var(--txt2);font-style:italic;}
+#hover-tip .ht-foot{
+  display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:4px 12px;border-top:1px solid var(--bdr);background:var(--bg2);
+  font:11px var(--font-ui);color:var(--txt2);
+}
+#hover-tip .ht-wiki{color:var(--blue);cursor:pointer;white-space:nowrap;text-decoration:none;}
+#hover-tip .ht-wiki:hover{text-decoration:underline;}
+
 /* ── CONSOLE ── */
 #con-resize{
   height:5px;flex-shrink:0;cursor:ns-resize;
@@ -533,6 +575,2008 @@ body.dropping #drop-overlay{display:flex;}
 'use strict';
 
 // ══════════════════════════════════════════════════════════════
+//  BowGL – WebGL2 renderer. It speaks the Canvas 2D API, so every drawing function in the bridge below is
+//  unchanged; the pixels are produced on the GPU. Falls back to a plain Canvas 2D backend when WebGL2 is
+//  unavailable (add ?renderer=2d to the address to force the fallback). This function is also embedded in exported games.
+// ══════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════════════
+//  BowGL — a WebGL2 renderer that speaks the Canvas 2D context API.
+//
+//  BowPy's drawing functions call a small, fixed set of CanvasRenderingContext2D
+//  members. This file implements exactly those members on top of WebGL2, so every
+//  drawing function keeps working unchanged while the pixels are produced on the GPU.
+//
+//  Layout of this factory:   utils/colors → shaders → render targets → renderer
+//                            → 2D-context facade → Canvas 2D fallback backend
+//  The whole function is embedded as-is into exported (built) games.
+// ════════════════════════════════════════════════════════════════════════════
+function _bowglFactory() {
+'use strict';
+
+const TAU = Math.PI * 2;
+const STRIDE = 6;                    // floats per vertex: x, y, u, v, q, packed colour
+const MAX_VERTS = 98304;             // vertices per batch (a multiple of 3 and 6)
+const RAMP_W = 512;                  // gradient ramp texture width
+
+const VALID_OPS = new Set([
+  'source-over', 'source-in', 'source-out', 'source-atop',
+  'destination-over', 'destination-in', 'destination-out', 'destination-atop',
+  'lighter', 'copy', 'xor',
+  'multiply', 'screen', 'overlay', 'darken', 'lighten', 'color-dodge', 'color-burn',
+  'hard-light', 'soft-light', 'difference', 'exclusion', 'hue', 'saturation', 'color', 'luminosity'
+]);
+const ADV_IDS = {
+  'multiply': 1, 'screen': 2, 'overlay': 3, 'darken': 4, 'lighten': 5, 'color-dodge': 6, 'color-burn': 7,
+  'hard-light': 8, 'soft-light': 9, 'difference': 10, 'exclusion': 11, 'hue': 12, 'saturation': 13,
+  'color': 14, 'luminosity': 15
+};
+// Porter-Duff operators that leave pixels outside the shape alone: plain fixed-function blending.
+const FIXED_OPS = new Set(['source-over', 'destination-over', 'lighter', 'xor', 'source-atop', 'destination-out']);
+// Operators that also change pixels OUTSIDE the shape (the whole canvas is composited).
+const GLOBAL_OPS = new Set(['source-in', 'source-out', 'destination-in', 'destination-atop', 'copy']);
+
+// ───────────────────────── colours ─────────────────────────
+let _colorProbe = null;
+const _colorCache = new Map();
+
+function _probeCtx() {
+  if (!_colorProbe) {
+    const c = document.createElement('canvas');
+    c.width = 1; c.height = 1;
+    _colorProbe = c.getContext('2d', { willReadFrequently: true });
+  }
+  return _colorProbe;
+}
+
+function _parseFast(s) {
+  s = s.trim();
+  const c0 = s.charCodeAt(0);
+  if (c0 === 35) {                                       // '#'
+    const h = s.slice(1);
+    if (!/^[0-9a-fA-F]+$/.test(h)) return null;
+    if (h.length === 3 || h.length === 4) {
+      const r = parseInt(h[0] + h[0], 16), g = parseInt(h[1] + h[1], 16), b = parseInt(h[2] + h[2], 16);
+      const a = h.length === 4 ? parseInt(h[3] + h[3], 16) / 255 : 1;
+      return [r, g, b, a];
+    }
+    if (h.length === 6 || h.length === 8) {
+      const r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(2, 4), 16), b = parseInt(h.slice(4, 6), 16);
+      const a = h.length === 8 ? parseInt(h.slice(6, 8), 16) / 255 : 1;
+      return [r, g, b, a];
+    }
+    return null;
+  }
+  const m = /^rgba?\(\s*([^)]*)\)$/i.exec(s);
+  if (m) {
+    const parts = m[1].split(/[\s,\/]+/).filter(Boolean);
+    if (parts.length < 3 || parts.length > 4) return null;
+    const ch = (v) => {
+      if (v.endsWith('%')) return Math.max(0, Math.min(255, parseFloat(v) * 2.55));
+      const n = parseFloat(v); return Number.isFinite(n) ? Math.max(0, Math.min(255, n)) : NaN;
+    };
+    const r = ch(parts[0]), g = ch(parts[1]), b = ch(parts[2]);
+    let a = 1;
+    if (parts.length === 4) {
+      a = parts[3].endsWith('%') ? parseFloat(parts[3]) / 100 : parseFloat(parts[3]);
+      a = Math.max(0, Math.min(1, a));
+    }
+    if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b) || Number.isNaN(a)) return null;
+    return [r, g, b, a];
+  }
+  return null;
+}
+
+// Parse any CSS colour string into [r, g, b, a] (r/g/b 0..255, a 0..1). Returns null if it is not a colour.
+function parseColor(css) {
+  if (typeof css !== 'string') return null;
+  let hit = _colorCache.get(css);
+  if (hit !== undefined) return hit;
+  let v = _parseFast(css);
+  if (v === null) {
+    // names, hsl(), color-mix() … → let the browser's own CSS parser normalise it
+    const g = _probeCtx();
+    g.fillStyle = '#000001';
+    g.fillStyle = css;
+    let norm = g.fillStyle;
+    if (norm === '#000001') {
+      g.fillStyle = '#000002';
+      g.fillStyle = css;
+      norm = g.fillStyle;
+      if (norm === '#000002') norm = null;
+    }
+    v = norm === null ? null : _parseFast(norm);
+    if (v === null && norm !== null) {
+      // a colour the browser accepts but whose serialisation we cannot read (color(), color-mix() …): rasterise it
+      g.setTransform(1, 0, 0, 1, 0, 0); g.globalCompositeOperation = 'copy';
+      g.fillStyle = css; g.fillRect(0, 0, 1, 1);
+      g.globalCompositeOperation = 'source-over';
+      const d = g.getImageData(0, 0, 1, 1).data;
+      v = [d[0], d[1], d[2], d[3] / 255];
+    }
+  }
+  if (_colorCache.size > 4096) _colorCache.clear();
+  _colorCache.set(css, v);
+  return v;
+}
+
+// Premultiplied colour packed for a normalised-ubyte vertex attribute (little-endian RGBA).
+function packPremul(r, g, b, a) {
+  const R = Math.round(r * a), G = Math.round(g * a), B = Math.round(b * a), A = Math.round(a * 255);
+  return ((A << 24) | (B << 16) | (G << 8) | R) >>> 0;
+}
+// Plain (non-premultiplied) packing, used where the shader treats rgb as a multiplier.
+function packRaw(r, g, b, a) {
+  return ((Math.round(a * 255) << 24) | (Math.round(b) << 16) | (Math.round(g) << 8) | Math.round(r)) >>> 0;
+}
+
+// ───────────────────────── gradients ─────────────────────────
+class Gradient {
+  constructor(kind, p) {
+    this.kind = kind;            // 'linear' | 'radial'
+    this.p = p;                  // linear: [x0,y0,x1,y1]   radial: [x0,y0,r0,x1,y1,r1]
+    this.stops = [];             // { o, c:[r,g,b,a] }
+    this._row = -1; this._epoch = -1; this._dirty = true;
+  }
+  addColorStop(offset, color) {
+    const o = Number(offset);
+    if (!(o >= 0 && o <= 1)) throw new DOMException('The provided value is outside the range (0.0, 1.0).', 'IndexSizeError');
+    const c = parseColor(String(color));
+    if (c === null) throw new DOMException("Failed to execute 'addColorStop': The value provided ('" + color + "') could not be parsed as a color.", 'SyntaxError');
+    // stable insertion keeps stops with equal offsets in call order
+    let i = this.stops.length;
+    while (i > 0 && this.stops[i - 1].o > o) i--;
+    this.stops.splice(i, 0, { o, c });
+    this._dirty = true;
+  }
+  // 512 × 1 straight-alpha RGBA ramp (canvas gradients interpolate WITHOUT premultiplying)
+  _ramp() {
+    const out = new Uint8Array(RAMP_W * 4);
+    const st = this.stops;
+    for (let i = 0; i < RAMP_W; i++) {
+      const t = i / (RAMP_W - 1);
+      let r = 0, g = 0, b = 0, a = 0;
+      if (st.length) {
+        if (t <= st[0].o) { [r, g, b, a] = st[0].c; }
+        else if (t >= st[st.length - 1].o) { [r, g, b, a] = st[st.length - 1].c; }
+        else {
+          let k = 1;
+          while (k < st.length && st[k].o < t) k++;
+          const s0 = st[k - 1], s1 = st[k];
+          const span = s1.o - s0.o;
+          const f = span > 0 ? (t - s0.o) / span : 1;
+          r = s0.c[0] + (s1.c[0] - s0.c[0]) * f; g = s0.c[1] + (s1.c[1] - s0.c[1]) * f;
+          b = s0.c[2] + (s1.c[2] - s0.c[2]) * f; a = s0.c[3] + (s1.c[3] - s0.c[3]) * f;
+        }
+      }
+      out[i * 4] = Math.round(r); out[i * 4 + 1] = Math.round(g); out[i * 4 + 2] = Math.round(b); out[i * 4 + 3] = Math.round(a * 255);
+    }
+    return out;
+  }
+}
+
+// ───────────────────────── shaders ─────────────────────────
+const K_COLOR = 0, K_TEX = 1, K_TINT = 2, K_QUAD = 3, K_LIN = 4, K_RAD = 5, K_COPY = 6, K_LOAD = 7;
+
+const VERT_SRC = `#version 300 es
+precision highp float;
+layout(location=0) in vec2 aPos;
+layout(location=1) in vec3 aUV;
+layout(location=2) in vec4 aCol;
+uniform vec2 uSize;
+out vec3 vUV;
+out vec4 vCol;
+void main() {
+  vUV = aUV; vCol = aCol;
+  gl_Position = vec4(aPos.x / uSize.x * 2.0 - 1.0, aPos.y / uSize.y * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+const BLEND_GLSL = `
+float lumC(vec3 c) { return 0.3 * c.r + 0.59 * c.g + 0.11 * c.b; }
+vec3 clipC(vec3 c) {
+  float l = lumC(c), n = min(min(c.r, c.g), c.b), x = max(max(c.r, c.g), c.b);
+  if (n < 0.0) c = l + (c - l) * l / (l - n);
+  if (x > 1.0) c = l + (c - l) * (1.0 - l) / (x - l);
+  return c;
+}
+vec3 setLum(vec3 c, float l) { return clipC(c + (l - lumC(c))); }
+float satC(vec3 c) { return max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b); }
+vec3 setSat(vec3 c, float s) {
+  float mn = min(min(c.r, c.g), c.b), mx = max(max(c.r, c.g), c.b);
+  if (mx > mn) return (c - mn) * s / (mx - mn);
+  return vec3(0.0);
+}
+float hardLight1(float cb, float cs) { return cs <= 0.5 ? cb * 2.0 * cs : (cb + (2.0 * cs - 1.0) - cb * (2.0 * cs - 1.0)); }
+float softLight1(float cb, float cs) {
+  if (cs <= 0.5) return cb - (1.0 - 2.0 * cs) * cb * (1.0 - cb);
+  float d = cb <= 0.25 ? ((16.0 * cb - 12.0) * cb + 4.0) * cb : sqrt(cb);
+  return cb + (2.0 * cs - 1.0) * (d - cb);
+}
+float dodge1(float cb, float cs) { return cb == 0.0 ? 0.0 : (cs >= 1.0 ? 1.0 : min(1.0, cb / (1.0 - cs))); }
+float burn1(float cb, float cs) { return cb >= 1.0 ? 1.0 : (cs <= 0.0 ? 0.0 : 1.0 - min(1.0, (1.0 - cb) / cs)); }
+vec3 blendRGB(vec3 cb, vec3 cs) {
+#if BLEND_ID == 1
+  return cb * cs;
+#elif BLEND_ID == 2
+  return cb + cs - cb * cs;
+#elif BLEND_ID == 3
+  return vec3(hardLight1(cs.r, cb.r), hardLight1(cs.g, cb.g), hardLight1(cs.b, cb.b));
+#elif BLEND_ID == 4
+  return min(cb, cs);
+#elif BLEND_ID == 5
+  return max(cb, cs);
+#elif BLEND_ID == 6
+  return vec3(dodge1(cb.r, cs.r), dodge1(cb.g, cs.g), dodge1(cb.b, cs.b));
+#elif BLEND_ID == 7
+  return vec3(burn1(cb.r, cs.r), burn1(cb.g, cs.g), burn1(cb.b, cs.b));
+#elif BLEND_ID == 8
+  return vec3(hardLight1(cb.r, cs.r), hardLight1(cb.g, cs.g), hardLight1(cb.b, cs.b));
+#elif BLEND_ID == 9
+  return vec3(softLight1(cb.r, cs.r), softLight1(cb.g, cs.g), softLight1(cb.b, cs.b));
+#elif BLEND_ID == 10
+  return abs(cb - cs);
+#elif BLEND_ID == 11
+  return cb + cs - 2.0 * cb * cs;
+#elif BLEND_ID == 12
+  return setLum(setSat(cs, satC(cb)), lumC(cb));
+#elif BLEND_ID == 13
+  return setLum(setSat(cb, satC(cs)), lumC(cb));
+#elif BLEND_ID == 14
+  return setLum(cs, lumC(cb));
+#elif BLEND_ID == 15
+  return setLum(cb, lumC(cs));
+#else
+  return cs;
+#endif
+}
+vec4 compositeAdv(vec4 s, vec4 b) {
+  vec3 cs = s.a > 0.0 ? s.rgb / s.a : vec3(0.0);
+  vec3 cb = b.a > 0.0 ? b.rgb / b.a : vec3(0.0);
+  vec3 m = clamp(blendRGB(cb, cs), 0.0, 1.0);
+  float ao = s.a + b.a * (1.0 - s.a);
+  vec3 o = s.rgb * (1.0 - b.a) + b.rgb * (1.0 - s.a) + s.a * b.a * m;
+  return vec4(o, ao);
+}
+`;
+
+function fragSrc(kind, quadTint, adv) {
+  let s = '#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n';
+  s += 'in vec3 vUV;\nin vec4 vCol;\nout vec4 oColor;\n';
+  s += 'uniform sampler2D uTex;\nuniform sampler2D uBackdrop;\nuniform sampler2D uRamp;\n';
+  s += 'uniform vec2 uTexSize;\nuniform vec4 uClamp;\nuniform vec3 uRow0;\nuniform vec3 uRow1;\nuniform vec4 uG0;\nuniform vec4 uG1;\n';
+  if (adv) s += '#define BLEND_ID ' + adv + '\n' + BLEND_GLSL;
+  s += `
+vec4 rampColor(float t) {
+  float u = clamp(t, 0.0, 1.0) * ${(RAMP_W - 1).toFixed(1)} / ${RAMP_W.toFixed(1)} + 0.5 / ${RAMP_W.toFixed(1)};
+  vec4 g = texture(uRamp, vec2(u, uG1.z));
+  return vec4(g.rgb * g.a, g.a);
+}
+vec2 userPos() {
+  vec3 d = vec3(gl_FragCoord.xy, 1.0);
+  return vec2(dot(uRow0, d), dot(uRow1, d));
+}
+vec4 srcColor() {
+`;
+  switch (kind) {
+    case K_COLOR:
+      s += '  return vCol;\n'; break;
+    case K_TEX:
+      s += '  return texture(uTex, clamp(vUV.xy / vUV.z, uClamp.xy, uClamp.zw)) * vCol;\n'; break;
+    case K_TINT:      // image tint: multiply by the tint, then restore the image alpha (matches the canvas pipeline)
+      s += `  vec4 t = texture(uTex, vUV.xy / vUV.z);
+  float ab = t.a;
+  vec3 cs = vCol.rgb;
+  return vec4(ab * cs * (1.0 - ab + t.rgb), ab) * vCol.a;\n`; break;
+    case K_QUAD:      // perspective-mapped image: vUV is an affine function of the screen position (u*q, v*q, q)
+      s += `  if (abs(vUV.z) < 1e-9) discard;
+  vec2 uv = vUV.xy / vUV.z;
+  if (uv.x < 0.0 || uv.y < 0.0 || uv.x > uTexSize.x - 1.0 || uv.y > uTexSize.y - 1.0) discard;
+  vec4 t = texture(uTex, (uv + 0.5) / uTexSize);
+  return vec4(t.rgb * vCol.rgb, t.a) * vCol.a;\n`; break;
+    case K_LIN:
+      s += `  vec2 p = userPos();
+  float t = dot(p - uG0.xy, uG0.zw) * uG1.x;
+  if (uG1.y > 0.5) discard;
+  float m = vUV.z > 0.5 ? texture(uTex, vUV.xy).a : 1.0;
+  return rampColor(t) * vCol * m;\n`; break;
+    case K_RAD:
+      s += `  vec2 p = userPos() - uG0.xy;
+  vec2 dc = uG0.zw;
+  float r0 = uG1.x, dr = uG1.y;
+  float A = dot(dc, dc) - dr * dr;
+  float B = dot(p, dc) + r0 * dr;
+  float C = dot(p, p) - r0 * r0;
+  float t; bool ok = false;
+  if (abs(A) < 1e-6) {
+    if (abs(B) > 1e-9) { t = C / (2.0 * B); ok = (r0 + t * dr) >= 0.0; }
+  } else {
+    float disc = B * B - A * C;
+    if (disc >= 0.0) {
+      float sq = sqrt(disc);
+      float t1 = (B + sq) / A, t2 = (B - sq) / A;
+      float hi = max(t1, t2), lo = min(t1, t2);
+      if (r0 + hi * dr >= 0.0) { t = hi; ok = true; }
+      else if (r0 + lo * dr >= 0.0) { t = lo; ok = true; }
+    }
+  }
+  if (!ok) discard;
+  float m = vUV.z > 0.5 ? texture(uTex, vUV.xy).a : 1.0;
+  return rampColor(t) * vCol * m;\n`; break;
+    case K_COPY:
+      s += `  vec4 t = texture(uTex, vUV.xy);
+  return vec4(t.rgb * t.a, t.a);\n`; break;
+    case K_LOAD:
+      s += '  return texture(uTex, vUV.xy);\n'; break;
+  }
+  s += '}\nvoid main() {\n  vec4 s = srcColor();\n';
+  if (adv) s += '  vec4 b = texelFetch(uBackdrop, ivec2(gl_FragCoord.xy), 0);\n  oColor = compositeAdv(s, b);\n';
+  else s += '  oColor = s;\n';
+  s += '}\n';
+  return s;
+}
+
+// Unbounded Porter-Duff operators: `s` is the shape layer, `b` the existing target (both premultiplied).
+const GLOBAL_IDS = { 'source-in': 1, 'source-out': 2, 'destination-in': 3, 'destination-atop': 4, 'copy': 5 };
+function globalFragSrc(op) {
+  const id = GLOBAL_IDS[op];
+  return `#version 300 es
+precision highp float;
+precision highp sampler2D;
+in vec3 vUV;
+in vec4 vCol;
+out vec4 oColor;
+uniform sampler2D uTex;
+uniform sampler2D uBackdrop;
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  vec4 s = texelFetch(uTex, p, 0);
+  vec4 b = texelFetch(uBackdrop, p, 0);
+  vec4 o;
+  if (${id} == 1) o = s * b.a;
+  else if (${id} == 2) o = s * (1.0 - b.a);
+  else if (${id} == 3) o = b * s.a;
+  else if (${id} == 4) o = s * (1.0 - b.a) + b * s.a;
+  else o = s;
+  oColor = o;
+}`;
+}
+
+// ───────────────────────── render targets ─────────────────────────
+// A Target is an RGBA8 texture (premultiplied alpha, row 0 = top of the picture) plus a resolve framebuffer.
+// All drawing goes through ONE shared multisampled framebuffer; the target being drawn on is "active" and its
+// live pixels sit in that shared buffer until they are resolved back into its texture (see Renderer.commit).
+const _registry = (typeof FinalizationRegistry !== 'undefined')
+  ? new FinalizationRegistry(held => { try { held.R._freeRes(held.res); } catch (e) { /* context gone */ } })
+  : null;
+
+class Target {
+  constructor(R, w, h, isScreen) {
+    this.R = R;
+    this.w = Math.max(1, Math.min(R.maxTex, Math.floor(w) || 1));
+    this.h = Math.max(1, Math.min(R.maxTex, Math.floor(h) || 1));
+    this.isScreen = !!isScreen;
+    this.res = { tex: null, fbo: null, epoch: -1 };
+    this.gen = 0;              // bumped whenever the pixels change
+    this.msaaDirty = false;    // newest pixels live in the shared MSAA buffer; res.tex is stale
+    this.blank = true;         // known to be fully transparent
+    this.cpu = null; this.cpuGen = -1; this.readGen = -1;   // CPU read-back cache (for get_pixel loops)
+    this.presentedGen = -1;
+    R._allocRes(this);
+    if (!isScreen && _registry) _registry.register(this, { R, res: this.res });
+  }
+  get width() { return this.w; }
+  get height() { return this.h; }
+  toDataURL(type, quality) { return this.R.targetToCanvas(this).toDataURL(type, quality); }
+}
+
+// ───────────────────────── the renderer ─────────────────────────
+class Renderer {
+  constructor(canvas, gl) {
+    this.canvas = canvas;
+    this.gl = gl;
+    this.epoch = 0;
+    this.lost = false;
+    this.active = null;
+    this.screen = null;
+    this.maxTex = 4096;
+    this.vbCap = MAX_VERTS;
+    this.vb = new Float32Array(this.vbCap * STRIDE);
+    this.vbU = new Uint32Array(this.vb.buffer);
+    this.vbN = 0;
+    this.J = {};                       // the job being built (see begin/end)
+    this.B = { kind: -1, tex: null, smooth: true, op: '', texW: 1, texH: 1, cl0: 0, cl1: 0, cl2: 1, cl3: 1 };
+    this.progs = new Map();
+    this.globalProgs = new Map();
+    this.imgTex = new WeakMap();
+    this.textCache = new Map();
+    this.textPixels = 0;
+    this.presentScheduled = false;
+    this.vq = 1;                       // q written by tri()/quad(): 0 for plain gradients, 1 otherwise
+    this._blendKey = null;
+    this._progCur = null;
+    this.msaaFbo = null; this.msaaW = 0; this.msaaH = 0; this.samples = 0;
+    this.layerT = null;
+    this._initGL();
+    canvas.addEventListener('webglcontextlost', e => { e.preventDefault(); this.lost = true; }, false);
+    canvas.addEventListener('webglcontextrestored', () => {
+      this.epoch++; this.lost = false;
+      this.progs.clear(); this.globalProgs.clear(); this.textCache.clear(); this.textPixels = 0;
+      this.imgTex = new WeakMap(); this.msaaFbo = null; this.msaaW = this.msaaH = 0;
+      this.active = null; this.layerT = null; this._blendKey = null; this._progCur = null; this.vbN = 0;
+      this._initGL();
+      if (this.screen) { this._allocRes(this.screen); this.screen.presentedGen = -1; }
+    }, false);
+  }
+
+  _initGL() {
+    const gl = this.gl;
+    this.maxTex = Math.min(16384, gl.getParameter(gl.MAX_TEXTURE_SIZE) | 0);
+    // vertex buffers
+    this.vao = gl.createVertexArray();
+    gl.bindVertexArray(this.vao);
+    this.vbo = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, this.vbCap * STRIDE * 4, gl.DYNAMIC_DRAW);
+    this._attribs();
+    // a unit square, used for full-target passes (load / global composite): positions 0..1, uSize = (1,1)
+    this.qvao = gl.createVertexArray();
+    gl.bindVertexArray(this.qvao);
+    this.qvbo = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.qvbo);
+    const qf = new Float32Array(6 * STRIDE), qu = new Uint32Array(qf.buffer);
+    const corners = [[0, 0], [1, 0], [1, 1], [0, 0], [1, 1], [0, 1]];
+    corners.forEach((c, i) => { qf[i * STRIDE] = c[0]; qf[i * STRIDE + 1] = c[1]; qf[i * STRIDE + 2] = c[0]; qf[i * STRIDE + 3] = c[1]; qf[i * STRIDE + 4] = 1; qu[i * STRIDE + 5] = 0xffffffff; });
+    gl.bufferData(gl.ARRAY_BUFFER, qf, gl.STATIC_DRAW);
+    this._attribs();
+    gl.bindVertexArray(this.vao);
+    // samplers: 0 = linear, 1 = nearest
+    this.samplers = [gl.createSampler(), gl.createSampler()];
+    [[this.samplers[0], gl.LINEAR], [this.samplers[1], gl.NEAREST]].forEach(([s, f]) => {
+      gl.samplerParameteri(s, gl.TEXTURE_MIN_FILTER, f); gl.samplerParameteri(s, gl.TEXTURE_MAG_FILTER, f);
+      gl.samplerParameteri(s, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.samplerParameteri(s, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    });
+    // gradient ramps: one row per gradient, recycled round-robin
+    this.rampRows = 256;
+    this.rampTex = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.rampTex);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, RAMP_W, this.rampRows);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindSampler(2, null);
+    this.rampOwner = new Array(this.rampRows).fill(null);
+    this.rampNext = 0;
+    // sample count for the shared multisampled buffer
+    let best = 0;
+    try {
+      const list = gl.getInternalformatParameter(gl.RENDERBUFFER, gl.RGBA8, gl.SAMPLES) || [];
+      for (const n of list) if (n <= 8 && n > best) best = n;
+    } catch (e) { best = 0; }
+    this.samples = best;
+    gl.disable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE); gl.disable(gl.DITHER);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  }
+  _attribs() {
+    const gl = this.gl;
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, STRIDE * 4, 0);
+    gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, STRIDE * 4, 8);
+    gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 4, gl.UNSIGNED_BYTE, true, STRIDE * 4, 20);
+  }
+
+  // ── programs ──
+  _compile(type, src) {
+    const gl = this.gl, sh = gl.createShader(type);
+    gl.shaderSource(sh, src); gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      const log = gl.getShaderInfoLog(sh); gl.deleteShader(sh);
+      throw new Error('BowGL shader compile failed: ' + log);
+    }
+    return sh;
+  }
+  _link(fragSource) {
+    const gl = this.gl;
+    const prog = gl.createProgram();
+    gl.attachShader(prog, this._compile(gl.VERTEX_SHADER, VERT_SRC));
+    gl.attachShader(prog, this._compile(gl.FRAGMENT_SHADER, fragSource));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error('BowGL program link failed: ' + gl.getProgramInfoLog(prog));
+    const u = n => gl.getUniformLocation(prog, n);
+    const p = {
+      prog, uSize: u('uSize'), uTex: u('uTex'), uBackdrop: u('uBackdrop'), uRamp: u('uRamp'), uTexSize: u('uTexSize'),
+      uClamp: u('uClamp'), uRow0: u('uRow0'), uRow1: u('uRow1'), uG0: u('uG0'), uG1: u('uG1')
+    };
+    gl.useProgram(prog);
+    if (p.uTex) gl.uniform1i(p.uTex, 0);
+    if (p.uBackdrop) gl.uniform1i(p.uBackdrop, 1);
+    if (p.uRamp) gl.uniform1i(p.uRamp, 2);
+    this._progCur = prog;
+    return p;
+  }
+  _prog(kind, adv) {
+    const key = kind * 100 + adv;
+    let p = this.progs.get(key);
+    if (!p) { p = this._link(fragSrc(kind, 0, adv)); this.progs.set(key, p); }
+    return p;
+  }
+  _globalProg(op) {
+    let p = this.globalProgs.get(op);
+    if (!p) { p = this._link(globalFragSrc(op)); this.globalProgs.set(op, p); }
+    return p;
+  }
+  _useProg(p) { if (this._progCur !== p.prog) { this.gl.useProgram(p.prog); this._progCur = p.prog; } }
+
+  // ── target resources ──
+  _allocRes(T) {
+    const gl = this.gl, r = T.res;
+    if (r.tex && r.epoch === this.epoch) { gl.deleteTexture(r.tex); gl.deleteFramebuffer(r.fbo); }
+    r.tex = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, r.tex);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, T.w, T.h);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    r.fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, r.fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, r.tex, 0);
+    r.epoch = this.epoch;
+    T.blank = true; T.msaaDirty = false; T.cpu = null; T.cpuGen = -1; T.readGen = -1; T.gen++;
+    this._rebindRender();
+  }
+  _freeRes(r) {
+    if (r.tex && r.epoch === this.epoch && !this.lost) { this.gl.deleteTexture(r.tex); this.gl.deleteFramebuffer(r.fbo); }
+    r.tex = null; r.fbo = null;
+  }
+  _rebindRender() { this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, this.msaaFbo); }
+
+  _ensureMSAA(w, h) {
+    const gl = this.gl;
+    if (this.msaaFbo && this.msaaW >= w && this.msaaH >= h) return;
+    const W = Math.max(this.msaaW, w, 64), H = Math.max(this.msaaH, h, 64);
+    if (this.msaaFbo) { gl.deleteFramebuffer(this.msaaFbo); gl.deleteRenderbuffer(this.msaaRbC); gl.deleteRenderbuffer(this.msaaRbS); }
+    // big canvases get fewer samples so the shared buffer stays a sensible size
+    let samples = this.samples;
+    if (W * H > 9e6) samples = Math.min(samples, 2); else if (W * H > 2.3e6) samples = Math.min(samples, 4);
+    const combos = [[gl.STENCIL_INDEX8, gl.STENCIL_ATTACHMENT], [gl.DEPTH24_STENCIL8, gl.DEPTH_STENCIL_ATTACHMENT]];
+    let done = false;
+    for (let attempt = 0; attempt < 4 && !done; attempt++) {
+      const [fmt, att] = combos[attempt % 2];
+      this.msaaRbC = gl.createRenderbuffer();
+      gl.bindRenderbuffer(gl.RENDERBUFFER, this.msaaRbC);
+      gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, gl.RGBA8, W, H);
+      this.msaaRbS = gl.createRenderbuffer();
+      gl.bindRenderbuffer(gl.RENDERBUFFER, this.msaaRbS);
+      gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, fmt, W, H);
+      this.msaaFbo = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.msaaFbo);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, this.msaaRbC);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, att, gl.RENDERBUFFER, this.msaaRbS);
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE) { done = true; break; }
+      gl.deleteFramebuffer(this.msaaFbo); gl.deleteRenderbuffer(this.msaaRbC); gl.deleteRenderbuffer(this.msaaRbS);
+      if (attempt === 1) { samples = 0; }
+    }
+    if (!done) throw new Error('BowGL: framebuffer incomplete');
+    this.curSamples = samples;
+    this.msaaW = W; this.msaaH = H;
+    this._blendKey = null;
+  }
+
+  // ── choosing the active target ──
+  use(T) {
+    if (T.isScreen) {
+      const c = this.canvas;
+      if (Math.max(1, c.width) !== T.w || Math.max(1, c.height) !== T.h) this._resizeScreen(c.width, c.height);
+      if (!this.presentScheduled) { this.presentScheduled = true; queueMicrotask(() => this.present()); }
+    }
+    if (T.res.epoch !== this.epoch) this._allocRes(T);
+    if (this.active !== T) this.activate(T, false);
+  }
+  _resizeScreen(w, h) {
+    const S = this.screen;
+    this.flush();
+    if (this.active === S) this.active = null;
+    S.w = Math.max(1, Math.min(this.maxTex, w | 0)); S.h = Math.max(1, Math.min(this.maxTex, h | 0));
+    this._allocRes(S);
+    S.presentedGen = -1;
+  }
+  activate(T, forceBlank) {
+    const gl = this.gl;
+    if (this.lost) return;
+    this.flush();
+    if (this.active && this.active !== T) this.commit(this.active);
+    this._ensureMSAA(T.w, T.h);
+    this.active = T;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.msaaFbo);
+    gl.viewport(0, 0, T.w, T.h);
+    gl.disable(gl.STENCIL_TEST);
+    gl.colorMask(true, true, true, true);
+    gl.stencilMask(0xff);
+    if (T.blank || forceBlank) {
+      gl.enable(gl.SCISSOR_TEST); gl.scissor(0, 0, T.w, T.h);
+      gl.clearColor(0, 0, 0, 0); gl.clearStencil(0);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
+      gl.disable(gl.SCISSOR_TEST);
+      if (forceBlank) { T.blank = true; }
+    } else {
+      // bring the target's pixels into the multisampled buffer
+      gl.enable(gl.SCISSOR_TEST); gl.scissor(0, 0, T.w, T.h);
+      gl.clearStencil(0); gl.clear(gl.STENCIL_BUFFER_BIT);
+      gl.disable(gl.SCISSOR_TEST);
+      const p = this._prog(K_LOAD, 0);
+      this._useProg(p);
+      gl.uniform2f(p.uSize, 1, 1);
+      this._setBlend('$none');
+      this._bindTex(0, T.res.tex, false);
+      gl.bindVertexArray(this.qvao);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      gl.bindVertexArray(this.vao);
+    }
+    T.msaaDirty = false;
+  }
+  // make sure T.res.tex holds the newest pixels (T stays active)
+  commit(T) {
+    if (!T.msaaDirty) return;
+    const gl = this.gl;
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.msaaFbo);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, T.res.fbo);
+    gl.blitFramebuffer(0, 0, T.w, T.h, 0, 0, T.w, T.h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    this._rebindRender();
+    T.msaaDirty = false;
+  }
+  // before sampling or reading T
+  sampleReady(T) {
+    if (T.res.epoch !== this.epoch) this._allocRes(T);
+    if (T === this.active) { this.flush(); this.commit(T); }
+  }
+
+  // ── blending & texture binding ──
+  _setBlend(op) {
+    if (this._blendKey === op) return;
+    this._blendKey = op;
+    const gl = this.gl;
+    switch (op) {
+      case 'source-over': gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); break;
+      case 'lighter': gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE); break;
+      case 'destination-over': gl.enable(gl.BLEND); gl.blendFunc(gl.ONE_MINUS_DST_ALPHA, gl.ONE); break;
+      case 'xor': gl.enable(gl.BLEND); gl.blendFunc(gl.ONE_MINUS_DST_ALPHA, gl.ONE_MINUS_SRC_ALPHA); break;
+      case 'source-atop': gl.enable(gl.BLEND); gl.blendFunc(gl.DST_ALPHA, gl.ONE_MINUS_SRC_ALPHA); break;
+      case 'destination-out': gl.enable(gl.BLEND); gl.blendFunc(gl.ZERO, gl.ONE_MINUS_SRC_ALPHA); break;
+      case '$clear': gl.enable(gl.BLEND); gl.blendFunc(gl.ZERO, gl.ZERO); break;
+      default: gl.disable(gl.BLEND);
+    }
+  }
+  _bindTex(unit, tex, smooth) {
+    const gl = this.gl;
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.bindSampler(unit, this.samplers[smooth ? 0 : 1]);
+  }
+
+  // ── vertex stream ──
+  _reserve(n) {
+    if (this.vbN + n <= this.vbCap) return;
+    if (!this.J.imm) { this.flush(); if (this.vbN + n <= this.vbCap) return; }
+    // immediate (stencil) jobs cannot be split: grow the buffers
+    const gl = this.gl;
+    let cap = this.vbCap;
+    while (this.vbN + n > cap) cap *= 2;
+    const nv = new Float32Array(cap * STRIDE);
+    nv.set(this.vb.subarray(0, this.vbN * STRIDE));
+    this.vb = nv; this.vbU = new Uint32Array(nv.buffer); this.vbCap = cap;
+    gl.bindVertexArray(this.vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, cap * STRIDE * 4, gl.DYNAMIC_DRAW);
+  }
+  vtx(x, y, u, v, q, c) {
+    const o = this.vbN * STRIDE, vb = this.vb;
+    vb[o] = x; vb[o + 1] = y; vb[o + 2] = u; vb[o + 3] = v; vb[o + 4] = q; this.vbU[o + 5] = c;
+    this.vbN++;
+  }
+  tri(x0, y0, x1, y1, x2, y2, c) {
+    if (this.vbN + 3 > this.vbCap) this._reserve(3);
+    const vb = this.vb, vu = this.vbU, q = this.vq;
+    let o = this.vbN * STRIDE;
+    vb[o] = x0; vb[o + 1] = y0; vb[o + 2] = 0; vb[o + 3] = 0; vb[o + 4] = q; vu[o + 5] = c; o += STRIDE;
+    vb[o] = x1; vb[o + 1] = y1; vb[o + 2] = 0; vb[o + 3] = 0; vb[o + 4] = q; vu[o + 5] = c; o += STRIDE;
+    vb[o] = x2; vb[o + 1] = y2; vb[o + 2] = 0; vb[o + 3] = 0; vb[o + 4] = q; vu[o + 5] = c;
+    this.vbN += 3;
+  }
+  quad(x0, y0, x1, y1, x2, y2, x3, y3, c) {            // perimeter order
+    this._reserve(6);
+    const q = this.vq;
+    this.vtx(x0, y0, 0, 0, q, c); this.vtx(x1, y1, 0, 0, q, c); this.vtx(x2, y2, 0, 0, q, c);
+    this.vtx(x0, y0, 0, 0, q, c); this.vtx(x2, y2, 0, 0, q, c); this.vtx(x3, y3, 0, 0, q, c);
+  }
+  // 4 vertices (perimeter order) given as [x,y,u,v,q] * 4
+  quad5(a, c) {
+    this._reserve(6);
+    const o = (i) => i * 5;
+    const put = (i) => this.vtx(a[o(i)], a[o(i) + 1], a[o(i) + 2], a[o(i) + 3], a[o(i) + 4], c);
+    put(0); put(1); put(2); put(0); put(2); put(3);
+  }
+  _upload(n) {
+    const gl = this.gl;
+    gl.bindVertexArray(this.vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.vbo);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.vb, 0, n * STRIDE);
+  }
+
+  // ── jobs ──
+  // A job is one drawing operation. The facade fills in R.J, calls begin(), emits vertices, then end().
+  //   kind  : shader kind (K_*)          op    : composite operation
+  //   sten  : 0 none, 1 union of triangles, 2 non-zero fill (fan triangles, then a cover quad from c0)
+  //   tex/smooth/texW/texH/clamp : texture sources           grad/row/inv : gradient paint
+  begin() {
+    const J = this.J;
+    const adv = ADV_IDS[J.op] || 0;
+    J.adv = adv;
+    this.vq = (J.kind === K_LIN || J.kind === K_RAD) && !J.mask ? 0 : 1;
+    J.imm = J.sten !== 0 || adv !== 0 || GLOBAL_OPS.has(J.op) || J.kind === K_LIN || J.kind === K_RAD || J.kind === K_COPY || J.kind === K_LOAD;
+    if (J.imm) { this.flush(); this.vbN = 0; J.c0 = -1; return; }
+    const B = this.B, cl = J.clamp;
+    const c0 = cl ? cl[0] : 0, c1 = cl ? cl[1] : 0, c2 = cl ? cl[2] : 1, c3 = cl ? cl[3] : 1;
+    if (B.kind !== J.kind || B.tex !== J.tex || B.smooth !== J.smooth || B.op !== J.op || B.texW !== J.texW || B.texH !== J.texH ||
+        B.cl0 !== c0 || B.cl1 !== c1 || B.cl2 !== c2 || B.cl3 !== c3) {
+      this.flush();
+      B.kind = J.kind; B.tex = J.tex; B.smooth = J.smooth; B.op = J.op; B.texW = J.texW; B.texH = J.texH;
+      B.cl0 = c0; B.cl1 = c1; B.cl2 = c2; B.cl3 = c3;
+    }
+  }
+  // start describing a new drawing operation
+  job(op) {
+    const J = this.J;
+    J.op = op; J.sten = 0; J.tex = null; J.smooth = true; J.texW = 1; J.texH = 1; J.clamp = null; J.grad = null; J.mask = false;
+    J.bx0 = undefined; J.by0 = undefined; J.bx1 = undefined; J.by1 = undefined;
+    return J;
+  }
+  syncScreen() {
+    const S = this.screen, c = this.canvas;
+    if (Math.max(1, c.width) !== S.w || Math.max(1, c.height) !== S.h) this._resizeScreen(c.width, c.height);
+  }
+  coverStart() { this.J.c0 = this.vbN; }
+  end() {
+    const J = this.J;
+    if (J.imm) { this._execJob(); }
+  }
+  flush() {
+    const n = this.vbN;
+    if (!n || this.lost || !this.active) { this.vbN = 0; return; }
+    const gl = this.gl, B = this.B, T = this.active;
+    this._upload(n);
+    this.vbN = 0;
+    const p = this._prog(B.kind, 0);
+    this._useProg(p);
+    gl.uniform2f(p.uSize, T.w, T.h);
+    if (p.uTexSize) gl.uniform2f(p.uTexSize, B.texW, B.texH);
+    if (p.uClamp) gl.uniform4f(p.uClamp, B.cl0, B.cl1, B.cl2, B.cl3);
+    this._setBlend(B.op);
+    if (B.tex) this._bindTex(0, B.tex, B.smooth);
+    gl.drawArrays(gl.TRIANGLES, 0, n);
+    T.msaaDirty = true; T.blank = false; T.gen++;
+  }
+
+  _jobUniforms(p, J, T) {
+    const gl = this.gl;
+    gl.uniform2f(p.uSize, T.w, T.h);
+    if (p.uTexSize) gl.uniform2f(p.uTexSize, J.texW || 1, J.texH || 1);
+    if (p.uClamp) { const c = J.clamp; if (c) gl.uniform4f(p.uClamp, c[0], c[1], c[2], c[3]); else gl.uniform4f(p.uClamp, 0, 0, 1, 1); }
+    if (J.grad && p.uG0) {
+      const inv = J.inv, g = J.grad, row = this._rampRow(g);
+      const v = (row + 0.5) / this.rampRows;
+      gl.uniform3f(p.uRow0, inv[0], inv[1], inv[2]); gl.uniform3f(p.uRow1, inv[3], inv[4], inv[5]);
+      const q = g.p;
+      if (g.kind === 'linear') {
+        const dx = q[2] - q[0], dy = q[3] - q[1], l2 = dx * dx + dy * dy;
+        gl.uniform4f(p.uG0, q[0], q[1], dx, dy);
+        gl.uniform4f(p.uG1, l2 > 0 ? 1 / l2 : 0, l2 > 0 ? 0 : 1, v, 0);
+      } else {
+        gl.uniform4f(p.uG0, q[0], q[1], q[3] - q[0], q[4] - q[1]);
+        gl.uniform4f(p.uG1, q[2], q[5] - q[2], v, 0);
+      }
+    }
+  }
+  _rampRow(g) {
+    if (g._row >= 0 && g._epoch === this.epoch && this.rampOwner[g._row] === g && !g._dirty) return g._row;
+    const gl = this.gl;
+    const row = this.rampNext; this.rampNext = (this.rampNext + 1) % this.rampRows;
+    const old = this.rampOwner[row]; if (old) old._row = -1;
+    this.rampOwner[row] = g; g._row = row; g._epoch = this.epoch; g._dirty = false;
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.rampTex);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, row, RAMP_W, 1, gl.RGBA, gl.UNSIGNED_BYTE, g._ramp());
+    return row;
+  }
+
+  _execJob() {
+    const J = this.J, n = this.vbN, T = this.active;
+    if (!n || this.lost || !T) { this.vbN = 0; return; }
+    this._upload(n);
+    this.vbN = 0;
+    if (GLOBAL_OPS.has(J.op)) { this._execGlobal(J, n); return; }
+    this._drawJob(J, J.op, n);
+  }
+
+  // draw the (already uploaded) job geometry into the active target using `op`
+  _drawJob(J, op, n) {
+    const gl = this.gl, T = this.active;
+    const adv = ADV_IDS[op] || 0;
+    if (adv) this.commit(T);                                   // T.res.tex becomes the backdrop
+    const p = this._prog(J.kind, adv);
+    this._useProg(p);
+    this._jobUniforms(p, J, T);
+    if (adv) this._bindTex(1, T.res.tex, false);
+    if (J.tex) this._bindTex(0, J.tex, J.smooth);
+    gl.bindVertexArray(this.vao);
+    this._setBlend(adv ? '$none' : (J.kind === K_COPY || J.kind === K_LOAD ? '$none' : op));
+    if (J.sten === 0) {
+      gl.drawArrays(gl.TRIANGLES, 0, n);
+    } else {
+      const end0 = J.sten === 2 ? J.c0 : n;            // stencil geometry: [0,end0)
+      const cp = this._prog(K_COLOR, 0);
+      gl.enable(gl.STENCIL_TEST);
+      gl.stencilMask(0xff);
+      gl.disable(gl.CULL_FACE);
+      // pass 1: fill the stencil, no colour
+      this._useProg(cp); gl.uniform2f(cp.uSize, T.w, T.h);
+      gl.colorMask(false, false, false, false);
+      this._setBlend('$none');
+      if (J.sten === 1) {
+        gl.stencilFunc(gl.ALWAYS, 1, 0xff); gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
+      } else {
+        gl.stencilFunc(gl.ALWAYS, 0, 0xff);
+        gl.stencilOpSeparate(gl.FRONT, gl.KEEP, gl.KEEP, gl.INCR_WRAP);
+        gl.stencilOpSeparate(gl.BACK, gl.KEEP, gl.KEEP, gl.DECR_WRAP);
+      }
+      gl.drawArrays(gl.TRIANGLES, 0, end0);
+      // pass 2: colour, only where the stencil says "covered", clearing as we go
+      gl.colorMask(true, true, true, true);
+      this._useProg(p); this._jobUniforms(p, J, T);
+      this._setBlend(adv ? '$none' : op);
+      if (J.sten === 1) { gl.stencilFunc(gl.EQUAL, 1, 0xff); gl.stencilOp(gl.KEEP, gl.KEEP, gl.ZERO); gl.drawArrays(gl.TRIANGLES, 0, n); }
+      else { gl.stencilFunc(gl.NOTEQUAL, 0, 0xff); gl.stencilOp(gl.KEEP, gl.KEEP, gl.ZERO); gl.drawArrays(gl.TRIANGLES, J.c0, n - J.c0); }
+      // belt and braces: leave the stencil buffer zeroed
+      gl.disable(gl.STENCIL_TEST);
+      gl.enable(gl.SCISSOR_TEST);
+      const bx0 = Math.max(0, Math.floor(J.bx0 === undefined ? 0 : J.bx0)), by0 = Math.max(0, Math.floor(J.by0 === undefined ? 0 : J.by0));
+      const bx1 = Math.min(T.w, Math.ceil(J.bx1 === undefined ? T.w : J.bx1)), by1 = Math.min(T.h, Math.ceil(J.by1 === undefined ? T.h : J.by1));
+      gl.scissor(bx0, by0, Math.max(0, bx1 - bx0), Math.max(0, by1 - by0));
+      gl.stencilMask(0xff); gl.clearStencil(0); gl.clear(gl.STENCIL_BUFFER_BIT);
+      gl.disable(gl.SCISSOR_TEST);
+    }
+    T.msaaDirty = true; T.blank = false; T.gen++;
+  }
+
+  // source-in / source-out / destination-in / destination-atop / copy: these also change pixels outside the shape
+  _execGlobal(J, n) {
+    const gl = this.gl, T = this.active;
+    if (!this.layerT || this.layerT.w !== T.w || this.layerT.h !== T.h || this.layerT.res.epoch !== this.epoch) {
+      if (this.layerT) this._freeRes(this.layerT.res);
+      this.layerT = new Target(this, T.w, T.h, true);
+    }
+    const L = this.layerT;
+    this.activate(L, true);                    // transparent layer (T is resolved on the way out)
+    this._drawJob(J, 'source-over', n);
+    this.activate(T, false);                   // resolves L, reloads T
+    this.commit(L);
+    const p = this._globalProg(J.op);
+    this._useProg(p);
+    gl.uniform2f(p.uSize, 1, 1);
+    this._setBlend('$none');
+    this._bindTex(0, L.res.tex, false);
+    this._bindTex(1, T.res.tex, false);
+    gl.bindVertexArray(this.qvao);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindVertexArray(this.vao);
+    T.msaaDirty = true; T.blank = false; T.gen++;
+  }
+
+  // ── presenting the screen target on the canvas ──
+  present(force) {
+    this.presentScheduled = false;
+    const S = this.screen, gl = this.gl;
+    if (!S || this.lost) return;
+    if (S.res.epoch !== this.epoch) this._allocRes(S);
+    const c = this.canvas;
+    if (Math.max(1, c.width) !== S.w || Math.max(1, c.height) !== S.h) this._resizeScreen(c.width, c.height);
+    this.flush();
+    if (!force && S.gen === S.presentedGen) return;
+    this.commit(S);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, S.res.fbo);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.blitFramebuffer(0, 0, S.w, S.h, 0, S.h, S.w, 0, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    this._rebindRender();
+    S.presentedGen = S.gen;
+  }
+
+  // ── pixel read-back / write ──
+  // returns premultiplied RGBA bytes, top row first, for the rectangle (clipped to the target)
+  readPremul(T, x, y, w, h) {
+    this.sampleReady(T);
+    const gl = this.gl;
+    const out = new Uint8Array(w * h * 4);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, T.res.fbo);
+    gl.readPixels(x, y, w, h, gl.RGBA, gl.UNSIGNED_BYTE, out);
+    this._rebindRender();
+    return out;
+  }
+  // straight-alpha ImageData, like CanvasRenderingContext2D.getImageData (out-of-range area is transparent)
+  getImageData(T, sx, sy, sw, sh) {
+    sx = Math.floor(sx); sy = Math.floor(sy); sw = Math.floor(sw); sh = Math.floor(sh);
+    if (!(sw !== 0 && sh !== 0)) throw new DOMException('The source width is 0.', 'IndexSizeError');
+    if (sw < 0) { sx += sw; sw = -sw; }
+    if (sh < 0) { sy += sh; sh = -sh; }
+    const dst = new Uint8ClampedArray(sw * sh * 4);
+    const x0 = Math.max(0, sx), y0 = Math.max(0, sy), x1 = Math.min(T.w, sx + sw), y1 = Math.min(T.h, sy + sh);
+    if (x1 > x0 && y1 > y0 && !this.lost) {
+      this.sampleReady(T);
+      const rw = x1 - x0, rh = y1 - y0;
+      let src, sstride, ox, oy;
+      if (T.cpuGen === T.gen && T.cpu) { src = T.cpu; sstride = T.w * 4; ox = x0; oy = y0; }
+      else if (T.readGen === T.gen && rw * rh < T.w * T.h) {
+        // second read of the same frame: grab the whole target once, serve the rest from memory
+        T.cpu = this.readPremul(T, 0, 0, T.w, T.h); T.cpuGen = T.gen;
+        src = T.cpu; sstride = T.w * 4; ox = x0; oy = y0;
+      } else {
+        T.readGen = T.gen;
+        src = this.readPremul(T, x0, y0, rw, rh); sstride = rw * 4; ox = 0; oy = 0;
+      }
+      for (let yy = 0; yy < rh; yy++) {
+        let s = (oy + yy) * sstride + ox * 4;
+        let d = ((y0 - sy + yy) * sw + (x0 - sx)) * 4;
+        for (let xx = 0; xx < rw; xx++, s += 4, d += 4) {
+          const a = src[s + 3];
+          if (a === 255) { dst[d] = src[s]; dst[d + 1] = src[s + 1]; dst[d + 2] = src[s + 2]; dst[d + 3] = 255; }
+          else if (a > 0) {
+            const k = 255 / a;
+            dst[d] = Math.min(255, Math.round(src[s] * k)); dst[d + 1] = Math.min(255, Math.round(src[s + 1] * k));
+            dst[d + 2] = Math.min(255, Math.round(src[s + 2] * k)); dst[d + 3] = a;
+          }
+        }
+      }
+    }
+    return new ImageData(dst, sw, sh);
+  }
+  // copy straight-alpha pixels into the target, replacing what is there (no transform / alpha / blending)
+  putPixels(T, data, w, h, dx, dy, rx, ry, rw, rh) {
+    const gl = this.gl;
+    // clip the dirty rectangle to the image and the target
+    if (rw < 0) { rx += rw; rw = -rw; } if (rh < 0) { ry += rh; rh = -rh; }
+    let x0 = Math.max(rx, 0, -dx), y0 = Math.max(ry, 0, -dy);
+    let x1 = Math.min(rx + rw, w, T.w - dx), y1 = Math.min(ry + rh, h, T.h - dy);
+    if (x1 <= x0 || y1 <= y0) return;
+    this.use(T);
+    this.flush();
+    if (!this.upTex) { this.upTex = gl.createTexture(); this.upW = this.upH = 0; this.upEpoch = this.epoch; }
+    if (this.upEpoch !== this.epoch) { this.upTex = gl.createTexture(); this.upW = this.upH = 0; this.upEpoch = this.epoch; }
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.upTex);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_ROW_LENGTH, w);
+    gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, x0);
+    gl.pixelStorei(gl.UNPACK_SKIP_ROWS, y0);
+    const cw = x1 - x0, ch = y1 - y0;
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, cw, ch, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+    gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0); gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, 0); gl.pixelStorei(gl.UNPACK_SKIP_ROWS, 0);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const J = this.J;
+    J.kind = K_COPY; J.op = 'copy'; J.sten = 0; J.tex = this.upTex; J.smooth = false; J.texW = cw; J.texH = ch; J.clamp = null; J.grad = null;
+    // 'copy' would be a global op; K_COPY is drawn with blending off over just this rectangle, so route it by hand
+    J.imm = true; J.adv = 0; this.vbN = 0; J.c0 = -1;
+    const X0 = x0 + dx, Y0 = y0 + dy, X1 = X0 + cw, Y1 = Y0 + ch;
+    this._reserve(6);
+    this.vtx(X0, Y0, 0, 0, 1, 0xffffffff); this.vtx(X1, Y0, 1, 0, 1, 0xffffffff); this.vtx(X1, Y1, 1, 1, 1, 0xffffffff);
+    this.vtx(X0, Y0, 0, 0, 1, 0xffffffff); this.vtx(X1, Y1, 1, 1, 1, 0xffffffff); this.vtx(X0, Y1, 0, 1, 1, 0xffffffff);
+    this._upload(6); this.vbN = 0;
+    this._drawJob(J, 'source-over', 6);     // K_COPY forces blending off inside _drawJob
+  }
+
+  // a fresh 2D canvas holding the target's picture (used for toDataURL / captures)
+  targetToCanvas(T, x, y, w, h) {
+    if (x === undefined) { x = 0; y = 0; w = T.w; h = T.h; }
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    if (w > 0 && h > 0) c.getContext('2d').putImageData(this.getImageData(T, x, y, w, h), 0, 0);
+    return c;
+  }
+  // duplicate a target on the GPU
+  cloneTarget(T) {
+    this.sampleReady(T);
+    const N = new Target(this, T.w, T.h, false);
+    const gl = this.gl;
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, T.res.fbo);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, N.res.fbo);
+    gl.blitFramebuffer(0, 0, T.w, T.h, 0, 0, T.w, T.h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    this._rebindRender();
+    N.blank = T.blank; N.gen++;
+    return N;
+  }
+
+  // ── textures from images / canvases / surfaces ──
+  // returns { tex, w, h } or null when the source cannot be used
+  texFor(src) {
+    const gl = this.gl;
+    if (src instanceof Target) {
+      this.sampleReady(src);
+      return { tex: src.res.tex, w: src.w, h: src.h };
+    }
+    let w, h;
+    if (typeof HTMLImageElement !== 'undefined' && src instanceof HTMLImageElement) { w = src.naturalWidth; h = src.naturalHeight; }
+    else { w = src.videoWidth || src.width; h = src.videoHeight || src.height; }
+    if (!(w > 0 && h > 0)) return null;
+    const isImg = typeof HTMLImageElement !== 'undefined' && src instanceof HTMLImageElement;
+    const animated = isImg && /\.gif($|[?#])|^data:image\/gif/i.test(src.currentSrc || src.src || '');
+    if (isImg && !animated) {
+      const e = this.imgTex.get(src);
+      if (e && e.w === w && e.h === h && e.epoch === this.epoch && e.src === src.currentSrc) return e;
+    }
+    let tex;
+    if (isImg && !animated) { tex = gl.createTexture(); }
+    else {
+      if (!this.scratchTex || this.scratchEpoch !== this.epoch) { this.scratchTex = gl.createTexture(); this.scratchEpoch = this.epoch; }
+      this.flush();                        // earlier quads may still be waiting for the previous scratch contents
+      tex = this.scratchTex;
+    }
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    try {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, src);
+    } catch (err) {
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+      if (isImg) gl.deleteTexture(tex);
+      return null;
+    }
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const e = { tex, w, h, epoch: this.epoch, src: isImg ? src.currentSrc : '' };
+    if (isImg && !animated) {
+      this.imgTex.set(src, e);
+      if (_registry) _registry.register(src, { R: this, res: { tex, fbo: null, epoch: this.epoch } });
+    }
+    return e;
+  }
+}
+
+// ───────────────────────── path geometry ─────────────────────────
+// Paths are kept as lists of sub-paths in USER space ({ pts:[x,y,x,y…], closed }); curves are flattened when they are added.
+// Filling and stroking turn them into triangles in DEVICE space (the facade applies the current transform).
+const SEAM_OVERLAP = 0.03;         // device pixels: how far stroke bodies reach into their joins / round caps
+const FLAT_TOL = 0.1;               // maximum distance (device pixels) between a curve and its flattening
+
+function ctmStretch(M) { return Math.max(Math.hypot(M[0], M[1]), Math.hypot(M[2], M[3]), 1e-6); }
+
+// Canvas arc() sweep rules: a full turn when the angles are 2π or more apart, else the normalised signed delta.
+function arcSweep(a0, a1, ccw) {
+  let d = a1 - a0;
+  if (!ccw) {
+    if (d >= TAU) return TAU;
+    d = d % TAU; if (d < 0) d += TAU;
+  } else {
+    if (-d >= TAU) return -TAU;
+    d = d % TAU; if (d > 0) d -= TAU;
+  }
+  return d;
+}
+
+function arcSegments(r, sweep, scale) {
+  const R = r * scale;
+  let n;
+  if (R <= FLAT_TOL) n = Math.ceil(Math.abs(sweep) / (Math.PI / 2));
+  else n = Math.ceil(Math.abs(sweep) / (2 * Math.acos(Math.max(-1, 1 - FLAT_TOL / R))));
+  n = Math.max(n, Math.ceil(Math.abs(sweep) / (Math.PI / 2)), 1);
+  return Math.min(n, 720);
+}
+
+// append the points of an elliptical arc to `out` (the start point is included when withStart is true)
+function flattenArc(out, cx, cy, rx, ry, rot, a0, sweep, scale, withStart) {
+  const n = arcSegments(Math.max(rx, ry), sweep, scale);
+  const cr = Math.cos(rot), sr = Math.sin(rot);
+  // the angle is advanced by rotating (cos, sin) one step at a time; the last point is computed exactly
+  const dt = sweep / n, cd = Math.cos(dt), sd = Math.sin(dt);
+  let ct = Math.cos(a0), st = Math.sin(a0);
+  if (withStart) { const lx = rx * ct, ly = ry * st; out.push(cx + lx * cr - ly * sr, cy + lx * sr + ly * cr); }
+  for (let i = 1; i <= n; i++) {
+    if (i === n) { const t = a0 + sweep; ct = Math.cos(t); st = Math.sin(t); }
+    else { const nc = ct * cd - st * sd; st = st * cd + ct * sd; ct = nc; }
+    const lx = rx * ct, ly = ry * st;
+    out.push(cx + lx * cr - ly * sr, cy + lx * sr + ly * cr);
+  }
+}
+function arcStartPoint(cx, cy, rx, ry, rot, a0) {
+  const cr = Math.cos(rot), sr = Math.sin(rot), lx = rx * Math.cos(a0), ly = ry * Math.sin(a0);
+  return [cx + lx * cr - ly * sr, cy + lx * sr + ly * cr];
+}
+
+function flattenCubic(out, x0, y0, x1, y1, x2, y2, x3, y3, scale) {
+  const m = Math.max(Math.hypot(x0 - 2 * x1 + x2, y0 - 2 * y1 + y2), Math.hypot(x1 - 2 * x2 + x3, y1 - 2 * y2 + y3));
+  const n = Math.min(500, Math.max(1, Math.ceil(Math.sqrt(0.75 * m * scale / FLAT_TOL))));
+  for (let i = 1; i <= n; i++) {
+    const t = i / n, u = 1 - t;
+    const b0 = u * u * u, b1 = 3 * u * u * t, b2 = 3 * u * t * t, b3 = t * t * t;
+    out.push(b0 * x0 + b1 * x1 + b2 * x2 + b3 * x3, b0 * y0 + b1 * y1 + b2 * y2 + b3 * y3);
+  }
+}
+function flattenQuad(out, x0, y0, x1, y1, x2, y2, scale) {
+  const m = Math.hypot(x0 - 2 * x1 + x2, y0 - 2 * y1 + y2);
+  const n = Math.min(500, Math.max(1, Math.ceil(Math.sqrt(0.25 * m * scale / FLAT_TOL))));
+  for (let i = 1; i <= n; i++) {
+    const t = i / n, u = 1 - t;
+    out.push(u * u * x0 + 2 * u * t * x1 + t * t * x2, u * u * y0 + 2 * u * t * y1 + t * t * y2);
+  }
+}
+
+// drop consecutive duplicate points (and a closing point equal to the first one)
+function dedupe(P, closed, eps) {
+  const out = [];
+  const e2 = (eps || 1e-9) * (eps || 1e-9);
+  for (let i = 0; i < P.length; i += 2) {
+    const n = out.length;
+    if (n >= 2) { const dx = P[i] - out[n - 2], dy = P[i + 1] - out[n - 1]; if (dx * dx + dy * dy <= e2) continue; }
+    out.push(P[i], P[i + 1]);
+  }
+  if (closed && out.length >= 4) {
+    const dx = out[0] - out[out.length - 2], dy = out[1] - out[out.length - 1];
+    if (dx * dx + dy * dy <= e2) { out.length -= 2; }
+  }
+  return out;
+}
+
+// true when the closed polygon is convex and does not wind around itself (so a plain triangle fan covers it)
+// Every corner must turn the same way, and the edge direction must go round exactly once. Counting how often the
+// direction crosses the +x axis is the same as measuring the total turn (2π), without any trigonometry.
+function isConvexSimple(P) {
+  const n = P.length / 2;
+  if (n < 3) return false;
+  let sign = 0, rev = 0;
+  let ux = P[0] - P[2 * n - 2], uy = P[1] - P[2 * n - 1];
+  let px = P[0], py = P[1];
+  for (let j = 0; j < n; j++) {
+    const k = j + 1 === n ? 0 : j + 1;
+    const qx = P[2 * k], qy = P[2 * k + 1];
+    const vx = qx - px, vy = qy - py;
+    const cross = ux * vy - uy * vx;
+    const mag2 = (ux * ux + uy * uy) * (vx * vx + vy * vy);
+    if (cross * cross <= 1e-18 * mag2) {
+      if (ux * vx + uy * vy < 0) return false;
+    } else {
+      const s = cross > 0 ? 1 : -1;
+      if (sign === 0) sign = s; else if (s !== sign) return false;
+      if (s > 0) { if (uy < 0 && vy >= 0) rev++; } else if (uy > 0 && vy <= 0) rev++;
+    }
+    ux = vx; uy = vy; px = qx; py = qy;
+  }
+  return sign !== 0 && rev === 1;
+}
+
+// ── stroking ──
+// Builds triangles (device space, appended to `out` as x0,y0,x1,y1,x2,y2 …) for one polyline in user space.
+// h = half line width, join: 'miter'|'round'|'bevel', cap: 'butt'|'round'|'square', M = current transform.
+function strokeTris(P, closed, h, join, cap, miterLimit, M, out) {
+  const n = P.length / 2;
+  if (n < 2) return;
+  const a = M[0], b = M[1], c = M[2], d = M[3], e = M[4], f = M[5];
+  const scale = ctmStretch(M);
+  const T = (x, y) => { out.push(a * x + c * y + e, b * x + d * y + f); };
+  const tri = (x0, y0, x1, y1, x2, y2) => { T(x0, y0); T(x1, y1); T(x2, y2); };
+  const segs = closed ? n : n - 1;
+  const dx = new Array(segs), dy = new Array(segs);
+  for (let i = 0; i < segs; i++) {
+    const j = (i + 1) % n;
+    const vx = P[2 * j] - P[2 * i], vy = P[2 * j + 1] - P[2 * i + 1], l = Math.hypot(vx, vy) || 1;
+    dx[i] = vx / l; dy[i] = vy / l;
+  }
+  // segment bodies
+  for (let i = 0; i < segs; i++) {
+    const j = (i + 1) % n;
+    let x0 = P[2 * i], y0 = P[2 * i + 1], x1 = P[2 * j], y1 = P[2 * j + 1];
+    if (!closed && cap === 'square') {
+      if (i === 0) { x0 -= dx[i] * h; y0 -= dy[i] * h; }
+      if (i === segs - 1) { x1 += dx[i] * h; y1 += dy[i] * h; }
+    }
+    // Where a join or a round cap is attached, the body is lengthened by a few hundredths of a pixel so the seam
+    // between the two lies inside the body. Without it, the rasteriser's edge rounding can leave single-sample pinholes.
+    {
+      const sc = Math.hypot(a * dx[i] + c * dy[i], b * dx[i] + d * dy[i]);
+      const e = sc > 1e-9 ? SEAM_OVERLAP / sc : 0;
+      if (closed || i > 0 || cap === 'round') { x0 -= dx[i] * e; y0 -= dy[i] * e; }
+      if (closed || i < segs - 1 || cap === 'round') { x1 += dx[i] * e; y1 += dy[i] * e; }
+    }
+    const nx = -dy[i] * h, ny = dx[i] * h;
+    tri(x0 + nx, y0 + ny, x1 + nx, y1 + ny, x1 - nx, y1 - ny);
+    tri(x0 + nx, y0 + ny, x1 - nx, y1 - ny, x0 - nx, y0 - ny);
+  }
+  // fan of a circle sector on the outside of a corner / at a cap
+  const fanSteps = (ang) => Math.max(2, Math.min(64, Math.ceil(Math.abs(ang) / (2 * Math.acos(Math.max(-1, 1 - FLAT_TOL / Math.max(h * scale, FLAT_TOL * 1.0001)))))));
+  const fan = (cx, cy, a0, sweep) => {
+    const k = fanSteps(sweep);
+    let px = cx + Math.cos(a0) * h, py = cy + Math.sin(a0) * h;
+    for (let s = 1; s <= k; s++) {
+      const t = a0 + sweep * (s / k), qx = cx + Math.cos(t) * h, qy = cy + Math.sin(t) * h;
+      tri(cx, cy, px, py, qx, qy); px = qx; py = qy;
+    }
+  };
+  // joins
+  const joinAt = (vi, s0, s1) => {
+    const vx = P[2 * vi], vy = P[2 * vi + 1];
+    const d0x = dx[s0], d0y = dy[s0], d1x = dx[s1], d1y = dy[s1];
+    const cross = d0x * d1y - d0y * d1x, dot = d0x * d1x + d0y * d1y;
+    if (Math.abs(cross) < 1e-9 && dot > 0) return;                  // straight on
+    const sg = cross > 0 ? -1 : 1;                                   // outer side
+    const n0x = -d0y * sg, n0y = d0x * sg, n1x = -d1y * sg, n1y = d1x * sg;
+    const Ax = vx + n0x * h, Ay = vy + n0y * h, Bx = vx + n1x * h, By = vy + n1y * h;
+    if (join === 'round') {
+      const a0 = Math.atan2(n0y, n0x);
+      let sweep = Math.atan2(n0x * n1y - n0y * n1x, n0x * n1x + n0y * n1y);
+      fan(vx, vy, a0, sweep);
+      return;
+    }
+    if (join === 'miter') {
+      const cosHalf2 = (1 + dot) / 2;                                // cos²(φ/2)
+      if (cosHalf2 > 1e-12 && 1 / Math.sqrt(cosHalf2) <= miterLimit) {
+        const k = 1 / (1 + dot);
+        const mx = vx + (n0x + n1x) * k * h, my = vy + (n0y + n1y) * k * h;
+        tri(vx, vy, Ax, Ay, mx, my); tri(vx, vy, mx, my, Bx, By);
+        return;
+      }
+    }
+    tri(vx, vy, Ax, Ay, Bx, By);                                     // bevel
+  };
+  if (closed) { for (let i = 0; i < n; i++) joinAt(i, (i - 1 + n) % n, i); }
+  else { for (let i = 1; i < n - 1; i++) joinAt(i, i - 1, i); }
+  // round caps
+  if (!closed && cap === 'round') {
+    fan(P[0], P[1], Math.atan2(dx[0], -dy[0]) , Math.PI);            // from +normal around the back to −normal
+    const L = segs - 1;
+    fan(P[2 * (n - 1)], P[2 * (n - 1) + 1], Math.atan2(-dx[L], dy[L]), Math.PI);
+  }
+}
+
+// ───────────────────────── text rasterisation (browser font engine → GPU texture cache) ─────────────────────────
+let _measureCtx = null, _mFont = '', _mAlign = '', _mBase = '';
+function measureCtx(font, align, base) {
+  if (!_measureCtx) { const c = document.createElement('canvas'); c.width = 1; c.height = 1; _measureCtx = c.getContext('2d'); _mFont = _measureCtx.font; _mAlign = _measureCtx.textAlign; _mBase = _measureCtx.textBaseline; }
+  if (font !== _mFont) { _measureCtx.font = font; _mFont = _measureCtx.font; }
+  if (align !== _mAlign) { _measureCtx.textAlign = align; _mAlign = align; }
+  if (base !== _mBase) { _measureCtx.textBaseline = base; _mBase = base; }
+  return _measureCtx;
+}
+// normalised font string, or null when the browser rejects it (Canvas silently ignores bad fonts)
+function normalizeFont(v) {
+  const g = measureCtx('10px serif', 'start', 'alphabetic');
+  g.font = '10px serif';
+  g.font = v;
+  const out = g.font;
+  _mFont = out;
+  if (out === '10px serif' && !/^\s*10px\s+serif\s*$/i.test(v)) return null;
+  return out;
+}
+
+Renderer.prototype.clearText = function () {
+  const gl = this.gl;
+  if (this.lost) { this.textCache.clear(); this.textPixels = 0; return; }
+  this.flush();
+  for (const e of this.textCache.values()) gl.deleteTexture(e.tex);
+  this.textCache.clear(); this.textPixels = 0;
+};
+
+// get (or build) the texture for a run of text; draw(g) paints it into a transparent 2D canvas of tw × th
+Renderer.prototype.textTexture = function (key, tw, th, draw) {
+  let e = this.textCache.get(key);
+  if (e) { this.textCache.delete(key); this.textCache.set(key, e); return e; }
+  const gl = this.gl;
+  if (!this.textCanvas) { this.textCanvas = document.createElement('canvas'); }
+  const tc = this.textCanvas;
+  tc.width = tw; tc.height = th;
+  const g = tc.getContext('2d');
+  draw(g);
+  // evict old entries
+  const limit = 6 * 1024 * 1024;
+  if (this.textCache.size > 1500 || this.textPixels + tw * th > limit) {
+    this.flush();
+    for (const [k, v] of this.textCache) {
+      gl.deleteTexture(v.tex); this.textPixels -= v.w * v.h; this.textCache.delete(k);
+      if (this.textCache.size < 1000 && this.textPixels + tw * th <= limit) break;
+    }
+  }
+  const tex = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, tc);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  e = { tex, w: tw, h: th };
+  this.textCache.set(key, e);
+  this.textPixels += tw * th;
+  return e;
+};
+
+// ───────────────────────── the CanvasRenderingContext2D look-alike ─────────────────────────
+const BLACK = { c: [0, 0, 0, 1], css: '#000000' };
+const _styleCache = new Map();
+const _ST = [];                          // scratch list of stroke triangles
+
+function cssOut(c) {
+  if (c[3] >= 1) {
+    const h = v => ('0' + Math.round(v).toString(16)).slice(-2);
+    return '#' + h(c[0]) + h(c[1]) + h(c[2]);
+  }
+  return 'rgba(' + Math.round(c[0]) + ', ' + Math.round(c[1]) + ', ' + Math.round(c[2]) + ', ' + (Math.round(c[3] * 1000) / 1000) + ')';
+}
+function toStyle(v) {
+  if (v instanceof Gradient) return v;
+  if (typeof v !== 'string') return null;
+  let s = _styleCache.get(v);
+  if (s) return s;
+  const c = parseColor(v);
+  if (!c) return null;
+  s = { c, css: v.trim() };
+  if (_styleCache.size > 2048) _styleCache.clear();
+  _styleCache.set(v, s);
+  return s;
+}
+function fin(a) { return Number.isFinite(a); }
+
+// eight unknowns, four point pairs → projective map (same solver as the original CPU quad code)
+function solveHomography(p, sw, sh) {
+  const A = [], B = [];
+  const src = [[0, 0], [sw, 0], [0, sh], [sw, sh]];
+  for (let i = 0; i < 4; i++) {
+    const x = p[i][0], y = p[i][1], u = src[i][0], v = src[i][1];
+    A.push([x, y, 1, 0, 0, 0, -u * x, -u * y]); B.push(u);
+    A.push([0, 0, 0, x, y, 1, -v * x, -v * y]); B.push(v);
+  }
+  const n = 8;
+  for (let i = 0; i < n; i++) {
+    let piv = i;
+    for (let r = i + 1; r < n; r++) if (Math.abs(A[r][i]) > Math.abs(A[piv][i])) piv = r;
+    if (Math.abs(A[piv][i]) < 1e-12) return null;
+    if (piv !== i) { const tr = A[i]; A[i] = A[piv]; A[piv] = tr; const tb = B[i]; B[i] = B[piv]; B[piv] = tb; }
+    const div = A[i][i];
+    for (let j = i; j < n; j++) A[i][j] /= div;
+    B[i] /= div;
+    for (let r = 0; r < n; r++) {
+      if (r === i) continue;
+      const f = A[r][i];
+      if (!f) continue;
+      for (let j = i; j < n; j++) A[r][j] -= f * A[i][j];
+      B[r] -= f * B[i];
+    }
+  }
+  return B;
+}
+
+class Ctx2D {
+  constructor(R, T, canvas) {
+    this.R = R; this.T = T; this._canvas = canvas;
+    this._m = [1, 0, 0, 1, 0, 0];
+    this._fs = BLACK; this._ss = BLACK;
+    this._lw = 1; this._ga = 1; this._op = 'source-over';
+    this._font = '10px sans-serif'; this._ta = 'start'; this._tb = 'alphabetic';
+    this._cap = 'butt'; this._join = 'miter'; this._ml = 10;
+    this._smooth = true; this._dash = [];
+    this._subs = []; this._cur = null;
+    this._stack = [];
+    this._inv = [0, 0, 0, 0, 0, 0];
+  }
+  get canvas() { return this._canvas; }
+
+  // ── state properties ──
+  get fillStyle() { const s = this._fs; return s instanceof Gradient ? s : cssOut(s.c); }
+  set fillStyle(v) { const s = toStyle(v); if (s) this._fs = s; }
+  get strokeStyle() { const s = this._ss; return s instanceof Gradient ? s : cssOut(s.c); }
+  set strokeStyle(v) { const s = toStyle(v); if (s) this._ss = s; }
+  get lineWidth() { return this._lw; }
+  set lineWidth(v) { v = +v; if (fin(v) && v > 0) this._lw = v; }
+  get globalAlpha() { return this._ga; }
+  set globalAlpha(v) { v = +v; if (fin(v) && v >= 0 && v <= 1) this._ga = v; }
+  get globalCompositeOperation() { return this._op; }
+  set globalCompositeOperation(v) { if (VALID_OPS.has(v)) this._op = v; }
+  get font() { return this._font; }
+  set font(v) { const f = normalizeFont(String(v)); if (f) this._font = f; }
+  get textAlign() { return this._ta; }
+  set textAlign(v) { if (['start', 'end', 'left', 'right', 'center'].includes(v)) this._ta = v; }
+  get textBaseline() { return this._tb; }
+  set textBaseline(v) { if (['top', 'hanging', 'middle', 'alphabetic', 'ideographic', 'bottom'].includes(v)) this._tb = v; }
+  get lineCap() { return this._cap; }
+  set lineCap(v) { if (v === 'butt' || v === 'round' || v === 'square') this._cap = v; }
+  get lineJoin() { return this._join; }
+  set lineJoin(v) { if (v === 'miter' || v === 'round' || v === 'bevel') this._join = v; }
+  get miterLimit() { return this._ml; }
+  set miterLimit(v) { v = +v; if (fin(v) && v > 0) this._ml = v; }
+  get imageSmoothingEnabled() { return this._smooth; }
+  set imageSmoothingEnabled(v) { this._smooth = !!v; }
+  setLineDash(a) { this._dash = Array.from(a || []); }
+  getLineDash() { return this._dash.slice(); }
+
+  // ── save / restore ──
+  save() {
+    this._stack.push({ m: this._m.slice(), fs: this._fs, ss: this._ss, lw: this._lw, ga: this._ga, op: this._op, font: this._font, ta: this._ta, tb: this._tb, cap: this._cap, join: this._join, ml: this._ml, smooth: this._smooth, dash: this._dash });
+  }
+  restore() {
+    const s = this._stack.pop();
+    if (!s) return;
+    this._m = s.m; this._fs = s.fs; this._ss = s.ss; this._lw = s.lw; this._ga = s.ga; this._op = s.op; this._font = s.font;
+    this._ta = s.ta; this._tb = s.tb; this._cap = s.cap; this._join = s.join; this._ml = s.ml; this._smooth = s.smooth; this._dash = s.dash;
+  }
+
+  // ── transform ──
+  transform(a, b, c, d, e, f) {
+    a = +a; b = +b; c = +c; d = +d; e = +e; f = +f;
+    if (!(fin(a) && fin(b) && fin(c) && fin(d) && fin(e) && fin(f))) return;
+    const m = this._m;
+    const na = m[0] * a + m[2] * b, nb = m[1] * a + m[3] * b, nc = m[0] * c + m[2] * d, nd = m[1] * c + m[3] * d;
+    const ne = m[0] * e + m[2] * f + m[4], nf = m[1] * e + m[3] * f + m[5];
+    m[0] = na; m[1] = nb; m[2] = nc; m[3] = nd; m[4] = ne; m[5] = nf;
+  }
+  setTransform(a, b, c, d, e, f) {
+    if (a !== null && typeof a === 'object') { f = a.f; e = a.e; d = a.d; c = a.c; b = a.b; a = a.a; }
+    a = +a; b = +b; c = +c; d = +d; e = +e; f = +f;
+    if (!(fin(a) && fin(b) && fin(c) && fin(d) && fin(e) && fin(f))) return;
+    const m = this._m; m[0] = a; m[1] = b; m[2] = c; m[3] = d; m[4] = e; m[5] = f;
+  }
+  resetTransform() { const m = this._m; m[0] = 1; m[1] = 0; m[2] = 0; m[3] = 1; m[4] = 0; m[5] = 0; }
+  getTransform() { const m = this._m; return new DOMMatrix([m[0], m[1], m[2], m[3], m[4], m[5]]); }
+  translate(x, y) { this.transform(1, 0, 0, 1, x, y); }
+  scale(x, y) { this.transform(x, 0, 0, y, 0, 0); }
+  rotate(a) { a = +a; if (!fin(a)) return; const c = Math.cos(a), s = Math.sin(a); this.transform(c, s, -s, c, 0, 0); }
+
+  // ── paths ──
+  beginPath() { this._subs = []; this._cur = null; }
+  _start(x, y) { const s = { pts: [x, y], closed: false }; this._subs.push(s); this._cur = s; }
+  moveTo(x, y) { x = +x; y = +y; if (fin(x) && fin(y)) this._start(x, y); }
+  lineTo(x, y) {
+    x = +x; y = +y; if (!(fin(x) && fin(y))) return;
+    if (!this._cur) this._start(x, y); else this._cur.pts.push(x, y);
+  }
+  closePath() {
+    const s = this._cur;
+    if (!s || s.pts.length < 2) return;
+    s.closed = true;
+    this._start(s.pts[0], s.pts[1]);
+  }
+  rect(x, y, w, h) {
+    x = +x; y = +y; w = +w; h = +h;
+    if (!(fin(x) && fin(y) && fin(w) && fin(h))) return;
+    this._start(x, y);
+    this._cur.pts.push(x + w, y, x + w, y + h, x, y + h);
+    this.closePath();
+  }
+  arc(x, y, r, a0, a1, ccw) {
+    x = +x; y = +y; r = +r; a0 = +a0; a1 = +a1;
+    if (!(fin(x) && fin(y) && fin(r) && fin(a0) && fin(a1))) return;
+    if (r < 0) throw new DOMException("Failed to execute 'arc' on 'CanvasRenderingContext2D': The radius provided (" + r + ') is negative.', 'IndexSizeError');
+    this._ellipse(x, y, r, r, 0, a0, a1, !!ccw);
+  }
+  ellipse(x, y, rx, ry, rot, a0, a1, ccw) {
+    x = +x; y = +y; rx = +rx; ry = +ry; rot = +rot; a0 = +a0; a1 = +a1;
+    if (!(fin(x) && fin(y) && fin(rx) && fin(ry) && fin(rot) && fin(a0) && fin(a1))) return;
+    if (rx < 0) throw new DOMException("Failed to execute 'ellipse' on 'CanvasRenderingContext2D': The major-axis radius provided (" + rx + ') is negative.', 'IndexSizeError');
+    if (ry < 0) throw new DOMException("Failed to execute 'ellipse' on 'CanvasRenderingContext2D': The minor-axis radius provided (" + ry + ') is negative.', 'IndexSizeError');
+    this._ellipse(x, y, rx, ry, rot, a0, a1, !!ccw);
+  }
+  _ellipse(x, y, rx, ry, rot, a0, a1, ccw) {
+    const sweep = arcSweep(a0, a1, ccw);
+    const st = arcStartPoint(x, y, rx, ry, rot, a0);
+    const fresh = !this._cur;
+    if (this._cur) this._cur.pts.push(st[0], st[1]); else this._start(st[0], st[1]);
+    flattenArc(this._cur.pts, x, y, rx, ry, rot, a0, sweep, ctmStretch(this._m), false);
+    // an arc that is a whole turn and starts its own sub-path is a closed ellipse (no butt-cap seam when stroked)
+    if (fresh && Math.abs(sweep) >= TAU - 1e-6) this._cur.fullTurn = this._cur.pts.length;
+  }
+  bezierCurveTo(x1, y1, x2, y2, x3, y3) {
+    x1 = +x1; y1 = +y1; x2 = +x2; y2 = +y2; x3 = +x3; y3 = +y3;
+    if (!(fin(x1) && fin(y1) && fin(x2) && fin(y2) && fin(x3) && fin(y3))) return;
+    if (!this._cur) this._start(x1, y1);
+    const p = this._cur.pts, n = p.length;
+    flattenCubic(p, p[n - 2], p[n - 1], x1, y1, x2, y2, x3, y3, ctmStretch(this._m));
+  }
+  quadraticCurveTo(x1, y1, x2, y2) {
+    x1 = +x1; y1 = +y1; x2 = +x2; y2 = +y2;
+    if (!(fin(x1) && fin(y1) && fin(x2) && fin(y2))) return;
+    if (!this._cur) this._start(x1, y1);
+    const p = this._cur.pts, n = p.length;
+    flattenQuad(p, p[n - 2], p[n - 1], x1, y1, x2, y2, ctmStretch(this._m));
+  }
+
+  // ── painting helpers ──
+  _pre() {
+    const R = this.R;
+    if (R.lost) return null;
+    R.use(this.T);
+    return R.job(this._op);
+  }
+  // choose the shader and colour for `style`; false when nothing would be visible
+  _paint(style, J) {
+    const ga = this._ga;
+    if (style instanceof Gradient) {
+      J.kind = style.kind === 'linear' ? K_LIN : K_RAD;
+      J.grad = style;
+      J.col = packPremul(255, 255, 255, ga);
+      const M = this._m, det = M[0] * M[3] - M[1] * M[2];
+      if (!(Math.abs(det) > 1e-12)) return false;
+      const iv = this._inv;
+      iv[0] = M[3] / det; iv[1] = -M[2] / det; iv[2] = (M[2] * M[5] - M[3] * M[4]) / det;
+      iv[3] = -M[1] / det; iv[4] = M[0] / det; iv[5] = (M[1] * M[4] - M[0] * M[5]) / det;
+      J.inv = iv;
+      return true;
+    }
+    const c = style.c, a = c[3] * ga;
+    if (a === 0 && !GLOBAL_OPS.has(J.op)) return false;
+    J.kind = K_COLOR; J.grad = null;
+    J.col = packPremul(c[0], c[1], c[2], a);
+    return true;
+  }
+
+  // ── rectangles ──
+  fillRect(x, y, w, h) {
+    x = +x; y = +y; w = +w; h = +h;
+    if (!(fin(x) && fin(y) && fin(w) && fin(h)) || w === 0 || h === 0) return;
+    const J = this._pre(); if (!J) return;
+    if (!this._paint(this._fs, J)) return;
+    const M = this._m, R = this.R, x1 = x + w, y1 = y + h;
+    R.begin();
+    R.quad(M[0] * x + M[2] * y + M[4], M[1] * x + M[3] * y + M[5], M[0] * x1 + M[2] * y + M[4], M[1] * x1 + M[3] * y + M[5],
+      M[0] * x1 + M[2] * y1 + M[4], M[1] * x1 + M[3] * y1 + M[5], M[0] * x + M[2] * y1 + M[4], M[1] * x + M[3] * y1 + M[5], J.col);
+    R.end();
+  }
+  clearRect(x, y, w, h) {
+    x = +x; y = +y; w = +w; h = +h;
+    if (!(fin(x) && fin(y) && fin(w) && fin(h)) || w === 0 || h === 0) return;
+    const R = this.R; if (R.lost) return;
+    R.use(this.T);
+    const J = R.job('$clear');
+    J.kind = K_COLOR;
+    const M = this._m, x1 = x + w, y1 = y + h;
+    R.begin();
+    R.quad(M[0] * x + M[2] * y + M[4], M[1] * x + M[3] * y + M[5], M[0] * x1 + M[2] * y + M[4], M[1] * x1 + M[3] * y + M[5],
+      M[0] * x1 + M[2] * y1 + M[4], M[1] * x1 + M[3] * y1 + M[5], M[0] * x + M[2] * y1 + M[4], M[1] * x + M[3] * y1 + M[5], 0xffffffff);
+    R.end();
+  }
+  strokeRect(x, y, w, h) {
+    x = +x; y = +y; w = +w; h = +h;
+    if (!(fin(x) && fin(y) && fin(w) && fin(h)) || (w === 0 && h === 0)) return;
+    if (w === 0 || h === 0) this._strokeSubs([{ pts: [x, y, x + w, y + h], closed: false }]);
+    else this._strokeSubs([{ pts: [x, y, x + w, y, x + w, y + h, x, y + h], closed: true }]);
+  }
+
+  // ── fill / stroke ──
+  fill() {
+    const subs = this._subs;
+    if (!subs.length) return;
+    const M = this._m;
+    const polys = [];
+    let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
+    for (const s of subs) {
+      const p = s.pts;
+      if (p.length < 6) continue;
+      // to device space, dropping repeated points (and a closing point equal to the first) on the way
+      const P = [];
+      for (let i = 0; i < p.length; i += 2) {
+        const X = M[0] * p[i] + M[2] * p[i + 1] + M[4], Y = M[1] * p[i] + M[3] * p[i + 1] + M[5];
+        if (X < bx0) bx0 = X; if (X > bx1) bx1 = X; if (Y < by0) by0 = Y; if (Y > by1) by1 = Y;
+        const m = P.length;
+        if (m >= 2) { const dx = X - P[m - 2], dy = Y - P[m - 1]; if (dx * dx + dy * dy <= 1e-18) continue; }
+        P.push(X, Y);
+      }
+      if (P.length >= 4) { const dx = P[0] - P[P.length - 2], dy = P[1] - P[P.length - 1]; if (dx * dx + dy * dy <= 1e-18) P.length -= 2; }
+      if (P.length >= 6) polys.push(P);
+    }
+    if (!polys.length) return;
+    const J = this._pre(); if (!J) return;
+    if (!this._paint(this._fs, J)) return;
+    const R = this.R, col = J.col;
+    if (polys.length === 1 && isConvexSimple(polys[0])) {
+      const P = polys[0], n = P.length / 2;
+      R.begin();
+      for (let i = 1; i < n - 1; i++) R.tri(P[0], P[1], P[2 * i], P[2 * i + 1], P[2 * i + 2], P[2 * i + 3], col);
+      R.end();
+      return;
+    }
+    J.sten = 2; J.bx0 = bx0; J.by0 = by0; J.bx1 = bx1; J.by1 = by1;
+    R.begin();
+    for (const P of polys) {
+      const n = P.length / 2;
+      for (let i = 1; i < n - 1; i++) R.tri(P[0], P[1], P[2 * i], P[2 * i + 1], P[2 * i + 2], P[2 * i + 3], 0);
+    }
+    R.coverStart();
+    R.quad(bx0, by0, bx1, by0, bx1, by1, bx0, by1, col);
+    R.end();
+  }
+  stroke() { this._strokeSubs(this._subs); }
+
+  _strokeSubs(subs) {
+    const lw = this._lw, M = this._m;
+    const det = M[0] * M[3] - M[1] * M[2];
+    if (!(lw > 0) || !(Math.abs(det) > 1e-12)) return;
+    // strokes thinner than one device pixel are drawn one pixel wide with their opacity scaled down (like Canvas 2D)
+    const scale = Math.sqrt(Math.abs(det));
+    let lwEff = lw, alphaMul = 1;
+    if (lw * scale < 1) { lwEff = 1 / scale; alphaMul = lw * scale; }
+    const out = _ST; out.length = 0;
+    let segTotal = 0;
+    for (const s of subs) {
+      const closed = s.closed || s.fullTurn === s.pts.length;
+      const P = dedupe(s.pts, closed, 1e-7);
+      const n = P.length / 2;
+      if (n < 2) continue;
+      strokeTris(P, closed, lwEff / 2, this._join, this._cap, this._ml, M, out);
+      segTotal += closed ? n : n - 1;
+    }
+    if (!out.length) return;
+    const J = this._pre(); if (!J) return;
+    const ga0 = this._ga;
+    if (alphaMul < 1) this._ga = ga0 * alphaMul;
+    const ok = this._paint(this._ss, J);
+    this._ga = ga0;
+    if (!ok) return;
+    const R = this.R, col = J.col, ss = this._ss, op = this._op;
+    const idem = alphaMul === 1 && !(ss instanceof Gradient) && ss.c[3] * ga0 >= 1 && (op === 'source-over' || op === 'destination-out' || op === 'source-atop');
+    if (segTotal > 1 && !idem) {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (let i = 0; i < out.length; i += 2) { const X = out[i], Y = out[i + 1]; if (X < x0) x0 = X; if (X > x1) x1 = X; if (Y < y0) y0 = Y; if (Y > y1) y1 = Y; }
+      J.sten = 1; J.bx0 = x0; J.by0 = y0; J.bx1 = x1; J.by1 = y1;
+    }
+    R.begin();
+    for (let i = 0; i < out.length; i += 6) R.tri(out[i], out[i + 1], out[i + 2], out[i + 3], out[i + 4], out[i + 5], col);
+    R.end();
+  }
+
+  // ── text ──
+  measureText(str) { return measureCtx(this._font, this._ta, this._tb).measureText(String(str)); }
+  fillText(str, x, y) { this._text(str, x, y, false); }
+  strokeText(str, x, y) { this._text(str, x, y, true); }
+  _text(str, x, y, stroke) {
+    str = String(str);
+    x = +x; y = +y;
+    if (!str.length || !fin(x) || !fin(y)) return;
+    const M = this._m, det = M[0] * M[3] - M[1] * M[2];
+    if (!(Math.abs(det) > 1e-12)) return;
+    if (stroke && !(this._lw > 0)) return;
+    const style = stroke ? this._ss : this._fs;
+    const solid = !(style instanceof Gradient);
+    const J = this._pre(); if (!J) return;
+    const R = this.R;
+    if (!this._paint(style, J)) return;
+    // where the text anchor lands on the screen; the glyphs are rasterised by the browser's own text engine (at the
+    // current transform, quarter-pixel horizontal positions, whole-pixel baseline when axis aligned – like Canvas 2D)
+    const DX = M[0] * x + M[2] * y + M[4], DY = M[1] * x + M[3] * y + M[5];
+    // x: quarter-pixel positions (what the text engine uses anyway). y: when axis aligned the exact fraction is handed
+    // to the text engine, which snaps the baseline to whole pixels itself (the offset from the anchor to the baseline
+    // depends on textBaseline, so snapping the anchor here would round the wrong number)
+    const axis = Math.abs(M[1]) < 1e-9 && Math.abs(M[2]) < 1e-9;
+    const qx = Math.round(DX * 4) / 4, DXi = Math.floor(qx), fx = qx - DXi;
+    let DYi, fy;
+    if (axis) { DYi = Math.floor(DY); fy = Math.round((DY - DYi) * 1000) / 1000; }
+    else { const qy = Math.round(DY * 4) / 4; DYi = Math.floor(qy); fy = qy - DYi; }
+    const mt = measureCtx(this._font, this._ta, this._tb).measureText(str);
+    const left = mt.actualBoundingBoxLeft !== undefined ? mt.actualBoundingBoxLeft : 0;
+    const right = mt.actualBoundingBoxRight !== undefined ? mt.actualBoundingBoxRight : mt.width;
+    let asc = mt.actualBoundingBoxAscent, desc = mt.actualBoundingBoxDescent;
+    if (asc === undefined) { const px = parseFloat(this._font) || 10; asc = px; desc = px * 0.3; }
+    const half = stroke ? this._lw * (this._join === 'miter' ? Math.max(1, this._ml) : 1) * 0.5 : 0;
+    const ux0 = -left - half, ux1 = right + half, uy0 = -asc - half, uy1 = desc + half;
+    let mnx = Infinity, mxx = -Infinity, mny = Infinity, mxy = -Infinity;
+    for (let k = 0; k < 4; k++) {
+      const ux = k === 0 || k === 3 ? ux0 : ux1, uy = k < 2 ? uy0 : uy1;
+      const px = M[0] * ux + M[2] * uy, py = M[1] * ux + M[3] * uy;
+      if (px < mnx) mnx = px; if (px > mxx) mxx = px; if (py < mny) mny = py; if (py > mxy) mxy = py;
+    }
+    const pad = 2;
+    const ox = pad - Math.floor(mnx), oy = pad - Math.floor(mny);
+    const tw = Math.ceil(mxx) + ox + pad + 1, th = Math.ceil(mxy) + oy + pad + 1;
+    if (!(tw > 0 && th > 0) || tw > R.maxTex || th > R.maxTex) return;
+    const font = this._font, ta = this._ta, tb = this._tb, lw = this._lw, jn = this._join, ml = this._ml;
+    const colorKey = solid ? style.c.join(',') : 'm';
+    const key = font + '\u0001' + ta + '\u0001' + tb + '\u0001' + M[0].toFixed(5) + ',' + M[1].toFixed(5) + ',' + M[2].toFixed(5) + ',' + M[3].toFixed(5) +
+      '\u0001' + fx + ',' + fy + '\u0001' + (stroke ? lw + ':' + jn + ':' + ml : '-') + '\u0001' + colorKey + '\u0001' + str;
+    const e = R.textTexture(key, tw, th, g => {
+      g.setTransform(M[0], M[1], M[2], M[3], ox + fx, oy + fy);
+      g.font = font; g.textAlign = ta; g.textBaseline = tb;
+      const css = solid ? style.css : '#ffffff';
+      if (stroke) { g.lineWidth = lw; g.lineJoin = jn; g.miterLimit = ml; g.strokeStyle = css; g.strokeText(str, 0, 0); }
+      else { g.fillStyle = css; g.fillText(str, 0, 0); }
+    });
+    // the texture maps 1:1 onto whole screen pixels
+    const X0 = DXi - ox, Y0 = DYi - oy, X1 = X0 + tw, Y1 = Y0 + th;
+    J.tex = e.tex; J.texW = tw; J.texH = th; J.smooth = false;
+    if (solid) { J.kind = K_TEX; J.col = packPremul(255, 255, 255, this._ga); }
+    else { J.mask = true; }
+    R.begin();
+    R.quad5([X0, Y0, 0, 0, 1, X1, Y0, 1, 0, 1, X1, Y1, 1, 1, 1, X0, Y1, 0, 1, 1], J.col);
+    R.end();
+  }
+
+  // ── images ──
+  drawImage(src, a, b, c, d, e, f, g, h) {
+    const n = arguments.length;
+    const R = this.R; if (R.lost) return;
+    if (n !== 3 && n !== 5 && n !== 9) throw new TypeError("Failed to execute 'drawImage' on 'CanvasRenderingContext2D': Valid arities are: [3, 5, 9], but " + n + ' arguments provided.');
+    R.use(this.T);
+    const info = R.texFor(src);
+    if (!info) return;
+    const W = info.w, H = info.h;
+    let sx = 0, sy = 0, sw = W, sh = H, dx, dy, dw, dh;
+    if (n === 3) { dx = +a; dy = +b; dw = W; dh = H; }
+    else if (n === 5) { dx = +a; dy = +b; dw = +c; dh = +d; }
+    else { sx = +a; sy = +b; sw = +c; sh = +d; dx = +e; dy = +f; dw = +g; dh = +h; }
+    if (!(fin(sx) && fin(sy) && fin(sw) && fin(sh) && fin(dx) && fin(dy) && fin(dw) && fin(dh))) return;
+    if (sw === 0 || sh === 0 || dw === 0 || dh === 0) return;
+    if (sw < 0) { sx += sw; sw = -sw; dx += dw; dw = -dw; }          // negative source size = mirrored
+    if (sh < 0) { sy += sh; sh = -sh; dy += dh; dh = -dh; }
+    this._blit(info, sx, sy, sw, sh, dx, dy, dw, dh, null);
+  }
+  // image, destination rectangle, optional tint ([r,g,b]); used by img_draw
+  bpDrawImage(src, dx, dy, dw, dh, tint) {
+    const R = this.R; if (R.lost) return;
+    R.use(this.T);
+    const info = R.texFor(src);
+    if (!info) return;
+    dx = +dx; dy = +dy; dw = +dw; dh = +dh;
+    if (!(fin(dx) && fin(dy) && fin(dw) && fin(dh)) || dw === 0 || dh === 0) return;
+    this._blit(info, 0, 0, info.w, info.h, dx, dy, dw, dh, tint || null);
+  }
+  _blit(info, sx, sy, sw, sh, dx, dy, dw, dh, tint) {
+    const R = this.R, W = info.w, H = info.h, M = this._m, op = this._op;
+    const J = R.job(op);
+    if (this._ga === 0 && !GLOBAL_OPS.has(op)) return;
+    J.tex = info.tex; J.texW = W; J.texH = H; J.smooth = this._smooth; J.grad = null;
+    if (tint) { J.kind = K_TINT; J.col = packRaw(tint[0], tint[1], tint[2], this._ga); }
+    else { J.kind = K_TEX; J.col = packPremul(255, 255, 255, this._ga); }
+    if (sx > 0 || sy > 0 || sx + sw < W || sy + sh < H) {
+      J.clamp = this._smooth ? [(sx + 0.5) / W, (sy + 0.5) / H, (sx + sw - 0.5) / W, (sy + sh - 0.5) / H] : [sx / W, sy / H, (sx + sw) / W, (sy + sh) / H];
+    }
+    const u0 = sx / W, v0 = sy / H, u1 = (sx + sw) / W, v1 = (sy + sh) / H;
+    const x1 = dx + dw, y1 = dy + dh;
+    const X = (x, y) => M[0] * x + M[2] * y + M[4], Y = (x, y) => M[1] * x + M[3] * y + M[5];
+    const qv = [X(dx, dy), Y(dx, dy), u0, v0, 1, X(x1, dy), Y(x1, dy), u1, v0, 1, X(x1, y1), Y(x1, y1), u1, v1, 1, X(dx, y1), Y(dx, y1), u0, v1, 1];
+    R.begin();
+    R.quad5(qv, J.col);
+    R.end();
+  }
+  // projective image quad: p = four DEVICE-space corners in the order top-left, top-right, bottom-left, bottom-right
+  bpDrawQuad(src, p, tint) {
+    const R = this.R; if (R.lost) return;
+    R.use(this.T);
+    const info = R.texFor(src);
+    if (!info) return;
+    const op = this._op;
+    if (this._ga === 0 && !GLOBAL_OPS.has(op)) return;
+    const k = solveHomography(p, info.w, info.h);
+    if (!k) return;
+    const J = R.job(op);
+    J.kind = K_QUAD; J.tex = info.tex; J.texW = info.w; J.texH = info.h; J.smooth = true;
+    J.col = tint ? packRaw(tint[0], tint[1], tint[2], this._ga) : packRaw(255, 255, 255, this._ga);
+    const v = (pt) => { const x = pt[0], y = pt[1]; return [x, y, k[0] * x + k[1] * y + k[2], k[3] * x + k[4] * y + k[5], k[6] * x + k[7] * y + 1]; };
+    const a = v(p[0]), b = v(p[1]), c = v(p[3]), d = v(p[2]);
+    R.begin();
+    R.quad5([...a, ...b, ...c, ...d], J.col);
+    R.end();
+  }
+
+  // ── pixels ──
+  getImageData(sx, sy, sw, sh) {
+    if (this.R.lost) return new ImageData(Math.max(1, Math.abs(sw | 0)), Math.max(1, Math.abs(sh | 0)));
+    return this.R.getImageData(this.T, sx, sy, sw, sh);
+  }
+  putImageData(img, dx, dy, rx, ry, rw, rh) {
+    dx = Math.floor(+dx); dy = Math.floor(+dy);
+    if (!(fin(dx) && fin(dy))) return;
+    if (arguments.length < 7) { rx = 0; ry = 0; rw = img.width; rh = img.height; }
+    else { rx = Math.floor(+rx); ry = Math.floor(+ry); rw = Math.floor(+rw); rh = Math.floor(+rh); }
+    if (this.R.lost) return;
+    this.R.putPixels(this.T, img.data, img.width, img.height, dx, dy, rx, ry, rw, rh);
+  }
+  createImageData(w, h) { return h === undefined ? new ImageData(w.width, w.height) : new ImageData(Math.abs(w), Math.abs(h)); }
+  createLinearGradient(x0, y0, x1, y1) {
+    x0 = +x0; y0 = +y0; x1 = +x1; y1 = +y1;
+    if (!(fin(x0) && fin(y0) && fin(x1) && fin(y1))) throw new TypeError("Failed to execute 'createLinearGradient' on 'CanvasRenderingContext2D': The provided double value is non-finite.");
+    return new Gradient('linear', [x0, y0, x1, y1]);
+  }
+  createRadialGradient(x0, y0, r0, x1, y1, r1) {
+    x0 = +x0; y0 = +y0; r0 = +r0; x1 = +x1; y1 = +y1; r1 = +r1;
+    if (!(fin(x0) && fin(y0) && fin(r0) && fin(x1) && fin(y1) && fin(r1))) throw new TypeError("Failed to execute 'createRadialGradient' on 'CanvasRenderingContext2D': The provided double value is non-finite.");
+    if (r0 < 0 || r1 < 0) throw new DOMException("Failed to execute 'createRadialGradient' on 'CanvasRenderingContext2D': The radius provided is negative.", 'IndexSizeError');
+    return new Gradient('radial', [x0, y0, r0, x1, y1, r1]);
+  }
+}
+
+// ───────────────────────── backends ─────────────────────────
+// A backend is what BowPy's drawing bridge talks to:
+//   ctx            the screen's drawing context (Canvas 2D API)          createSurface(w, h) → { _canvas, _ctx }
+//   surfaceScreen()  copy of the screen as a surface                     captureRegion(x, y, w, h) → <canvas>
+//   present()      show what was drawn (WebGL only)                      name  'webgl2' | 'canvas2d'
+
+function glAttrs(strict) {
+  return { alpha: true, premultipliedAlpha: true, antialias: false, depth: false, stencil: false,
+           preserveDrawingBuffer: false, powerPreference: 'high-performance', failIfMajorPerformanceCaveat: !!strict };
+}
+
+// build a renderer on `canvas`; throws when anything is off
+function buildRenderer(canvas, gl) {
+  const R = new Renderer(canvas, gl);
+  R.screen = new Target(R, canvas.width, canvas.height, true);
+  for (let k = 0; k <= K_LOAD; k++) R._prog(k, 0);
+  R._prog(K_COLOR, 1); R._prog(K_TEX, 9);
+  R._globalProg('destination-in');
+  return R;
+}
+
+// draw one rectangle and one gradient on a throw-away canvas and check the pixels that come back
+function selfTest(gl, canvas) {
+  const R = buildRenderer(canvas, gl);
+  const g = new Ctx2D(R, R.screen, canvas);
+  g.fillStyle = '#ff0000'; g.fillRect(0, 0, 8, 8);
+  g.globalCompositeOperation = 'multiply'; g.fillStyle = '#80ff80'; g.fillRect(0, 0, 4, 8);
+  g.globalCompositeOperation = 'source-over';
+  const lg = g.createLinearGradient(0, 0, 8, 0); lg.addColorStop(0, '#0000ff'); lg.addColorStop(1, '#0000ff');
+  g.fillStyle = lg; g.fillRect(4, 0, 4, 8);
+  const a = g.getImageData(1, 1, 1, 1).data, b = g.getImageData(6, 6, 1, 1).data;
+  const gerr = gl.getError();
+  if (gerr !== gl.NO_ERROR) throw new Error('GL error ' + gerr);
+  if (!(a[0] > 120 && a[0] < 136 && a[1] === 0 && a[2] === 0 && a[3] === 255)) throw new Error('self-test: multiply pixel is ' + Array.from(a));
+  if (!(b[0] === 0 && b[1] === 0 && b[2] === 255 && b[3] === 255)) throw new Error('self-test: gradient pixel is ' + Array.from(b));
+}
+
+function tryWebGL2(canvas, opts) {
+  opts = opts || {};
+  const soft = !!opts.allowSoftware || (typeof window !== 'undefined' && !!window.__BOWGL_ALLOW_SOFTWARE);
+  const strict = !soft;
+  // 1) rehearse on a spare canvas, so a failure never leaves the real canvas stuck with a useless WebGL context
+  try {
+    const probe = document.createElement('canvas');
+    probe.width = 16; probe.height = 16;
+    const pgl = probe.getContext('webgl2', glAttrs(strict));
+    if (!pgl) return null;
+    try { selfTest(pgl, probe); }
+    finally { const ext = pgl.getExtension('WEBGL_lose_context'); if (ext) ext.loseContext(); }
+  } catch (err) {
+    if (typeof console !== 'undefined') console.warn('[BowGL] WebGL2 not usable, falling back to Canvas 2D:', err && err.message || err);
+    return null;
+  }
+  // 2) the real thing
+  let gl = null;
+  try { gl = canvas.getContext('webgl2', glAttrs(strict)); } catch (e) { gl = null; }
+  if (!gl) return null;
+  const R = buildRenderer(canvas, gl);
+  if (typeof document !== 'undefined' && document.fonts && document.fonts.addEventListener) {
+    document.fonts.addEventListener('loadingdone', () => R.clearText());
+  }
+  const main = new Ctx2D(R, R.screen, canvas);
+  let info = 'WebGL2';
+  try { const x = gl.getExtension('WEBGL_debug_renderer_info'); if (x) info = String(gl.getParameter(x.UNMASKED_RENDERER_WEBGL)); } catch (e) {}
+  return {
+    name: 'webgl2', info, canvas, ctx: main, R, samples: R.samples,
+    createSurface(w, h) {
+      const T = new Target(R, w, h, false);
+      return { _canvas: T, _ctx: new Ctx2D(R, T, T) };
+    },
+    surfaceScreen() {
+      R.syncScreen();
+      const N = R.cloneTarget(R.screen);
+      return { _canvas: N, _ctx: new Ctx2D(R, N, N) };
+    },
+    captureRegion(x, y, w, h) { R.syncScreen(); return R.targetToCanvas(R.screen, x, y, w, h); },
+    present() { R.present(false); }
+  };
+}
+
+// ── Canvas 2D fallback (same interface; used when WebGL2 is missing, blocked, or software-only) ──
+function createCanvas2D(canvas) {
+  const tintCanvas = document.createElement('canvas');
+  const tintCtx = tintCanvas.getContext('2d');
+  const srcCache = new WeakMap();
+  function sourcePixels(img) {
+    let hit = srcCache.get(img);
+    if (hit && hit.w === img.naturalWidth && hit.h === img.naturalHeight) return hit;
+    const c = document.createElement('canvas');
+    c.width = img.naturalWidth; c.height = img.naturalHeight;
+    const g = c.getContext('2d');
+    g.drawImage(img, 0, 0);
+    hit = { w: c.width, h: c.height, data: g.getImageData(0, 0, c.width, c.height).data };
+    srcCache.set(img, hit);
+    return hit;
+  }
+  function quadCPU(g, img, p, tint) {
+    const sw = img.naturalWidth, sh = img.naturalHeight, src = sourcePixels(img);
+    const minX = Math.floor(Math.min(p[0][0], p[1][0], p[2][0], p[3][0])), maxX = Math.ceil(Math.max(p[0][0], p[1][0], p[2][0], p[3][0]));
+    const minY = Math.floor(Math.min(p[0][1], p[1][1], p[2][1], p[3][1])), maxY = Math.ceil(Math.max(p[0][1], p[1][1], p[2][1], p[3][1]));
+    const w = maxX - minX, hh = maxY - minY;
+    if (w <= 0 || hh <= 0) return;
+    const k = solveHomography(p, sw, sh);
+    if (!k) return;
+    const out = new Uint8ClampedArray(w * hh * 4);
+    const [a, b, c, d, e, f, gg, h2] = k;
+    const D = src.data;
+    for (let py = 0; py < hh; py++) {
+      const y = minY + py + 0.5;
+      for (let px = 0; px < w; px++) {
+        const x = minX + px + 0.5;
+        const den = gg * x + h2 * y + 1;
+        if (Math.abs(den) < 1e-12) continue;
+        const u = (a * x + b * y + c) / den, v = (d * x + e * y + f) / den;
+        if (u < 0 || v < 0 || u > sw - 1 || v > sh - 1) continue;
+        const x0 = Math.floor(u), y0 = Math.floor(v), x1 = Math.min(x0 + 1, sw - 1), y1 = Math.min(y0 + 1, sh - 1);
+        const tx = u - x0, ty = v - y0, c0 = 1 - tx, c1 = tx, d0 = 1 - ty, d1 = ty;
+        const i00 = (y0 * sw + x0) * 4, i10 = (y0 * sw + x1) * 4, i01 = (y1 * sw + x0) * 4, i11 = (y1 * sw + x1) * 4;
+        const o = (py * w + px) * 4;
+        for (let ch = 0; ch < 4; ch++) {
+          let val = (D[i00 + ch] * c0 + D[i10 + ch] * c1) * d0 + (D[i01 + ch] * c0 + D[i11 + ch] * c1) * d1;
+          if (tint && ch < 3) val = val * tint[ch] / 255;
+          out[o + ch] = val;
+        }
+      }
+    }
+    const qc = document.createElement('canvas');
+    qc.width = w; qc.height = hh;
+    qc.getContext('2d').putImageData(new ImageData(out, w, hh), 0, 0);
+    g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.drawImage(qc, minX, minY); g.restore();
+  }
+  function extend(g) {
+    g.bpDrawImage = function (img, dx, dy, dw, dh, tint) {
+      if (tint) {
+        const iw = Math.abs(dw), ih = Math.abs(dh);
+        tintCanvas.width = iw; tintCanvas.height = ih;
+        tintCtx.clearRect(0, 0, iw, ih);
+        tintCtx.globalCompositeOperation = 'source-over';
+        tintCtx.drawImage(img, 0, 0, iw, ih);
+        tintCtx.globalCompositeOperation = 'multiply';
+        tintCtx.fillStyle = 'rgb(' + tint[0] + ',' + tint[1] + ',' + tint[2] + ')';
+        tintCtx.fillRect(0, 0, iw, ih);
+        tintCtx.globalCompositeOperation = 'destination-in';
+        tintCtx.drawImage(img, 0, 0, iw, ih);
+        this.drawImage(tintCanvas, dx, dy, dw, dh);
+      } else this.drawImage(img, dx, dy, dw, dh);
+    };
+    g.bpDrawQuad = function (img, p, tint) { quadCPU(this, img, p, tint); };
+    return g;
+  }
+  const main = extend(canvas.getContext('2d'));
+  return {
+    name: 'canvas2d', info: 'Canvas 2D', canvas, ctx: main, samples: 0,
+    createSurface(w, h) {
+      const c = document.createElement('canvas');
+      c.width = Math.max(0, Math.floor(w)); c.height = Math.max(0, Math.floor(h));
+      return { _canvas: c, _ctx: extend(c.getContext('2d')) };
+    },
+    surfaceScreen() {
+      const c = document.createElement('canvas');
+      c.width = canvas.width; c.height = canvas.height;
+      const g = c.getContext('2d');
+      g.drawImage(canvas, 0, 0);
+      return { _canvas: c, _ctx: extend(g) };
+    },
+    captureRegion(x, y, w, h) {
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      c.getContext('2d').drawImage(canvas, x, y, w, h, 0, 0, w, h);
+      return c;
+    },
+    present() {}
+  };
+}
+
+// create(canvas[, { force2d, allowSoftware }]) → backend. Add ?renderer=2d to the page address to force Canvas 2D.
+function create(canvas, opts) {
+  opts = opts || {};
+  let want2d = !!opts.force2d;
+  try { if (/[?&]renderer=2d\b/.test(location.search) || localStorage.getItem('bowpy_renderer') === '2d') want2d = true; } catch (e) {}
+  if (!want2d) {
+    const be = tryWebGL2(canvas, opts);
+    if (be) return be;
+  }
+  return createCanvas2D(canvas);
+}
+
+return { create, parseColor, Gradient, Renderer, Target, Ctx2D, K: { K_COLOR, K_TEX, K_TINT, K_QUAD, K_LIN, K_RAD, K_COPY, K_LOAD } };
+}
+
+// ══════════════════════════════════════════════════════════════
 //  DOM refs
 // ══════════════════════════════════════════════════════════════
 const $ed     = document.getElementById('editor');
@@ -544,7 +2588,8 @@ const $runBtn = document.getElementById('run-btn');
 const $stpBtn = document.getElementById('stop-btn');
 const $canvas = document.getElementById('screen');
 const $scTab  = document.getElementById('screen-tab');
-let ctx       = $canvas.getContext('2d');
+const BE      = _bowglFactory().create($canvas);   // screen renderer: WebGL2, or Canvas 2D fallback
+let ctx       = BE.ctx;
 const _mainCtx = ctx;
 let _bpTargetCanvas = $canvas;   // tracks which canvas draw calls land on
 let screenX = 0, screenY = 0, screenRot = 0, screenRotOx = 0, screenRotOy = 0;
@@ -1875,30 +3920,13 @@ window._py = {
     const ih = (h === 0) ? img.naturalHeight : Math.abs(h);
     const px = -iw * ox;
     const py = -ih * oy;
+    const tintRGB = (tint !== undefined && tint !== null && tint !== '' && tint !== 'none') ? _bpColorToRGB(tint) : null;
     ctx.save();
     ctx.translate(x, y);
     ctx.rotate(angle);
     if (flipX || flipY) ctx.scale(flipX ? -1 : 1, flipY ? -1 : 1);
-    if (tint !== undefined && tint !== null && tint !== '' && tint !== 'none') {
-      // Per-pixel tinting: draw to offscreen, multiply, restore alpha, blit
-      const tintRGB = _bpColorToRGB(tint);
-      if (tintRGB) {
-        _bpTintCanvas.width = iw; _bpTintCanvas.height = ih;
-        _bpTintCtx.clearRect(0, 0, iw, ih);
-        _bpTintCtx.globalCompositeOperation = 'source-over';
-        _bpTintCtx.drawImage(img, 0, 0, iw, ih);
-        _bpTintCtx.globalCompositeOperation = 'multiply';
-        _bpTintCtx.fillStyle = `rgb(${tintRGB[0]},${tintRGB[1]},${tintRGB[2]})`;
-        _bpTintCtx.fillRect(0, 0, iw, ih);
-        _bpTintCtx.globalCompositeOperation = 'destination-in';
-        _bpTintCtx.drawImage(img, 0, 0, iw, ih);
-        ctx.drawImage(_bpTintCanvas, px, py, iw, ih);
-      } else {
-        ctx.drawImage(img, px, py, iw, ih);
-      }
-    } else {
-      ctx.drawImage(img, px, py, iw, ih);
-    }
+    // tinting (multiply by the colour, keep the image's own alpha) happens inside the renderer
+    ctx.bpDrawImage(img, px, py, iw, ih, tintRGB);
     ctx.restore();
   },
   img_draw_quad(img, pts, tint) {
@@ -1911,96 +3939,8 @@ window._py = {
       const x = Number(q[0]); const y = Number(q[1]);
       return [m.a * x + m.c * y + m.e, m.b * x + m.d * y + m.f];
     });
-    const sw = img.naturalWidth, sh = img.naturalHeight;
-    const src = _bpSourcePixels(img);
-    if (!src) return;
-
-    const minX = Math.floor(Math.min(p[0][0], p[1][0], p[2][0], p[3][0]));
-    const maxX = Math.ceil(Math.max(p[0][0], p[1][0], p[2][0], p[3][0]));
-    const minY = Math.floor(Math.min(p[0][1], p[1][1], p[2][1], p[3][1]));
-    const maxY = Math.ceil(Math.max(p[0][1], p[1][1], p[2][1], p[3][1]));
-    const w = maxX - minX, hh = maxY - minY;
-    if (w <= 0 || hh <= 0) return;
-
-    const tintRGB = _bpColorToRGB(tint);
-    const out = new Uint8ClampedArray(w * hh * 4);
-
-    const solve = (A, b) => {
-      const n = b.length;
-      for (let i = 0; i < n; i++) {
-        let piv = i;
-        for (let r = i + 1; r < n; r++) if (Math.abs(A[r][i]) > Math.abs(A[piv][i])) piv = r;
-        if (Math.abs(A[piv][i]) < 1e-12) return null;
-        if (piv !== i) { const tr = A[i]; A[i] = A[piv]; A[piv] = tr; const tb = b[i]; b[i] = b[piv]; b[piv] = tb; }
-        const div = A[i][i];
-        for (let j = i; j < n; j++) A[i][j] /= div;
-        b[i] /= div;
-        for (let r = 0; r < n; r++) {
-          if (r === i) continue;
-          const f = A[r][i];
-          if (!f) continue;
-          for (let j = i; j < n; j++) A[r][j] -= f * A[i][j];
-          b[r] -= f * b[i];
-        }
-      }
-      return b;
-    };
-
-    const A = [];
-    const B = [];
-    const srcPts = [[0,0],[sw,0],[0,sh],[sw,sh]];
-    for (let i = 0; i < 4; i++) {
-      const [x, y] = p[i];
-      const [u, v] = srcPts[i];
-      A.push([x, y, 1, 0, 0, 0, -u * x, -u * y]);
-      B.push(u);
-      A.push([0, 0, 0, x, y, 1, -v * x, -v * y]);
-      B.push(v);
-    }
-    const coeff = solve(A, B);
-    if (!coeff) return;
-    const [a,b,cc,d,e,f,g,hh2] = coeff;
-
-    const idx = (x, y) => (y * sw + x) * 4;
-    const sample = (u, v) => {
-      if (u < 0 || v < 0 || u > sw - 1 || v > sh - 1) return null;
-      const x0 = Math.floor(u), y0 = Math.floor(v);
-      const x1 = Math.min(x0 + 1, sw - 1), y1 = Math.min(y0 + 1, sh - 1);
-      const tx = u - x0, ty = v - y0;
-      const i00 = idx(x0, y0), i10 = idx(x1, y0), i01 = idx(x0, y1), i11 = idx(x1, y1);
-      const c0 = 1 - tx, c1 = tx, d0 = 1 - ty, d1 = ty;
-      const r = (src.data[i00] * c0 + src.data[i10] * c1) * d0 + (src.data[i01] * c0 + src.data[i11] * c1) * d1;
-      const g2 = (src.data[i00 + 1] * c0 + src.data[i10 + 1] * c1) * d0 + (src.data[i01 + 1] * c0 + src.data[i11 + 1] * c1) * d1;
-      const b2 = (src.data[i00 + 2] * c0 + src.data[i10 + 2] * c1) * d0 + (src.data[i01 + 2] * c0 + src.data[i11 + 2] * c1) * d1;
-      const a2 = (src.data[i00 + 3] * c0 + src.data[i10 + 3] * c1) * d0 + (src.data[i01 + 3] * c0 + src.data[i11 + 3] * c1) * d1;
-      if (tintRGB) {
-        return [r * tintRGB[0] / 255, g2 * tintRGB[1] / 255, b2 * tintRGB[2] / 255, a2];
-      }
-      return [r, g2, b2, a2];
-    };
-
-    for (let py = 0; py < hh; py++) {
-      const y = minY + py + 0.5;
-      for (let px = 0; px < w; px++) {
-        const x = minX + px + 0.5;
-        const den = g * x + hh2 * y + 1;
-        if (Math.abs(den) < 1e-12) continue;
-        const u = (a * x + b * y + cc) / den;
-        const v = (d * x + e * y + f) / den;
-        const s = sample(u, v);
-        if (!s) continue;
-        const o = (py * w + px) * 4;
-        out[o] = s[0]; out[o + 1] = s[1]; out[o + 2] = s[2]; out[o + 3] = s[3];
-      }
-    }
-
-    const c = document.createElement('canvas');
-    c.width = w; c.height = hh;
-    c.getContext('2d').putImageData(new ImageData(out, w, hh), 0, 0);
-    ctx.save();
-    ctx.setTransform(1,0,0,1,0,0);
-    ctx.drawImage(c, minX, minY);
-    ctx.restore();
+    // perspective-correct textured quad (corners: top-left, top-right, bottom-left, bottom-right)
+    ctx.bpDrawQuad(img, p, _bpColorToRGB(tint));
   },
   img_size(img)  { return [img.naturalWidth || 0, img.naturalHeight || 0]; },
   img_ready(img) { return !!(img && img.complete && img.naturalWidth); },
@@ -2011,9 +3951,7 @@ window._py = {
     const maxY = Math.min($canvas.height, Math.ceil(Math.max(y1, y2)));
     const w = Math.max(0, maxX - minX);
     const h = Math.max(0, maxY - minY);
-    const c = document.createElement('canvas');
-    c.width = w; c.height = h;
-    c.getContext('2d').drawImage($canvas, minX, minY, w, h, 0, 0, w, h);
+    const c = BE.captureRegion(minX, minY, w, h);
     const img = new window.Image();
     img.src = c.toDataURL('image/png');
     if (!keep) _bpScreenCapImages.push(img); // only track for cleanup if not kept
@@ -2057,11 +3995,7 @@ window._py = {
   },
   // ── Surface ───────────────────────────────────────────────────
   surface_create(w, h) {
-    const c = document.createElement('canvas');
-    c.width  = (w > 0) ? Math.floor(w) : $canvas.width;
-    c.height = (h > 0) ? Math.floor(h) : $canvas.height;
-    const g  = c.getContext('2d');
-    return { _canvas: c, _ctx: g };
+    return BE.createSurface((w > 0) ? Math.floor(w) : $canvas.width, (h > 0) ? Math.floor(h) : $canvas.height);
   },
   surface_fill(sfc, cssColor) {
     if (!sfc || !sfc._ctx) return;
@@ -2091,11 +4025,7 @@ window._py = {
     return img;
   },
   surface_screen() {
-    const c = document.createElement('canvas');
-    c.width = $canvas.width; c.height = $canvas.height;
-    c.getContext('2d').drawImage($canvas, 0, 0);
-    const g = c.getContext('2d');
-    return { _canvas: c, _ctx: g };
+    return BE.surfaceScreen();
   },
   surface_w(sfc) { return sfc ? sfc._canvas.width  : 0; },
   surface_h(sfc) { return sfc ? sfc._canvas.height : 0; },
@@ -4187,6 +6117,1069 @@ def _frame():
 `;
 
 // ══════════════════════════════════════════════════════════════
+//  Hover tooltips (like VS Code) for functions, methods and classes.
+//  Everything written in the tabs is read from the source itself; BowPy's API and Python's built-ins are looked
+//  up in the Python runtime (_hv, defined by _HV_PY) and completed with the wiki pages.
+// ══════════════════════════════════════════════════════════════
+const _HV_PY = "import inspect as _hv_inspect, builtins as _hv_builtins, importlib as _hv_importlib, json as _hv_json, re as _hv_re\n\n# What the editor may show tooltips for: everything the BowPy prelude put in the program's namespace (captured now,\n# before any user code runs, so a program that re-defines a name cannot change the documentation of the original),\n# plus Python's built-ins.\n_HV_OBJS = {_k: _v for _k, _v in list(globals().items()) if not _k.startswith('_')}\n_HV_TYPES = ['str', 'list', 'dict', 'set', 'tuple', 'int', 'float', 'bool', 'bytes', 'frozenset', 'bytearray', 'complex', 'range']\n_HV_BLOCK = {'this', 'antigravity', 'turtle', 'tkinter', 'idlelib', 'webbrowser', 'pydoc', 'pdb', 'code', 'curses', 'readline', 'site', 'sitecustomize', 'usercustomize'}\n_HV_CACHE = {}\n\n\ndef _hv_clean_default(text):\n    text = _hv_re.sub(r\"<function (\\w+) at 0x[0-9a-fA-F]+>\", r\"\\1\", text)\n    text = _hv_re.sub(r\"<built-in function (\\w+)>\", r\"\\1\", text)\n    text = _hv_re.sub(r\"<class '([\\w.]+)'>\", r\"\\1\", text)\n    text = _hv_re.sub(r\"<([\\w.]+) object at 0x[0-9a-fA-F]+>\", r\"\\1(...)\", text)\n    return text\n\n\ndef _hv_root(root, imports):\n    \"\"\"The object a dotted name starts from: an import of the program, a BowPy name or a built-in.\"\"\"\n    spec = imports.get(root)\n    if spec:\n        modname, _, attr = spec.partition(':')\n        if modname.split('.')[0] in _HV_BLOCK:\n            return None\n        mod = _hv_importlib.import_module(modname)\n        return getattr(mod, attr) if attr else mod\n    if root in _HV_OBJS:\n        return _HV_OBJS[root]\n    if hasattr(_hv_builtins, root):\n        return getattr(_hv_builtins, root)\n    return None\n\n\ndef _hv_member(obj, name):\n    \"\"\"(raw attribute, owner class or None) without running descriptors.\"\"\"\n    if _hv_inspect.isclass(obj):\n        for k in obj.__mro__:\n            if name in k.__dict__:\n                return k.__dict__[name], k\n        return None, None\n    try:\n        return _hv_inspect.getattr_static(obj, name), None\n    except AttributeError:\n        return None, None\n\n\ndef _hv_lead_sigs(doc, names):\n    \"\"\"Overloads that built-ins write as the first lines of their docstring, e.g. 'max(iterable, *[, key=func]) -> value'\n    or 'D.update([E, ]**F) -> None.  Update D from ...' (the receiver prefix is dropped).\"\"\"\n    lines = doc.split('\\n')\n    sigs = []\n    i = 0\n    while i < len(lines):\n        ln = lines[i].strip()\n        m = None\n        for n in names:\n            m = _hv_re.match(r'^(?:\\w+\\.)?' + _hv_re.escape(n) + r'(\\([^)]*\\)(?:\\s*->\\s*[^.\\s]+(?: object)?)?)\\.?\\s*(.*)$', ln)\n            if m:\n                sigs.append(n + m[1])\n                if m[2]:                     # a description that starts on the same line stays in the doc\n                    lines[i] = m[2]\n                    i -= 1\n                break\n        if not m:\n            break\n        i += 1\n    rest = '\\n'.join(lines[i:]).strip('\\n')\n    return sigs, rest\n\n\ndef _hv_describe(raw, name, owner):\n    kind = None\n    deco = None\n    obj = raw\n    if isinstance(raw, staticmethod):\n        deco, obj = 'static', raw.__func__\n    elif isinstance(raw, classmethod):\n        deco, obj = 'class', raw.__func__\n    elif isinstance(raw, property):\n        kind, obj = 'property', raw.fget\n    if kind is None:\n        if _hv_inspect.ismodule(raw):\n            kind = 'module'\n        elif _hv_inspect.isclass(raw):\n            kind = 'class'\n        elif callable(obj):\n            kind = 'method' if owner is not None else 'function'\n        else:\n            return None\n    if kind == 'module':\n        name = getattr(raw, '__name__', name)\n    out = {'kind': kind, 'name': name, 'owner': owner.__name__ if owner is not None else None, 'deco': deco,\n           'sig': None, 'sigs': None, 'doc': None, 'origin': None}\n\n    # documentation (not inherited for classes)\n    if kind == 'class' or kind == 'module':\n        rawdoc = getattr(raw, '__doc__', None)\n    else:\n        rawdoc = getattr(obj, '__doc__', None)\n    doc = _hv_inspect.cleandoc(rawdoc) if isinstance(rawdoc, str) and rawdoc.strip() else None\n\n    # signature\n    if kind in ('function', 'method', 'class'):\n        target = obj\n        sig = None\n        try:\n            sig = _hv_inspect.signature(target)\n        except (ValueError, TypeError):\n            sig = None\n        if sig is not None:\n            params = list(sig.parameters.values())\n            if kind == 'method' and deco != 'static' and params:\n                params = params[1:]\n            try:\n                text = str(sig.replace(parameters=params))\n            except Exception:\n                text = str(sig)\n            out['sig'] = _hv_clean_default(text)\n        elif doc:\n            sigs, rest = _hv_lead_sigs(doc, [name, owner.__name__ if owner is not None else name])\n            if sigs:\n                out['sigs'] = sigs\n                doc = rest or None\n        if out['sig'] is None and not out['sigs']:\n            out['sig'] = '(...)'\n        elif doc and kind == 'class' and out['sig'] is not None:\n            # drop a leading 'Name(...)' line that only repeats the signature\n            first = doc.split('\\n', 1)[0].strip()\n            if first.startswith(name + '(') and '\\n' in doc:\n                doc = doc.split('\\n', 1)[1].strip('\\n') or None\n    out['doc'] = doc\n\n    # where it comes from\n    modname = getattr(obj if kind != 'module' else raw, '__module__', None)\n    if kind == 'module':\n        modname = getattr(raw, '__name__', name)\n        out['origin'] = modname\n    else:\n        if modname is None and owner is not None:\n            modname = getattr(owner, '__module__', None)\n        if modname == '__main__':\n            out['origin'] = 'BowPy'\n        elif modname == 'builtins':\n            out['origin'] = 'built-in'\n        else:\n            out['origin'] = modname\n    return out\n\n\ndef _hv_lookup(req):\n    imports = req.get('imports') or {}\n    obj = _hv_root(req['root'], imports)\n    if obj is None:\n        return None\n    name = req['root']\n    owner = None\n    for step in req.get('chain') or []:\n        raw, own = _hv_member(obj, step)\n        if raw is None:\n            return None\n        obj, name, owner = raw, step, own\n    member = req.get('name')\n    if member:\n        raw, own = _hv_member(obj, member)\n        if raw is None:\n            return None\n        return _hv_describe(raw, member, own)          # found on a class: a method; found on a module: a function\n    return _hv_describe(obj, name, owner)\n\n\ndef _hv_candidates(member):\n    \"\"\"Names of the known classes (BowPy, then built-in types) that have an attribute called `member`.\"\"\"\n    names = []\n    for k, v in _HV_OBJS.items():\n        if _hv_inspect.isclass(v) and getattr(v, '__module__', '') == '__main__' and hasattr(v, member):\n            names.append(k)\n    for t in _HV_TYPES:\n        if hasattr(getattr(_hv_builtins, t), member):\n            names.append(t)\n    return names\n\n\ndef _hv(req_json):\n    \"\"\"Entry point from the editor: a JSON request in, a JSON answer ('' when there is nothing to show) out.\"\"\"\n    hit = _HV_CACHE.get(req_json)\n    if hit is not None:\n        return hit\n    try:\n        req = _hv_json.loads(req_json)\n        if 'cand' in req:\n            out = _hv_candidates(req['cand'])\n        else:\n            out = _hv_lookup(req)\n        res = _hv_json.dumps(out) if out else ''\n    except Exception:\n        res = ''\n    if len(_HV_CACHE) > 4000:\n        _HV_CACHE.clear()\n    _HV_CACHE[req_json] = res\n    return res\n";
+let _hvReady = false;
+
+const _HV = (() => {
+  'use strict';
+  const DELAY = 300, GRACE = 240;
+
+  // ───────────────────────── source scanning ─────────────────────────
+  let scanCache = null;
+  // per line: the string / comment ranges, and whether the line starts inside a triple-quoted string
+  function scan(code) {
+    if (scanCache && scanCache.code === code) return scanCache;
+    const lines = code.split('\n');
+    const marks = new Array(lines.length), inTri = new Array(lines.length).fill(false);
+    let tri = null;
+    for (let li = 0; li < lines.length; li++) {
+      const L = lines[li], m = []; marks[li] = m;
+      let i = 0;
+      if (tri) {
+        inTri[li] = true;
+        const end = L.indexOf(tri);
+        if (end === -1) { m.push([0, L.length, 's']); continue; }
+        m.push([0, end + 3, 's']); i = end + 3; tri = null;
+      }
+      while (i < L.length) {
+        const c = L[i];
+        if (c === '#') { m.push([i, L.length, 'c']); break; }
+        if (c === '"' || c === "'") {
+          if (L[i + 1] === c && L[i + 2] === c) {
+            const q = c + c + c, end = L.indexOf(q, i + 3);
+            if (end === -1) { m.push([i, L.length, 's']); tri = q; break; }
+            m.push([i, end + 3, 's']); i = end + 3; continue;
+          }
+          let j = i + 1;
+          while (j < L.length && L[j] !== c) { if (L[j] === '\\') j++; j++; }
+          j = Math.min(L.length, j + 1);
+          m.push([i, j, 's']); i = j; continue;
+        }
+        i++;
+      }
+    }
+    scanCache = { code, lines, marks, inTri };
+    return scanCache;
+  }
+  const markAt = (sc, li, col) => { for (const r of sc.marks[li]) if (col >= r[0] && col < r[1]) return r[2]; return null; };
+  const indentOf = s => { let n = 0; for (const ch of s) { if (ch === ' ') n++; else if (ch === '\t') n += 4; else break; } return n; };
+
+  // split at top-level commas (strings and brackets respected)
+  function splitTop(text) {
+    const out = []; let depth = 0, cur = '', q = null;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (q) { cur += c; if (c === '\\') { cur += text[++i] || ''; } else if (c === q) q = null; continue; }
+      if (c === '"' || c === "'") { q = c; cur += c; continue; }
+      if (c === '(' || c === '[' || c === '{') depth++;
+      else if (c === ')' || c === ']' || c === '}') depth--;
+      if (c === ',' && depth === 0) { out.push(cur.trim()); cur = ''; continue; }
+      cur += c;
+    }
+    if (cur.trim()) out.push(cur.trim());
+    return out;
+  }
+
+  function cleandoc(text) {
+    const ls = text.replace(/\t/g, '    ').split('\n');
+    let min = Infinity;
+    for (let i = 1; i < ls.length; i++) { if (ls[i].trim()) min = Math.min(min, indentOf(ls[i])); }
+    const out = [ls[0].trimStart()];
+    for (let i = 1; i < ls.length; i++) out.push(min === Infinity ? ls[i].trim() : ls[i].slice(Math.min(min, indentOf(ls[i]))));
+    while (out.length && !out[0].trim()) out.shift();
+    while (out.length && !out[out.length - 1].trim()) out.pop();
+    return out.map(s => s.replace(/\s+$/, '')).join('\n');
+  }
+  function unescapePy(s) {
+    return s.replace(/\\(n|t|\\|"|'|\n)/g, (m, c) => c === 'n' ? '\n' : c === 't' ? '\t' : c === '\n' ? '' : c);
+  }
+
+  // ───────────────────────── reading definitions ─────────────────────────
+  // text between the brackets that open at lines[li][col], plus what follows up to the colon
+  function readHeader(sc, li, col) {
+    const lines = sc.lines;
+    let depth = 0, params = '', k = li, i = col, closed = false, after = '';
+    for (; k < lines.length && k < li + 60; k++, i = 0) {
+      const L = lines[k];
+      for (; i < L.length; i++) {
+        const mk = markAt(sc, k, i);
+        if (mk === 'c') { i = L.length; break; }
+        const c = L[i];
+        if (!closed) {
+          if (mk !== 's') {
+            if (c === '(' || c === '[' || c === '{') { depth++; if (depth === 1 && k === li && i === col) continue; }
+            else if (c === ')' || c === ']' || c === '}') { depth--; if (depth === 0) { closed = true; continue; } }
+          }
+          params += c;
+        } else {
+          if (c === ':' && mk !== 's') return { params: params.replace(/\s+/g, ' ').trim(), after: after.trim(), end: k, colonCol: i, inline: L.slice(i + 1).trim().replace(/^#.*$/, '') };
+          after += c;
+        }
+      }
+      if (!closed) params += ' ';
+      else after += ' ';
+    }
+    return { params: params.replace(/\s+/g, ' ').trim(), after: after.trim(), end: Math.min(k, lines.length - 1), colonCol: -1, inline: '' };
+  }
+  function readDoc(lines, li) {
+    while (li < lines.length && !lines[li].trim()) li++;
+    if (li >= lines.length) return null;
+    const L = lines[li], t = L.trimStart();
+    const m = /^([rRuUbBfF]{0,2})("""|'''|"|')/.exec(t);
+    if (!m) return null;
+    const raw = /r/i.test(m[1]), q = m[2], startCol = L.length - t.length + m[0].length;
+    let text = '';
+    if (q.length === 3) {
+      let cur = L.slice(startCol), k = li, closed = false;
+      for (;;) {
+        const end = cur.indexOf(q);
+        if (end !== -1) { text += cur.slice(0, end); closed = true; break; }
+        text += cur + '\n'; k++;
+        if (k >= lines.length || k - li > 500) break;
+        cur = lines[k];
+      }
+      if (!closed && k >= lines.length) text = text.replace(/\n$/, '');
+    } else {
+      let j = startCol;
+      while (j < L.length && L[j] !== q) { if (L[j] === '\\') j++; j++; }
+      text = L.slice(startCol, j);
+    }
+    if (!raw) text = unescapePy(text);
+    return cleandoc(text);
+  }
+
+  const reDef = /^(\s*)(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(/;
+  const reCls = /^(\s*)class\s+([A-Za-z_]\w*)\s*([(:])/;
+  const parseCache = new Map();   // code -> parsed
+  function parse(code) {
+    const hit = parseCache.get(code);
+    if (hit) return hit;
+    const sc = scan(code), lines = sc.lines, syms = [];
+    for (let li = 0; li < lines.length; li++) {
+      if (sc.inTri[li]) continue;
+      const L = lines[li];
+      let m = reDef.exec(L), isCls = false;
+      if (!m) { m = reCls.exec(L); isCls = !!m; }
+      if (!m) continue;
+      if (markAt(sc, li, m[1].length) != null) continue;
+      const name = m[2], nameCol = L.indexOf(name, m[1].length);
+      const openCol = isCls && m[3] === ':' ? -1 : L.indexOf('(', nameCol + name.length);
+      let hdr;
+      if (openCol === -1) {
+        const colon = L.indexOf(':', nameCol + name.length);
+        hdr = { params: '', after: '', end: li, colonCol: colon, inline: colon === -1 ? '' : L.slice(colon + 1).trim().replace(/^#.*$/, '') };
+      } else hdr = readHeader(sc, li, openCol);
+      let ret = null;
+      if (!isCls && /^->/.test(hdr.after)) ret = hdr.after.replace(/^->\s*/, '').trim();
+      // decorators written directly above
+      const decos = [];
+      for (let k = li - 1; k >= 0 && k >= li - 8; k--) {
+        const t = lines[k].trim();
+        if (t.startsWith('@')) decos.push(t.slice(1).replace(/\(.*$/, '').trim());
+        else if (!t || t.startsWith('#')) continue;
+        else break;
+      }
+      const s = { name, isClass: isCls, line: li, nameCol, indent: indentOf(L), params: hdr.params, ret, hdrEnd: hdr.end,
+                  decos, doc: hdr.inline ? null : readDoc(lines, hdr.end + 1), kind: isCls ? 'class' : 'function', owner: null, parent: null, deco: null };
+      syms.push(s);
+    }
+    for (const s of syms) {      // where does the block end
+      let e = s.hdrEnd;
+      for (let k = s.hdrEnd + 1; k < lines.length; k++) {
+        const t = lines[k];
+        if (sc.inTri[k] || !t.trim() || t.trim().startsWith('#')) continue;
+        if (indentOf(t) <= s.indent) break;
+        e = k;
+      }
+      s.end = e;
+    }
+    const stack = [];
+    for (const s of syms) {      // what contains it (blocks nest by indentation)
+      while (stack.length && (stack[stack.length - 1].end < s.line || stack[stack.length - 1].indent >= s.indent)) stack.pop();
+      const best = stack.length ? stack[stack.length - 1] : null;
+      stack.push(s);
+      s.parent = best;
+      if (best && best.isClass && !s.isClass) { s.kind = 'method'; s.owner = best.name; }
+      if (s.kind === 'method' || s.kind === 'function') {
+        if (s.decos.includes('staticmethod')) s.deco = 'static';
+        else if (s.decos.includes('classmethod')) s.deco = 'class';
+        else if (s.decos.some(d => d === 'property' || /\.getter$/.test(d) || d === 'cached_property')) s.kind = 'property';
+      }
+    }
+    // imports
+    const imports = {};      // alias -> { mod, attr }
+    for (let li = 0; li < lines.length; li++) {
+      if (sc.inTri[li]) continue;
+      const L = lines[li];
+      let m = /^\s*import\s+(.+?)\s*(?:#.*)?$/.exec(L);
+      if (m && markAt(sc, li, L.indexOf('import')) == null) {
+        for (const part of m[1].split(',')) {
+          const mm = /^\s*([\w.]+)(?:\s+as\s+(\w+))?\s*$/.exec(part);
+          if (!mm) continue;
+          if (mm[2]) imports[mm[2]] = { mod: mm[1] }; else imports[mm[1].split('.')[0]] = { mod: mm[1].split('.')[0] };
+        }
+        continue;
+      }
+      m = /^\s*from\s+([\w.]+)\s+import\s+\(?(.+?)\)?\s*(?:#.*)?$/.exec(L);
+      if (m && markAt(sc, li, L.indexOf('from')) == null) {
+        for (const part of m[2].split(',')) {
+          const mm = /^\s*(\w+)(?:\s+as\s+(\w+))?\s*$/.exec(part);
+          if (mm) imports[mm[2] || mm[1]] = { mod: m[1], attr: mm[1] };
+        }
+      }
+    }
+    const res = { code, sc, lines, syms, imports };
+    if (parseCache.size > 40) parseCache.clear();
+    parseCache.set(code, res);
+    return res;
+  }
+  const enclosing = (P, li, pred) => {      // innermost symbol (matching pred) whose block contains the line
+    let best = null;
+    for (const s of P.syms) if (s.line < li && s.end >= li && (!pred || pred(s)) && (!best || s.line > best.line)) best = s;
+    return best;
+  };
+
+  // ───────────────────────── tabs ─────────────────────────
+  function tabList() {
+    const out = [];
+    for (const t of _tabs) {
+      const code = t.name === _activeTab ? $ed.value : t.code;
+      out.push({ name: t.name, base: t.name.replace(/\.bpy$/i, ''), code: code || '', main: t.name === MAIN_TAB });
+    }
+    return out;
+  }
+
+  // ───────────────────────── python lookups ─────────────────────────
+  let pyFn = null;
+  function py(req) {
+    if (!_hvReady || typeof pyodide === 'undefined' || !pyodide) return null;
+    try {
+      if (!pyFn) pyFn = pyodide.globals.get('_hv');
+      const s = pyFn(JSON.stringify(req));
+      return s ? JSON.parse(s) : null;
+    } catch (e) { return null; }
+  }
+  const PY_FUNC_RET = { len: 'int', input: 'str', sorted: 'list', repr: 'str', format: 'str', chr: 'str', ord: 'int', hex: 'str', bin: 'str', oct: 'str', ascii: 'str' };
+  const STR_RET = { split: 'list', rsplit: 'list', splitlines: 'list', partition: 'tuple', rpartition: 'tuple', find: 'int', rfind: 'int', index: 'int', count: 'int', encode: 'bytes' };
+  const importMap = (P, root) => { const i = P.imports[root]; return i ? { [root]: i.attr ? i.mod + ':' + i.attr : i.mod } : {}; };
+
+  // ───────────────────────── type inference ─────────────────────────
+  // types:  {t:'user', cls, tab}  instance of a class written in a tab        {t:'userclass', cls, tab}  the class itself
+  //         {t:'py', root, chain, imp}  a Python / BowPy class, module or built-in   {t:'tabmod', tab}  a tab used as a module
+  //         {t:'unknown'}
+  const UNK = { t: 'unknown' };
+  const topSyms = (tab) => parse(tab.code).syms.filter(s => !s.parent);
+  function findClass(name, ctx) {
+    const P = ctx.P;
+    const c = P.syms.find(s => s.isClass && s.name === name);
+    if (c) return { t: 'user', cls: c, tab: ctx.tab };
+    return null;
+  }
+  function stripAnn(a) {
+    a = String(a || '').trim().replace(/^['"]|['"]$/g, '');
+    let m = /^(?:typing\.)?Optional\[(.+)\]$/.exec(a); if (m) a = m[1];
+    a = a.split('|')[0].trim().replace(/\[.*$/, '');
+    return a;
+  }
+  function typeOfAnnotation(a, ctx) {
+    a = stripAnn(a);
+    if (!/^[A-Za-z_][\w.]*$/.test(a)) return UNK;
+    const segs = a.split('.');
+    let t = typeOfName(segs[0], ctx, 0, true);
+    for (let i = 1; i < segs.length && t.t !== 'unknown'; i++) t = classMember(t, segs[i], ctx);
+    return t.t === 'userclass' ? { t: 'user', cls: t.cls, tab: t.tab } : t.t === 'py' ? t : UNK;
+  }
+  function typeOfLiteral(s) {
+    if (/^[rRuUbBfF]{0,2}("""|'''|"|')/.test(s)) return { t: 'py', root: /^[bB]/.test(s) ? 'bytes' : 'str', chain: [] };
+    if (/^[-+]?\d[\d_]*\.\d*([eE][-+]?\d+)?(?![\w])|^[-+]?\.\d|^[-+]?\d[\d_]*[eE][-+]?\d+/.test(s)) return { t: 'py', root: 'float', chain: [] };
+    if (/^[-+]?(0[xXoObB][\da-fA-F_]+|\d[\d_]*)(?![\w.])/.test(s)) return { t: 'py', root: 'int', chain: [] };
+    if (/^(True|False)\b/.test(s)) return { t: 'py', root: 'bool', chain: [] };
+    if (s[0] === '[') return { t: 'py', root: 'list', chain: [] };
+    if (s[0] === '{') {
+      let depth = 0, hasColon = false, hasComma = false, empty = /^\{\s*\}/.test(s), star = false;
+      for (let i = 0, q = null; i < s.length; i++) {
+        const c = s[i];
+        if (q) { if (c === '\\') i++; else if (c === q) q = null; continue; }
+        if (c === '"' || c === "'") { q = c; continue; }
+        if (c === '(' || c === '[' || c === '{') depth++;
+        else if (c === ')' || c === ']' || c === '}') { depth--; if (depth === 0) break; }
+        else if (depth === 1 && c === ':') hasColon = true;
+        else if (depth === 1 && c === ',') hasComma = true;
+      }
+      return { t: 'py', root: empty || hasColon || /^\{\s*\*\*/.test(s) ? 'dict' : 'set', chain: [] };
+    }
+    if (s[0] === '(') {
+      let depth = 0, comma = false;
+      for (let i = 0, q = null; i < s.length; i++) {
+        const c = s[i];
+        if (q) { if (c === '\\') i++; else if (c === q) q = null; continue; }
+        if (c === '"' || c === "'") { q = c; continue; }
+        if (c === '(' || c === '[' || c === '{') depth++;
+        else if (c === ')' || c === ']' || c === '}') { depth--; if (depth === 0) break; }
+        else if (depth === 1 && c === ',') comma = true;
+      }
+      return comma || /^\(\s*\)/.test(s) ? { t: 'py', root: 'tuple', chain: [] } : UNK;
+    }
+    return null;
+  }
+  const stripComment = (s) => {
+    let q = null;
+    for (let i = 0; i < s.length; i++) {
+      const c = s[i];
+      if (q) { if (c === '\\') i++; else if (c === q) q = null; continue; }
+      if (c === '"' || c === "'") q = c; else if (c === '#') return s.slice(0, i);
+    }
+    return s;
+  };
+  // what an expression evaluates to (only what can be told from the text)
+  function classify(rhs, ctx, depth) {
+    if (depth > 5) return UNK;
+    const s = stripComment(rhs).trim();
+    if (!s) return UNK;
+    const lit = typeOfLiteral(s);
+    if (lit) return lit;
+    if (s === 'None') return UNK;
+    const call = /^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(/.exec(s);
+    if (call) {
+      const segs = call[1].split('.');
+      if (segs.length === 1) return callReturn(typeOfName(segs[0], ctx, depth + 1), null, ctx, depth + 1, segs[0]);
+      let t = typeOfName(segs[0], ctx, depth + 1);
+      for (let i = 1; i < segs.length - 1 && t.t !== 'unknown'; i++) t = attrType(t, segs[i], ctx, depth + 1);
+      return callReturn(t, segs[segs.length - 1], ctx, depth + 1, null);
+    }
+    const id = /^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*$/.exec(s);
+    if (id) {
+      const segs = id[1].split('.');
+      let t = typeOfName(segs[0], ctx, depth + 1);
+      for (let i = 1; i < segs.length && t.t !== 'unknown'; i++) t = attrType(t, segs[i], ctx, depth + 1);
+      return t.t === 'userclass' || t.t === 'tabmod' ? UNK : t;
+    }
+    return UNK;
+  }
+  // what calling `t` (a class / function), or `t.member`, gives back
+  function callReturn(t, member, ctx, depth, bareName) {
+    if (t.t === 'unknown') return UNK;
+    if (!member) {
+      if (t.t === 'userclass') return { t: 'user', cls: t.cls, tab: t.tab };
+      if (t.t === 'userfunc') return t.sym.ret ? typeOfAnnotation(t.sym.ret, { ...ctx, P: parse(t.tab.code), tab: t.tab, line: 0 }) : UNK;
+      if (t.t === 'py' && !t.chain.length) {
+        const info = py({ root: t.root, imports: t.imp || {} });
+        if (info && info.kind === 'class') return t;
+        if (bareName && PY_FUNC_RET[bareName]) return { t: 'py', root: PY_FUNC_RET[bareName], chain: [] };
+      }
+      return UNK;
+    }
+    if (t.t === 'tabmod') {
+      const sym = topSyms(t.tab).find(s => s.name === member);
+      if (!sym) return UNK;
+      const sub = { ...ctx, P: parse(t.tab.code), tab: t.tab, line: 0 };
+      if (sym.isClass) return { t: 'user', cls: sym, tab: t.tab };
+      return sym.ret ? typeOfAnnotation(sym.ret, sub) : UNK;
+    }
+    if (t.t === 'user' || t.t === 'userclass') {
+      const m = findUserMember(t.cls, t.tab, member, ctx);
+      if (m && m.sym) {
+        if (m.sym.isClass) return { t: 'user', cls: m.sym, tab: m.tab };
+        if (m.sym.ret) return typeOfAnnotation(m.sym.ret, { ...ctx, P: parse(m.tab.code), tab: m.tab, line: 0 });
+        if (m.sym.deco === 'static' || m.sym.deco === 'class') return { t: 'user', cls: t.cls, tab: t.tab };
+        if (member === 'copy') return t.t === 'user' ? t : { t: 'user', cls: t.cls, tab: t.tab };
+      }
+      return UNK;
+    }
+    if (t.t === 'py') {
+      const info = py({ root: t.root, chain: t.chain, name: member, imports: t.imp || {} });
+      if (!info) return UNK;
+      if (info.kind === 'class') return { t: 'py', root: t.root, chain: [...t.chain, member], imp: t.imp };
+      if (info.deco === 'static' || info.deco === 'class') return { t: 'py', root: t.root, chain: t.chain, imp: t.imp };
+      if (t.root === 'str' && STR_RET[member]) return { t: 'py', root: STR_RET[member], chain: [] };
+      if (t.root === 'str' && info.kind === 'method' && !t.chain.length) return { t: 'py', root: 'str', chain: [] };
+      if (member === 'copy' && !t.chain.length) return { t: 'py', root: t.root, chain: [], imp: t.imp };
+    }
+    return UNK;
+  }
+  // the type of attribute `name` of a value
+  function attrType(t, name, ctx, depth) {
+    if (t.t === 'tabmod') {
+      const sym = topSyms(t.tab).find(s => s.name === name);
+      if (sym) return sym.isClass ? { t: 'userclass', cls: sym, tab: t.tab } : { t: 'userfunc', sym, tab: t.tab };
+      const sub = { ...ctx, P: parse(t.tab.code), tab: t.tab, line: 0 };
+      const v = findAssign(sub, name, 0, null, depth + 1);
+      return v || UNK;
+    }
+    if (t.t === 'user' || t.t === 'userclass') {
+      const sub = { ...ctx, P: parse(t.tab.code), tab: t.tab };
+      const L = sub.P.lines;
+      const re = new RegExp('^\\s*(?:self\\.)?' + name + '\\s*(?::\\s*([^=]+?))?\\s*=(?!=)\\s*(.*)$');
+      for (let k = t.cls.line + 1; k <= t.cls.end; k++) {
+        if (sub.P.sc.inTri[k]) continue;
+        const raw = L[k];
+        if (!raw.includes(name)) continue;
+        let m = new RegExp('^\\s*self\\.' + name + '\\s*(?::\\s*([^=]+?))?\\s*=(?!=)\\s*(.*)$').exec(raw);
+        if (!m && indentOf(raw) === t.cls.indent + 4) m = re.exec(raw);
+        if (!m) continue;
+        sub.line = k;
+        return m[1] ? typeOfAnnotation(m[1], sub) : classify(m[2], sub, depth + 1);
+      }
+      const mem = findUserMember(t.cls, t.tab, name, ctx);
+      if (mem && mem.sym) return mem.sym.isClass ? { t: 'userclass', cls: mem.sym, tab: mem.tab } : { t: 'userfunc', sym: mem.sym, tab: mem.tab };
+    }
+    return UNK;
+  }
+  // first assignment to `name` in the tab (before `line` when possible); null when the name is never assigned
+  function findAssign(ctx, name, line, _unused, depth) {
+    const P = ctx.P, L = P.lines;
+    const re = new RegExp('^\\s*' + name + '\\s*(?::\\s*([^=]+?))?\\s*=(?!=)\\s*(.*)$');
+    const other = new RegExp('^\\s*(?:for\\s+(?:[\\w,\\s()]*[,\\s(])?' + name + '\\b[^=]*\\s+in\\s|with\\s.*\\bas\\s+' + name + '\\b|except\\s.*\\bas\\s+' + name + '\\b|[\\w.,\\s()\\[\\]*]*(?<![.\\w])' + name + '\\b[\\w.,\\s()\\[\\]*]*[-+*/%&|^@]?=(?!=))');
+    const test = (k) => {
+      if (P.sc.inTri[k]) return null;
+      const raw = L[k];
+      if (!raw.includes(name)) return null;
+      const m = re.exec(raw);
+      if (m && markAt(P.sc, k, raw.indexOf(name)) == null) return { m, k };
+      if (other.test(raw)) return { other: true, k };
+      return null;
+    };
+    let found = null;
+    for (let k = Math.min(line, L.length) - 1; k >= 0 && !found; k--) found = test(k);
+    for (let k = line; k < L.length && !found; k++) found = test(k);
+    if (!found) return null;
+    if (found.other) return UNK;
+    const sub = { ...ctx, line: found.k };
+    return found.m[1] ? typeOfAnnotation(found.m[1], sub) : classify(found.m[2], sub, depth);
+  }
+  // a parameter of the function around the line
+  function paramType(ctx, name) {
+    const fn = enclosing(ctx.P, ctx.line, s => !s.isClass);
+    if (!fn) return null;
+    let f = fn;
+    while (f) {
+      for (const p of splitTop(f.params)) {
+        const m = /^\*{0,2}([A-Za-z_]\w*)\s*(?::\s*([^=]+?))?\s*(?:=\s*(.*))?$/.exec(p);
+        if (!m || m[1] !== name) continue;
+        if (m[2]) return typeOfAnnotation(m[2], ctx);
+        if (m[3]) { const lit = typeOfLiteral(m[3].trim()); if (lit) return lit; }
+        return UNK;
+      }
+      f = enclosing(ctx.P, f.line, s => !s.isClass);
+    }
+    return null;
+  }
+  function typeOfName(name, ctx, depth, annotationMode) {
+    depth = depth || 0;
+    if (depth > 6) return UNK;
+    if ((name === 'self' || name === 'cls') && !annotationMode) {
+      const c = enclosing(ctx.P, ctx.line, s => s.isClass);
+      if (c) return name === 'self' ? { t: 'user', cls: c, tab: ctx.tab } : { t: 'userclass', cls: c, tab: ctx.tab };
+    }
+    // a name bound by the program itself comes first
+    const cls = ctx.P.syms.find(s => s.isClass && s.name === name && !s.parent);
+    if (cls) return { t: 'userclass', cls, tab: ctx.tab };
+    const fn = ctx.P.syms.find(s => !s.isClass && s.name === name && !s.parent);
+    if (fn) return { t: 'userfunc', sym: fn, tab: ctx.tab };
+    const imp = ctx.P.imports[name];
+    if (imp) {
+      const tabMod = ctx.tabs.find(t => !t.main && t.base === imp.mod);
+      if (tabMod) {
+        if (!imp.attr) return { t: 'tabmod', tab: tabMod };
+        return attrType({ t: 'tabmod', tab: tabMod }, imp.attr, ctx, depth + 1);
+      }
+      return { t: 'py', root: name, chain: [], imp: importMap(ctx.P, name) };
+    }
+    if (!annotationMode) {
+      const pt = paramType(ctx, name);
+      if (pt) return pt;
+      const v = findAssign(ctx, name, ctx.line, null, depth + 1);
+      if (v) return v;
+    }
+    const tm = ctx.tabs.find(t => !t.main && t.base === name && t.name !== ctx.tab.name);
+    if (tm) return { t: 'tabmod', tab: tm };
+    return py({ root: name }) ? { t: 'py', root: name, chain: [], imp: {} } : UNK;
+  }
+  function findUserMember(cls, tab, name, ctx, seen) {
+    seen = seen || new Set();
+    if (seen.has(cls)) return null;
+    seen.add(cls);
+    const P = parse(tab.code);
+    const sym = P.syms.find(s => s.parent === cls && s.name === name);
+    if (sym) return { sym, tab };
+    // base classes
+    for (const b of splitTop(cls.params)) {
+      const bn = b.replace(/^.*=/, '').trim();
+      const sub = { ...ctx, P, tab, line: cls.line };
+      const bt = typeOfName(bn.split('.')[0], sub, 1, true);
+      let t = bt;
+      const segs = bn.split('.');
+      for (let i = 1; i < segs.length && t.t !== 'unknown'; i++) t = classMember(t, segs[i], ctx);
+      if (t.t === 'userclass') { const r = findUserMember(t.cls, t.tab, name, ctx, seen); if (r) return r; }
+      else if (t.t === 'py') { return { py: { root: t.root, chain: t.chain, imp: t.imp }, name }; }
+    }
+    return null;
+  }
+  // `t.name` where t is a class or module
+  function classMember(t, name, ctx) {
+    if (t.t === 'tabmod') return attrType(t, name, ctx, 1);
+    if (t.t === 'userclass') {
+      const m = findUserMember(t.cls, t.tab, name, ctx);
+      if (m && m.sym && m.sym.isClass) return { t: 'userclass', cls: m.sym, tab: m.tab };
+      return UNK;
+    }
+    if (t.t === 'py') {
+      const info = py({ root: t.root, chain: t.chain, name, imports: t.imp || {} });
+      if (info && (info.kind === 'class' || info.kind === 'module')) return { t: 'py', root: t.root, chain: [...t.chain, name], imp: t.imp };
+    }
+    return UNK;
+  }
+
+  // ───────────────────────── the receiver before a dot ─────────────────────────
+  // segments of `a.b(…)[…].c.` that end right before `dotIdx` (the dot), root first: {id, call} or {index};
+  // a literal receiver comes back as {lit, text}; null when the text before the dot is not something we understand
+  function receiverBefore(L, dotIdx) {
+    const segs = [];
+    let i = dotIdx - 1;
+    const skipSp = () => { while (i >= 0 && L[i] === ' ') i--; };
+    // i is on a closing bracket: move it to just before the matching opener and return the opener's index (-1 when unbalanced)
+    const matchBack = () => {
+      let depth = 0, q = null;
+      for (; i >= 0; i--) {
+        const c = L[i];
+        if (q) { if (c === q && L[i - 1] !== '\\') q = null; continue; }
+        if (c === '"' || c === "'") { q = c; continue; }
+        if (c === ')' || c === ']' || c === '}') depth++;
+        else if (c === '(' || c === '[' || c === '{') { depth--; if (depth === 0) { const at = i; i--; return at; } }
+      }
+      return -1;
+    };
+    for (let guard = 0; guard < 16; guard++) {
+      skipSp();
+      if (i < 0) return null;
+      const c = L[i];
+      let call = false;
+      if (c === ')' || c === ']' || c === '}') {
+        const closeAt = i, openAt = matchBack();
+        if (openAt < 0) return null;
+        skipSp();
+        const prev = i >= 0 ? L[i] : '';
+        const nameBefore = c !== '}' && /[\w)\]]/.test(prev) && !/\d/.test(prev);
+        if (!nameBefore) return { lit: c === ')' ? 'paren' : c === ']' ? 'list' : 'brace', text: L.slice(openAt, closeAt + 1), segs };
+        if (prev === ')' || prev === ']') return null;       // a()() , a[0][1] ...
+        if (c === ']') { segs.unshift({ index: true }); continue; }
+        call = true;
+      } else if (c === '"' || c === "'") {
+        return { lit: 'str', segs };
+      }
+      const m = /[A-Za-z_]\w*$/.exec(L.slice(0, i + 1));
+      if (!m) return null;
+      i -= m[0].length;
+      segs.unshift({ id: m[0], call });
+      skipSp();
+      if (i >= 0 && L[i] === '.') { i--; continue; }
+      return { segs };
+    }
+    return null;
+  }
+
+  // ───────────────────────── describing things ─────────────────────────
+  function userSig(sym, asDef, hasInstance) {
+    let params = splitTop(sym.params);
+    if (sym.isClass) return null;
+    if (!asDef && sym.kind === 'method' && sym.deco !== 'static' && params.length) params = params.slice(1);
+    return '(' + params.join(', ') + ')' + (sym.ret ? ' -> ' + sym.ret : '');
+  }
+  function userInfo(sym, tab, asDef) {
+    const P = parse(tab.code);
+    const info = { kind: sym.kind, deco: sym.deco, name: sym.name, owner: sym.owner, sig: null, sigs: null, doc: sym.doc, origin: tab.name, user: true };
+    if (sym.isClass) {
+      const init = P.syms.find(s => s.parent === sym && s.name === '__init__');
+      let params = init ? splitTop(init.params).slice(1) : [];
+      if (sym.params && !init) params = [];
+      info.sig = '(' + params.join(', ') + ')';
+      if (!info.doc && init && init.doc) info.doc = init.doc;
+      info.bases = sym.params || '';
+    } else info.sig = userSig(sym, asDef);
+    return info;
+  }
+  function pyInfo(req) {
+    const info = py(req);
+    if (!info || Array.isArray(info)) return null;
+    info.py = true;
+    return info;
+  }
+
+  // ───────────────────────── wiki ─────────────────────────
+  let wikiIdx = null;
+  const stripTags = (h) => {
+    const d = document.createElement('div');
+    d.innerHTML = String(h || '').replace(/<code>(.*?)<\/code>/gi, '`$1`').replace(/<br\s*\/?>/gi, '\n');
+    return (d.textContent || '').replace(/[ \t]+/g, ' ').trim();
+  };
+  function buildWikiIndex() {
+    const idx = { fn: new Map(), cls: new Map(), mem: new Map(), memDesc: new Map() };
+    if (typeof WIKI_DOCS === 'undefined') return idx;
+    for (const [id, p] of Object.entries(WIKI_DOCS)) {
+      const title = String(p.title || '');
+      let m;
+      if (p.type === 'class') {
+        const nm = title.replace(/\(\)$/, '').replace(/\s+Overview$/, '').replace(/\s+/g, '');
+        if (/^\w+$/.test(nm) && (!idx.cls.has(nm) || !/Overview$/.test(title))) idx.cls.set(nm, id);
+        // member tables on class pages
+        addTables(idx, nm, p);
+        continue;
+      }
+      if ((m = /^(\w+)\.(\w+)\(\)$/.exec(title))) { idx.mem.set(m[1] + '.' + m[2], id); continue; }
+      if ((m = /^(\w+) — (.+)$/.exec(title))) {
+        const cls = m[1];
+        for (const t of m[2].matchAll(/(?<![\w.])\.?([A-Za-z_]\w*)/g)) if (!idx.mem.has(cls + '.' + t[1])) idx.mem.set(cls + '.' + t[1], id);
+        addTables(idx, cls, p);
+        continue;
+      }
+      if (p.type === 'function') for (const t of title.matchAll(/(?<![\w.])([A-Za-z_]\w*)\(/g)) idx.fn.set(t[1], id);
+    }
+    return idx;
+  }
+  function addTables(idx, cls, page) {
+    let doc;
+    try { doc = new DOMParser().parseFromString(page.body || '', 'text/html'); } catch (e) { return; }
+    for (const tb of doc.querySelectorAll('table')) {
+      const head = tb.rows[0] ? tb.rows[0].cells[0].textContent.trim() : '';
+      if (!/^(Property|Method)/.test(head)) continue;
+      const three = tb.rows[0].cells.length >= 3;
+      for (const r of [...tb.rows].slice(1)) {
+        const cells = [...r.cells];
+        const m = /^(?:\w+\.)?\.?([A-Za-z_]\w*)/.exec(cells[0].textContent.trim());
+        if (!m) continue;
+        const key = cls + '.' + m[1];
+        if (!idx.memDesc.has(key)) idx.memDesc.set(key, { desc: stripTags(cells[cells.length - 1].innerHTML), type: three ? cells[1].textContent.trim() : '' });
+      }
+    }
+  }
+  function wikiParams(page) {
+    let doc;
+    try { doc = new DOMParser().parseFromString(page.body || '', 'text/html'); } catch (e) { return []; }
+    for (const tb of doc.querySelectorAll('table')) {
+      const head = tb.rows[0] ? tb.rows[0].cells[0].textContent.trim() : '';
+      if (head !== 'Parameter') continue;
+      return [...tb.rows].slice(1).map(r => { const c = [...r.cells]; return { name: c[0].textContent.trim(), type: c.length > 2 ? c[1].textContent.trim() : '', desc: stripTags(c[c.length - 1].innerHTML) }; });
+    }
+    return [];
+  }
+  function addWiki(info) {
+    if (!info || info.user || info.origin !== 'BowPy') return info;
+    try {
+      if (!wikiIdx) wikiIdx = buildWikiIndex();
+      let id = null;
+      if (info.kind === 'class') id = wikiIdx.cls.get(info.name);
+      else if (info.kind === 'function') id = wikiIdx.fn.get(info.name);
+      else if (info.owner) id = wikiIdx.mem.get(info.owner + '.' + info.name);
+      const page = id && WIKI_DOCS[id];
+      if (page) {
+        if (!info.doc && page.desc) info.doc = stripTags(page.desc);
+        info.params = wikiParams(page);
+        info.wikiId = id;
+      }
+      if (info.owner) {
+        const md = wikiIdx.memDesc.get(info.owner + '.' + info.name);
+        if (md) { if (!info.doc) info.doc = md.desc; if (md.type && info.kind === 'property') info.type = md.type; }
+        if (!info.wikiId) { const cid = wikiIdx.cls.get(info.owner); if (cid) { info.wikiId = cid; info.wikiLabel = info.owner; } }
+      }
+    } catch (e) {}
+    return info;
+  }
+
+  // ───────────────────────── resolving the word under the pointer ─────────────────────────
+  function makeCtx(li) {
+    const tabs = tabList();
+    const tab = tabs.find(t => t.name === _activeTab) || tabs[0];
+    return { tabs, tab, P: parse(tab.code), line: li };
+  }
+  function userMemberInfo(m, ctx, name) {
+    if (!m) return null;
+    if (m.sym) return userInfo(m.sym, m.tab, false);
+    if (m.py) return pyInfo({ root: m.py.root, chain: m.py.chain, name, imports: m.py.imp || {} });
+    return null;
+  }
+  function lookupMember(t, name, ctx) {
+    if (t.t === 'user' || t.t === 'userclass') return userMemberInfo(findUserMember(t.cls, t.tab, name, ctx), ctx, name);
+    if (t.t === 'tabmod') {
+      const sym = topSyms(t.tab).find(s => s.name === name);
+      return sym ? userInfo(sym, t.tab, false) : null;
+    }
+    if (t.t === 'py') return pyInfo({ root: t.root, chain: t.chain, name, imports: t.imp || {} });
+    return null;
+  }
+  // receiver of unknown type: the best guess is a class that has a member of that name
+  function candidateInfo(name, ctx) {
+    for (const tab of [ctx.tab, ...ctx.tabs.filter(t => t !== ctx.tab)]) {
+      const P = parse(tab.code);
+      const sym = P.syms.find(s => s.kind !== 'function' && s.parent && s.parent.isClass && s.name === name && !s.isClass);
+      if (sym) { const i = userInfo(sym, tab, false); i.guess = true; return i; }
+    }
+    const names = py({ cand: name });
+    if (Array.isArray(names) && names.length) {
+      const i = pyInfo({ root: names[0], name });
+      if (i) { i.guess = true; i.also = names.slice(1, 4); return i; }
+    }
+    return null;
+  }
+  function hasLocalBinding(name, ctx) {
+    if (paramType(ctx, name)) return true;
+    const v = findAssign(ctx, name, ctx.line, null, 5);
+    return !!v;
+  }
+
+  function resolve(li, ws, we) {
+    const ctx = makeCtx(li);
+    const L = ctx.P.lines[li] || '';
+    const word = L.slice(ws, we);
+    if (!word || KEYWORDS_CTRL.has(word) || word === 'self' || word === 'cls') return null;
+    // 1) the name in a def / class line
+    const own = ctx.P.syms.find(s => s.line === li && s.nameCol === ws && s.name === word);
+    if (own) return addWiki(userInfo(own, ctx.tab, true));
+    // 2) member access  a.b.word
+    let k = ws - 1;
+    while (k >= 0 && L[k] === ' ') k--;
+    if (k >= 0 && L[k] === '.' && L[k - 1] !== '.') {
+      const rec = receiverBefore(L, k);
+      let t = UNK;
+      if (rec) {
+        if (rec.lit === 'str') t = { t: 'py', root: 'str', chain: [] };
+        else if (rec.lit) t = typeOfLiteral(rec.text) || UNK;
+        else if (rec.segs && rec.segs.length) {
+          const c = { ...ctx, line: li };
+          const first = rec.segs[0];
+          t = first.index ? UNK : typeOfName(first.id, c, 0);
+          if (first.call) t = callReturn(t, null, c, 1, first.id);
+          for (let i = 1; i < rec.segs.length && t.t !== 'unknown'; i++) {
+            const sg = rec.segs[i];
+            if (sg.index) { t = UNK; break; }
+            t = sg.call ? callReturn(t, sg.id, c, 1, null) : attrType(t, sg.id, c, 1);
+          }
+        }
+      }
+      if (t.t !== 'unknown') {
+        const info = lookupMember(t, word, ctx);
+        if (info) return addWiki(info);
+        if (t.t === 'user' || t.t === 'userclass' || t.t === 'tabmod') return null;
+      }
+      const g = candidateInfo(word, ctx);
+      return g ? addWiki(g) : null;
+    }
+    // 3) a plain name
+    let s = null;
+    for (const x of ctx.P.syms) {       // innermost visible definition: nested in an enclosing function, else top level
+      if (x.name !== word || x.isClass && x.parent) continue;
+      if (!x.parent) { if (!s) s = x; continue; }
+      if (x.parent.isClass) continue;
+      if (x.parent.line < li && x.parent.end >= li && (!s || !s.parent || x.parent.line > s.parent.line)) s = x;
+    }
+    if (s) return addWiki(userInfo(s, ctx.tab, false));
+    const imp = ctx.P.imports[word];
+    if (imp) {
+      const tabMod = ctx.tabs.find(t => !t.main && t.base === imp.mod);
+      if (tabMod && imp.attr) {
+        const sym = topSyms(tabMod).find(x => x.name === imp.attr);
+        return sym ? addWiki(userInfo(sym, tabMod, false)) : null;
+      }
+      if (tabMod) return moduleInfo(tabMod);
+      return addWiki(pyInfo({ root: word, imports: importMap(ctx.P, word) }));
+    }
+    const tm = ctx.tabs.find(t => !t.main && t.base === word);
+    if (tm) return moduleInfo(tm);
+    if (hasLocalBinding(word, ctx)) return null;
+    return addWiki(pyInfo({ root: word, imports: {} }));
+  }
+  function moduleInfo(tab) {
+    const P = parse(tab.code);
+    const lines = P.lines;
+    let doc = null;
+    const first = lines.findIndex(l => l.trim() && !l.trim().startsWith('#'));
+    if (first !== -1) doc = readDoc(lines, first);
+    return { kind: 'module', name: tab.base, sig: null, doc, origin: tab.name, user: true, symbols: P.syms.filter(s => !s.parent).map(s => (s.isClass ? 'class ' : 'def ') + s.name) };
+  }
+
+  // ───────────────────────── rendering ─────────────────────────
+  const KIND_LABEL = { function: 'function', method: 'method', class: 'class', property: 'property', module: 'module' };
+  function kindLabel(info) {
+    if (info.deco === 'static') return 'static method';
+    if (info.deco === 'class') return 'class method';
+    return KIND_LABEL[info.kind] || info.kind;
+  }
+  function paramHtml(p) {
+    const m = /^(\*{0,2})([A-Za-z_]\w*)\s*(?::\s*([^=]+?))?\s*(=\s*(.*))?$/.exec(p);
+    if (!m) return highlightLine(p).replace(/\n$/, '');
+    let h = m[1] ? span('sy-op', esc(m[1])) : '';
+    h += span('ht-param', esc(m[2]));
+    if (m[3]) h += span('sy-pun', ': ') + highlightLine(m[3]).replace(/\n$/, '');
+    if (m[4]) h += span('sy-op', m[3] ? ' = ' : '=') + highlightLine(m[5]).replace(/\n$/, '');
+    return h;
+  }
+  function sigParamsHtml(sig) {
+    // sig: "(a, b=1) -> ret"
+    let open = sig.indexOf('('), depth = 0, close = -1;
+    for (let i = open; i < sig.length; i++) {
+      const c = sig[i];
+      if (c === '(' || c === '[' || c === '{') depth++;
+      else if (c === ')' || c === ']' || c === '}') { depth--; if (depth === 0) { close = i; break; } }
+    }
+    if (open === -1 || close === -1) return highlightLine(sig).replace(/\n$/, '');
+    const inner = sig.slice(open + 1, close), tail = sig.slice(close + 1);
+    const ps = splitTop(inner);
+    const one = ps.map(paramHtml).join(span('sy-pun', ', '));
+    const long = sig.length > 76 && ps.length > 2;
+    let h = span('sy-pun', '(');
+    if (long) h += '\n' + ps.map(p => '    ' + paramHtml(p)).join(span('sy-pun', ',') + '\n') + '\n';
+    else h += one;
+    h += span('sy-pun', ')');
+    if (tail.trim()) h += ' ' + highlightLine(tail.trim()).replace(/\n$/, '').replace(/^<span class="sy-op">-&gt;<\/span>/, '<span class="sy-op">-&gt;</span>');
+    return h;
+  }
+  function signatureHtml(info) {
+    const label = '<span class="ht-kind">(' + kindLabel(info) + ')</span> ';
+    if (info.kind === 'module') return label + span('sy-cls', esc(info.name));
+    if (info.kind === 'property') return label + (info.owner ? span('sy-cls', esc(info.owner)) + span('sy-pun', '.') : '') + span('sy-self', esc(info.name)) + (info.type ? span('sy-pun', ': ') + span('sy-cls', esc(info.type)) : '');
+    const kw = info.kind === 'class' ? 'class' : 'def';
+    const kwHtml = span('sy-kw2', kw) + ' ';
+    const nameHtml = span(info.kind === 'class' ? 'sy-cls' : 'sy-fn', esc(info.name));
+    if (info.sigs && info.sigs.length) {
+      return info.sigs.map((s, i) => (i === 0 ? label : '') + kwHtml + highlightLine(s).replace(/\n$/, '')).join('\n');
+    }
+    return label + kwHtml + nameHtml + sigParamsHtml(info.sig || '()');
+  }
+  const inlineMd = (s) => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>').replace(/(^|[\s(])\*([A-Za-z_][\w, ]*?)\*(?=[\s).,;:]|$)/g, '$1<em>$2</em>');
+  const looksLikeCode = (l) => /^[A-Za-z_][\w.]*\s*(\(|=[^=]|\.[A-Za-z_])/.test(l) || /^(if|for|while|def|class|return|import|from|print)\b/.test(l) || /^[A-Za-z_][\w.]*\s*[+\-*/]?=\s/.test(l);
+  // highlighted as Python when it reads like code, otherwise plain monospace (aligned "name – description" lines)
+  const codeHtml = (code, force) => {
+    const ls = code.split('\n').map(l => l.trim()).filter(Boolean);
+    const codey = ls.filter(l => looksLikeCode(l) || /^#|^(\w+\s*=|[)\]}]|\w+\()/.test(l)).length;
+    const asCode = force || codey * 2 >= ls.length;
+    return '<pre class="ht-code">' + (asCode ? highlight(code).replace(/\n$/, '') : esc(code)) + '</pre>';
+  };
+  function docHtml(doc) {
+    const lines = doc.replace(/\r/g, '').split('\n');
+    let html = '', para = [], i = 0;
+    const flush = () => { if (para.length) { html += '<p>' + para.map(inlineMd).join(' ') + '</p>'; para = []; } };
+    const SECTION = /^(Args?|Arguments|Parameters?|Params?|Returns?|Raises?|Yields?|Attributes|Properties|Methods|Constructor|Notes?|See also|Examples?|Usage|Example usage)\s*:?\s*$/i;
+    const indentedBlock = (from) => {            // lines more indented than `base`, blank lines inside allowed
+      const out = []; let j = from;
+      for (; j < lines.length; j++) {
+        if (!lines[j].trim()) { out.push(''); continue; }
+        if (indentOf(lines[j]) < 2) break;
+        out.push(lines[j]);
+      }
+      while (out.length && !out[out.length - 1].trim()) out.pop();
+      return { out, next: j };
+    };
+    const dedent = (ls) => { let min = Infinity; for (const l of ls) if (l.trim()) min = Math.min(min, indentOf(l)); return ls.map(l => l.slice(Math.min(min === Infinity ? 0 : min, indentOf(l)))).join('\n'); };
+    while (i < lines.length) {
+      const l = lines[i];
+      if (!l.trim()) { flush(); i++; continue; }
+      const sec = SECTION.exec(l.trim());
+      if (sec) {
+        flush();
+        const { out, next } = indentedBlock(i + 1);
+        const nm = sec[1].toLowerCase();
+        html += '<div class="ht-label">' + esc(sec[1].replace(/:$/, '')) + '</div>';
+        if (out.length) {
+          if (/^examples?|usage|example usage$/.test(nm)) html += codeHtml(dedent(out), true);
+          else html += paramsHtml(dedent(out));
+        }
+        i = next; continue;
+      }
+      if (indentOf(l) === 0 && !para.length && /^[\w*][\w*, ]*$/.test(l.trim()) && i + 1 < lines.length && indentOf(lines[i + 1]) >= 2 && lines[i + 1].trim()) {
+        // "name" followed by an indented description (how built-ins document their arguments)
+        const items = [];
+        while (i < lines.length && indentOf(lines[i]) === 0 && /^[\w*][\w*, ]*$/.test(lines[i].trim()) && i + 1 < lines.length && indentOf(lines[i + 1]) >= 2 && lines[i + 1].trim()) {
+          const it = { name: lines[i].trim(), desc: '' }; i++;
+          while (i < lines.length && lines[i].trim() && indentOf(lines[i]) >= 2) { it.desc += (it.desc ? ' ' : '') + lines[i].trim(); i++; }
+          items.push(it);
+          while (i < lines.length && !lines[i].trim() && i + 1 < lines.length && indentOf(lines[i + 1]) === 0 && /^[\w*][\w*, ]*$/.test(lines[i + 1].trim()) && i + 2 < lines.length && indentOf(lines[i + 2]) >= 2) i++;
+        }
+        html += '<div class="ht-params">' + items.map(it => '<div class="ht-prm"><code>' + esc(it.name) + '</code> — ' + inlineMd(it.desc) + '</div>').join('') + '</div>';
+        continue;
+      }
+      if (indentOf(l) >= 2 && !para.length) {      // indented block without a heading: show as code
+        const { out, next } = indentedBlock(i);
+        html += codeHtml(dedent(out)); i = next; continue;
+      }
+      if (looksLikeCode(l.trim()) && (para.length || html)) {
+        flush();
+        const blk = [];
+        while (i < lines.length && lines[i].trim() && looksLikeCode(lines[i].trim())) { blk.push(lines[i].trim()); i++; }
+        html += codeHtml(blk.join('\n')); continue;
+      }
+      if (/^[-*•]\s+/.test(l.trim())) { flush(); html += '<p class="ht-li">• ' + inlineMd(l.trim().replace(/^[-*•]\s+/, '')) + '</p>'; i++; continue; }
+      para.push(l.trim()); i++;
+    }
+    flush();
+    return html;
+  }
+  // "name – description" style lines, continuation lines indented further
+  function paramsHtml(text) {
+    const items = []; let cur = null;
+    for (const raw of text.split('\n')) {
+      if (!raw.trim()) { cur = null; continue; }
+      const m = /^(\S[^:–—]*?)\s*(?:[:–—]|\s-\s|\s{2,})\s*(.*)$/.exec(raw);
+      if (indentOf(raw) === 0 && m) { cur = { name: m[1], desc: m[2] }; items.push(cur); }
+      else if (cur) cur.desc += ' ' + raw.trim();
+      else { cur = { name: '', desc: raw.trim() }; items.push(cur); }
+    }
+    return '<div class="ht-params">' + items.map(it => '<div class="ht-prm">' + (it.name ? '<code>' + esc(it.name) + '</code>' + (it.desc ? ' — ' : '') : '') + inlineMd(it.desc) + '</div>').join('') + '</div>';
+  }
+  function wikiParamsHtml(ps) {
+    if (!ps || !ps.length) return '';
+    return '<div class="ht-label">Parameters</div><div class="ht-params">' + ps.map(p => '<div class="ht-prm"><code>' + esc(p.name) + '</code>' + (p.type ? ' <span class="ht-type">' + esc(p.type) + '</span>' : '') + (p.desc ? ' — ' + inlineMd(p.desc) : '') + '</div>').join('') + '</div>';
+  }
+  function originLabel(info) {
+    if (info.user) return info.origin;
+    if (info.origin === 'BowPy') return 'BowPy API';
+    if (info.origin === 'built-in') return 'Python built-in';
+    return info.origin ? 'Python · ' + info.origin : '';
+  }
+  function render(info) {
+    let h = '<pre class="ht-sig">' + signatureHtml(info) + '</pre>';
+    let body = '';
+    if (info.doc) body += docHtml(info.doc);
+    if (info.params && info.params.length && !(info.doc && /^\s*(Args?|Parameters?)\b/im.test(info.doc))) body += wikiParamsHtml(info.params);
+    if (info.kind === 'module' && info.symbols && info.symbols.length) body += '<div class="ht-label">Contains</div><div class="ht-params">' + info.symbols.slice(0, 14).map(s => '<div class="ht-prm"><code>' + esc(s) + '</code></div>').join('') + (info.symbols.length > 14 ? '<div class="ht-prm">…</div>' : '') + '</div>';
+    if (info.guess && info.also && info.also.length) body += '<p class="ht-note">Type not known — also on: ' + info.also.map(esc).join(', ') + '</p>';
+    else if (info.guess) body += '<p class="ht-note">Type not known — showing the closest match.</p>';
+    if (!body && !info.doc) body = '';
+    h += (body ? '<div class="ht-doc">' + body + '</div>' : '');
+    const where = [];
+    if (info.owner) where.push(esc(info.owner));
+    const ol = originLabel(info);
+    if (ol) where.push(esc(ol));
+    let foot = '<span class="ht-where">' + where.join(' · ') + '</span>';
+    if (info.wikiId) foot += '<a class="ht-wiki" data-wiki="' + esc(info.wikiId) + '">Wiki' + (info.wikiLabel ? ' › ' + esc(info.wikiLabel) : '') + ' ›</a>';
+    h = '<div class="ht-scroll">' + h + '</div>' + (where.length || info.wikiId ? '<div class="ht-foot">' + foot + '</div>' : '');
+    return h;
+  }
+
+  // ───────────────────────── pointer → word ─────────────────────────
+  let met = null;
+  const cvs = document.createElement('canvas').getContext('2d');
+  function metrics() {
+    const cs = getComputedStyle($ed);
+    const font = cs.fontStyle + ' ' + cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
+    if (!met || met.font !== font) {
+      cvs.font = font;
+      met = { font, cw: cvs.measureText('0'.repeat(40)).width / 40, lh: parseFloat(cs.lineHeight) || 21, pl: parseFloat(cs.paddingLeft) || 0, pt: parseFloat(cs.paddingTop) || 0, tab: parseInt(cs.tabSize, 10) || 4 };
+    }
+    return met;
+  }
+  if (document.fonts && document.fonts.addEventListener) document.fonts.addEventListener('loadingdone', () => { met = null; });
+  const visualOf = (L, idx, tab) => { let v = 0; for (let i = 0; i < idx && i < L.length; i++) v += L[i] === '\t' ? tab - (v % tab) : 1; return v; };
+  const indexAtVisual = (L, vcol, tab) => { let v = 0; for (let i = 0; i < L.length; i++) { const w = L[i] === '\t' ? tab - (v % tab) : 1; if (vcol < v + w) return i; v += w; } return -1; };
+  function hitTest(e) {
+    const r = $ed.getBoundingClientRect(), m = metrics();
+    if (e.clientX >= r.left + $ed.clientWidth || e.clientY >= r.top + $ed.clientHeight) return null;
+    const x = e.clientX - r.left - m.pl + $ed.scrollLeft, y = e.clientY - r.top - m.pt + $ed.scrollTop;
+    if (x < 0 || y < 0) return null;
+    const li = Math.floor(y / m.lh);
+    const sc = scan($ed.value);
+    if (li >= sc.lines.length) return null;
+    const idx = indexAtVisual(sc.lines[li], Math.floor(x / m.cw), m.tab);
+    return idx < 0 ? null : { li, idx };
+  }
+  // identifier under (li, idx) that is not inside a string or a comment
+  function wordAtPos(li, idx) {
+    const sc = scan($ed.value), L = sc.lines[li];
+    if (!L || !/\w/.test(L[idx])) return null;
+    let s = idx, e = idx + 1;
+    while (s > 0 && /\w/.test(L[s - 1])) s--;
+    while (e < L.length && /\w/.test(L[e])) e++;
+    if (/^\d/.test(L.slice(s, e)) || markAt(sc, li, s)) return null;
+    return { li, s, e, word: L.slice(s, e) };
+  }
+
+  // ───────────────────────── the tooltip ─────────────────────────
+  let tip = null, showTimer = 0, hideTimer = 0, cur = null, pending = null;
+  function ensureTip() {
+    if (tip) return tip;
+    tip = document.createElement('div');
+    tip.id = 'hover-tip';
+    tip.addEventListener('mouseenter', () => { clearTimeout(hideTimer); });
+    tip.addEventListener('mouseleave', () => scheduleHide());
+    tip.addEventListener('mousedown', e => { if (e.target.closest('.ht-wiki')) e.preventDefault(); });
+    tip.addEventListener('click', e => {
+      const a = e.target.closest('.ht-wiki');
+      if (a && a.dataset.wiki) { hide(); switchTab('wiki'); openWikiPage(a.dataset.wiki); }
+    });
+    document.body.appendChild(tip);
+    return tip;
+  }
+  function hide() {
+    clearTimeout(showTimer); clearTimeout(hideTimer);
+    pending = null; cur = null;
+    if (tip) tip.classList.remove('show');
+  }
+  function scheduleHide() {
+    clearTimeout(hideTimer);
+    if (!cur) return;
+    hideTimer = setTimeout(hide, GRACE);
+  }
+  function place(w) {
+    const m = metrics(), r = $ed.getBoundingClientRect(), L = scan($ed.value).lines[w.li] || '';
+    const left = r.left + m.pl + visualOf(L, w.s, m.tab) * m.cw - $ed.scrollLeft;
+    const top = r.top + m.pt + w.li * m.lh - $ed.scrollTop;
+    tip.style.left = '0px'; tip.style.top = '0px';
+    const tw = tip.offsetWidth, th = tip.offsetHeight, vw = innerWidth, vh = innerHeight;
+    let x = Math.max(8, Math.min(left - 8, vw - tw - 8));
+    let y = top - th - 4;
+    if (y < 8) y = Math.min(top + m.lh + 4, vh - th - 8);
+    tip.style.left = Math.round(x) + 'px'; tip.style.top = Math.round(Math.max(8, y)) + 'px';
+  }
+  function show(w, info) {
+    ensureTip();
+    tip.innerHTML = render(info);
+    tip.classList.add('show');
+    cur = w;
+    place(w);
+    const sc = tip.querySelector('.ht-scroll');
+    if (sc) sc.scrollTop = 0;
+  }
+  const same = (a, b) => a && b && a.li === b.li && a.s === b.s && a.e === b.e;
+  function run(w) {
+    try {
+      if (!$ed.offsetParent) return hide();
+      const info = resolve(w.li, w.s, w.e);
+      if (info) show(w, info); else hide();
+    } catch (err) { hide(); if (window.console) console.warn('[hover]', err); }
+  }
+  function onMove(e) {
+    if (e.pointerType === 'touch') return;
+    if (e.buttons) { hide(); return; }
+    const hit = hitTest(e);
+    const w = hit && wordAtPos(hit.li, hit.idx);
+    if (!w) { clearTimeout(showTimer); pending = null; scheduleHide(); return; }
+    if (same(cur, w)) { clearTimeout(hideTimer); return; }
+    if (same(pending, w)) return;
+    clearTimeout(showTimer);
+    pending = w;
+    if (cur) scheduleHide();
+    showTimer = setTimeout(() => { pending = null; clearTimeout(hideTimer); run(w); }, DELAY);
+  }
+  function init() {
+    $ed.addEventListener('pointermove', onMove);
+    $ed.addEventListener('pointerleave', () => { clearTimeout(showTimer); pending = null; scheduleHide(); });
+    $ed.addEventListener('pointerdown', hide);
+    $ed.addEventListener('keydown', hide);
+    $ed.addEventListener('input', hide);
+    $ed.addEventListener('scroll', hide);
+    $ed.addEventListener('wheel', hide, { passive: true });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') hide(); });
+    window.addEventListener('blur', hide);
+    window.addEventListener('resize', hide);
+  }
+  init();
+
+  return { py, resolve, scan, parse, hide, show, run, hitTest, wordAtPos, metrics, render, info: (li, col) => { const w = wordAtPos(li, col); return w ? resolve(w.li, w.s, w.e) : null; } };
+})();
+
+// ══════════════════════════════════════════════════════════════
 //  Pyodide init
 // ══════════════════════════════════════════════════════════════
 async function initPyodide() {
@@ -4194,6 +7187,7 @@ async function initPyodide() {
   try {
     pyodide = await loadPyodide();
     await pyodide.runPythonAsync(PRELUDE);
+    try { pyodide.runPython(_HV_PY); _hvReady = true; } catch (e) { console.warn("[hover] helper not installed:", e); }
     // Names a tab may not use (Python + BowPy API) — checked live while a tab is being named
     try {
       const _pr = pyodide.runPython('_bp_reserved_names()');
@@ -4232,6 +7226,7 @@ function frame(ts) {
     window.appendConsole(err.message, 'err');
     stopCode(); return;
   }
+  BE.present();   // show the finished frame (WebGL: copy the screen target onto the canvas)
   // Clear img_from_screen cache accumulated this frame
   for (const img of _bpScreenCapImages) { img.src = ''; _bpImgDataCache.delete(img); }
   _bpScreenCapImages.length = 0;
@@ -4517,6 +7512,7 @@ function buildFile() {
     .replace(/`/g, '\\`')
     .replace(/\$\{/g, '\\${');
 
+  const _bowglSrc = _bowglFactory.toString().replace(/<\/(script)/gi, '<\\/$1');
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -4542,8 +7538,10 @@ html,body{width:100%;height:100%;overflow:hidden;background:#000;}
 <canvas id="screen"></canvas>
 <script>
 'use strict';
+${_bowglSrc}
 const $canvas=document.getElementById('screen');
-let ctx=$canvas.getContext('2d');
+const BE=_bowglFactory().create($canvas);
+let ctx=BE.ctx;
 const _mainCtx=ctx;let _bpTargetCanvas=$canvas;
 let running=false,lastTs=0,deltaTime=0.016,fpsSmooth=60,fpsLimit=0;
 let pyodide=null;
@@ -4615,11 +7613,11 @@ window._py={
   get_pixel(x,y){const d=ctx.getImageData(x,y,1,1).data;return[d[0],d[1],d[2],d[3]];},
   galpha(){return ctx.globalAlpha;},screen_pos(x,y){if(x!==undefined&&y!==undefined){screenX=Number(x)||0;screenY=Number(y)||0;}return[screenX,screenY];},screen_rot(angle,ox,oy){if(angle!==undefined){screenRot=Number(angle)||0;if(ox!==undefined&&oy!==undefined){screenRotOx=Number(ox)||0;screenRotOy=Number(oy)||0;}}return[screenRot,screenRotOx,screenRotOy];},
   img_create(url){const stored=_builtAssets[String(url)];const img=new window.Image();img.crossOrigin='anonymous';img.src=stored||String(url);return img;},
-  img_draw(img,x,y,w,h,angle,ox,oy,tint){if(!img||!img.complete||!img.naturalWidth)return;const flipX=w<0;const flipY=h<0;const iw=(w===0)?img.naturalWidth:Math.abs(w);const ih=(h===0)?img.naturalHeight:Math.abs(h);const px=-iw*ox;const py=-ih*oy;ctx.save();ctx.translate(x,y);ctx.rotate(angle);if(flipX||flipY)ctx.scale(flipX?-1:1,flipY?-1:1);if(tint!==undefined&&tint!==null&&tint!==""&&tint!=="none"){const tintRGB=_bpColorToRGB(tint);if(tintRGB){_bpTintCanvas.width=iw;_bpTintCanvas.height=ih;_bpTintCtx.clearRect(0,0,iw,ih);_bpTintCtx.globalCompositeOperation="source-over";_bpTintCtx.drawImage(img,0,0,iw,ih);_bpTintCtx.globalCompositeOperation="multiply";_bpTintCtx.fillStyle="rgb("+tintRGB[0]+","+tintRGB[1]+","+tintRGB[2]+")";_bpTintCtx.fillRect(0,0,iw,ih);_bpTintCtx.globalCompositeOperation="destination-in";_bpTintCtx.drawImage(img,0,0,iw,ih);ctx.drawImage(_bpTintCanvas,px,py,iw,ih);}else{ctx.drawImage(img,px,py,iw,ih);}}else{ctx.drawImage(img,px,py,iw,ih);}ctx.restore();},
+  img_draw(img,x,y,w,h,angle,ox,oy,tint){if(!img||!img.complete||!img.naturalWidth)return;const flipX=w<0;const flipY=h<0;const iw=(w===0)?img.naturalWidth:Math.abs(w);const ih=(h===0)?img.naturalHeight:Math.abs(h);const px=-iw*ox;const py=-ih*oy;const tintRGB=(tint!==undefined&&tint!==null&&tint!==""&&tint!=="none")?_bpColorToRGB(tint):null;ctx.save();ctx.translate(x,y);ctx.rotate(angle);if(flipX||flipY)ctx.scale(flipX?-1:1,flipY?-1:1);ctx.bpDrawImage(img,px,py,iw,ih,tintRGB);ctx.restore();},
   get_canvas_data(){return Array.from(ctx.getImageData(0,0,$canvas.width,$canvas.height).data);},
-  put_canvas_data(dp){let u8;try{const raw=(dp&&typeof dp.toJs==='function')?dp.toJs():dp;if(raw instanceof Uint8Array||raw instanceof Uint8ClampedArray){u8=(raw instanceof Uint8ClampedArray)?raw:new Uint8ClampedArray(raw.buffer,raw.byteOffset,raw.byteLength);}else if(raw instanceof ArrayBuffer){u8=new Uint8ClampedArray(raw);}else{u8=new Uint8ClampedArray(Array.isArray(raw)?raw:Array.from(raw));}}catch(_){u8=new Uint8ClampedArray(Array.from(dp));}ctx.putImageData(new ImageData(u8,$canvas.width,$canvas.height),0,0);},img_draw_quad(img,pts,tint){if(!img||!img.complete||!img.naturalWidth)return;const rawPts=pts&&pts.toJs?pts.toJs():Array.from(pts||[]);if(rawPts.length!==4)return;const m=ctx.getTransform();const p=rawPts.map(pt=>{const q=pt&&pt.toJs?pt.toJs():Array.from(pt);const x=Number(q[0]),y=Number(q[1]);return[m.a*x+m.c*y+m.e,m.b*x+m.d*y+m.f];});const sw=img.naturalWidth,sh=img.naturalHeight,src=_bpSourcePixels(img);if(!src)return;const minX=Math.floor(Math.min(p[0][0],p[1][0],p[2][0],p[3][0]));const maxX=Math.ceil(Math.max(p[0][0],p[1][0],p[2][0],p[3][0]));const minY=Math.floor(Math.min(p[0][1],p[1][1],p[2][1],p[3][1]));const maxY=Math.ceil(Math.max(p[0][1],p[1][1],p[2][1],p[3][1]));const w=maxX-minX,hh=maxY-minY;if(w<=0||hh<=0)return;const tintRGB=_bpColorToRGB(tint);const out=new Uint8ClampedArray(w*hh*4);const solve=(A,b)=>{const n=b.length;for(let i=0;i<n;i++){let piv=i;for(let r=i+1;r<n;r++)if(Math.abs(A[r][i])>Math.abs(A[piv][i]))piv=r;if(Math.abs(A[piv][i])<1e-12)return null;if(piv!==i){const tr=A[i];A[i]=A[piv];A[piv]=tr;const tb=b[i];b[i]=b[piv];b[piv]=tb;}const div=A[i][i];for(let j=i;j<n;j++)A[i][j]/=div;b[i]/=div;for(let r=0;r<n;r++){if(r===i)continue;const f=A[r][i];if(!f)continue;for(let j=i;j<n;j++)A[r][j]-=f*A[i][j];b[r]-=f*b[i];}}return b;};const A=[];const B=[];const srcPts=[[0,0],[sw,0],[0,sh],[sw,sh]];for(let i=0;i<4;i++){const x=p[i][0],y=p[i][1],u=srcPts[i][0],v=srcPts[i][1];A.push([x,y,1,0,0,0,-u*x,-u*y]);B.push(u);A.push([0,0,0,x,y,1,-v*x,-v*y]);B.push(v);}const coeff=solve(A,B);if(!coeff)return;const a=coeff[0],b=coeff[1],c=coeff[2],d=coeff[3],e=coeff[4],f=coeff[5],g=coeff[6],hh2=coeff[7],idx=(x,y)=>(y*sw+x)*4,sample=(u,v)=>{if(u<0||v<0||u>sw-1||v>sh-1)return null;const x0=Math.floor(u),y0=Math.floor(v),x1=Math.min(x0+1,sw-1),y1=Math.min(y0+1,sh-1),tx=u-x0,ty=v-y0,i00=idx(x0,y0),i10=idx(x1,y0),i01=idx(x0,y1),i11=idx(x1,y1),c0=1-tx,c1=tx,d0=1-ty,d1=ty,r=(src.data[i00]*c0+src.data[i10]*c1)*d0+(src.data[i01]*c0+src.data[i11]*c1)*d1,g2=(src.data[i00+1]*c0+src.data[i10+1]*c1)*d0+(src.data[i01+1]*c0+src.data[i11+1]*c1)*d1,b2=(src.data[i00+2]*c0+src.data[i10+2]*c1)*d0+(src.data[i01+2]*c0+src.data[i11+2]*c1)*d1,a2=(src.data[i00+3]*c0+src.data[i10+3]*c1)*d0+(src.data[i01+3]*c0+src.data[i11+3]*c1)*d1;if(tintRGB)return[r*tintRGB[0]/255,g2*tintRGB[1]/255,b2*tintRGB[2]/255,a2];return[r,g2,b2,a2];};for(let py=0;py<hh;py++){const y=minY+py+0.5;for(let px=0;px<w;px++){const x=minX+px+0.5;const den=g*x+hh2*y+1;if(Math.abs(den)<1e-12)continue;const u=(a*x+b*y+c)/den,v=(d*x+e*y+f)/den,s=sample(u,v);if(!s)continue;const o=(py*w+px)*4;out[o]=s[0];out[o+1]=s[1];out[o+2]=s[2];out[o+3]=s[3];}}const qc=document.createElement("canvas");qc.width=w;qc.height=hh;qc.getContext("2d").putImageData(new ImageData(out,w,hh),0,0);ctx.save();ctx.setTransform(1,0,0,1,0,0);ctx.drawImage(qc,minX,minY);ctx.restore();},
+  put_canvas_data(dp){let u8;try{const raw=(dp&&typeof dp.toJs==='function')?dp.toJs():dp;if(raw instanceof Uint8Array||raw instanceof Uint8ClampedArray){u8=(raw instanceof Uint8ClampedArray)?raw:new Uint8ClampedArray(raw.buffer,raw.byteOffset,raw.byteLength);}else if(raw instanceof ArrayBuffer){u8=new Uint8ClampedArray(raw);}else{u8=new Uint8ClampedArray(Array.isArray(raw)?raw:Array.from(raw));}}catch(_){u8=new Uint8ClampedArray(Array.from(dp));}ctx.putImageData(new ImageData(u8,$canvas.width,$canvas.height),0,0);},img_draw_quad(img,pts,tint){if(!img||!img.complete||!img.naturalWidth)return;const rawPts=pts&&pts.toJs?pts.toJs():Array.from(pts||[]);if(rawPts.length!==4)return;const m=ctx.getTransform();const p=rawPts.map(pt=>{const q=pt&&pt.toJs?pt.toJs():Array.from(pt);const x=Number(q[0]),y=Number(q[1]);return[m.a*x+m.c*y+m.e,m.b*x+m.d*y+m.f];});ctx.bpDrawQuad(img,p,_bpColorToRGB(tint));},
   img_size(img){return[img.naturalWidth||0,img.naturalHeight||0];},
-  img_ready(img){return!!(img&&img.complete&&img.naturalWidth);},img_from_screen(x1,y1,x2,y2,keep){const minX=Math.max(0,Math.floor(Math.min(x1,x2)));const minY=Math.max(0,Math.floor(Math.min(y1,y2)));const maxX=Math.min($canvas.width,Math.ceil(Math.max(x1,x2)));const maxY=Math.min($canvas.height,Math.ceil(Math.max(y1,y2)));const w=Math.max(0,maxX-minX);const h=Math.max(0,maxY-minY);const c=document.createElement("canvas");c.width=w;c.height=h;c.getContext("2d").drawImage($canvas,minX,minY,w,h,0,0,w,h);const img=new window.Image();img.src=c.toDataURL("image/png");if(!keep)_bpScreenCapImages.push(img);return img;},
+  img_ready(img){return!!(img&&img.complete&&img.naturalWidth);},img_from_screen(x1,y1,x2,y2,keep){const minX=Math.max(0,Math.floor(Math.min(x1,x2)));const minY=Math.max(0,Math.floor(Math.min(y1,y2)));const maxX=Math.min($canvas.width,Math.ceil(Math.max(x1,x2)));const maxY=Math.min($canvas.height,Math.ceil(Math.max(y1,y2)));const w=Math.max(0,maxX-minX);const h=Math.max(0,maxY-minY);const c=BE.captureRegion(minX,minY,w,h);const img=new window.Image();img.src=c.toDataURL("image/png");if(!keep)_bpScreenCapImages.push(img);return img;},
   snd_create(url){const stored=_builtAssets[String(url)];const src=stored&&typeof stored==='object'?(stored.url||String(url)):(stored||String(url));const h={buf:null};const ac=window._bpAC||(window._bpAC=new AudioContext());fetch(src).then(r=>r.arrayBuffer()).then(buf=>ac.decodeAudioData(buf).then(d=>{h.buf=d;})).catch(()=>{});return h;},
   snd_play(h,vol,rate,loop){if(!h||!h.buf)return null;const ac=window._bpAC;if(ac.state==='suspended')ac.resume();const src=ac.createBufferSource();src.buffer=h.buf;src.playbackRate.value=rate;src.loop=loop;const gain=ac.createGain();gain.gain.value=vol;src.connect(gain);gain.connect(ac.destination);src.start(0);return{src,gain};},
   snd_stop(n){if(n&&n.src)try{n.src.stop(0);}catch(e){}},
@@ -4630,13 +7628,13 @@ window._py={
   keys_held(){return Array.from(keysHeld);},keys_pressed(){return Array.from(keysPress);},keys_released(){return Array.from(keysRel);},
   btns_held(){return[];},btns_pressed(){return[];},btns_released(){return[];},
   capslock(){return _bpCapsLock;},
-  surface_create(w,h){const c=document.createElement('canvas');c.width=(w>0)?Math.floor(w):$canvas.width;c.height=(h>0)?Math.floor(h):$canvas.height;const g=c.getContext('2d');return{_canvas:c,_ctx:g};},
+  surface_create(w,h){return BE.createSurface((w>0)?Math.floor(w):$canvas.width,(h>0)?Math.floor(h):$canvas.height);},
   surface_fill(sfc,cssColor){if(!sfc||!sfc._ctx)return;const g=sfc._ctx;g.save();g.setTransform(1,0,0,1,0,0);g.fillStyle=cssColor;g.fillRect(0,0,sfc._canvas.width,sfc._canvas.height);g.restore();},
   surface_set_target(sfc){if(!sfc||!sfc._ctx)return;ctx=sfc._ctx;_bpTargetCanvas=sfc._canvas;},
   surface_reset_target(){ctx=_mainCtx;_bpTargetCanvas=$canvas;},
   surface_draw(sfc,x,y){if(!sfc||!sfc._canvas)return;ctx.drawImage(sfc._canvas,Number(x),Number(y));},
   surface_to_image(sfc){if(!sfc||!sfc._canvas)return null;const img=new window.Image();img.src=sfc._canvas.toDataURL('image/png');return img;},
-  surface_screen(){const c=document.createElement('canvas');c.width=$canvas.width;c.height=$canvas.height;c.getContext('2d').drawImage($canvas,0,0);const g=c.getContext('2d');return{_canvas:c,_ctx:g};},
+  surface_screen(){return BE.surfaceScreen();},
   surface_w(sfc){return sfc?sfc._canvas.width:0;},
   surface_h(sfc){return sfc?sfc._canvas.height:0;},
 };
@@ -4687,6 +7685,7 @@ async function main(){
       fpsSmooth+=(1/(raw||0.001)-fpsSmooth)*0.08;_applyScreenTransform();
       try{pyodide.runPython('_frame()');}
       catch(e){console.error(e.message);running=false;return;}
+      BE.present();
       for(const img of _bpScreenCapImages){img.src='';_bpImgDataCache.delete(img);}
       _bpScreenCapImages.length=0;
       keysPress.clear();keysRel.clear();btnsPress.clear();btnsRel.clear();
