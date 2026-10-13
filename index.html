@@ -2608,7 +2608,21 @@ let pyodide = null, running = false, rafId = null;
 let lastTs = 0, deltaTime = 0.016, fpsSmooth = 60, fpsLimit = 0;
 const keysHeld = new Set(), keysPress = new Set(), keysRel = new Set();
 let mx = 0, my = 0;
-const btnsHeld = new Set(), btnsPress = new Set(), btnsRel = new Set();
+const btnsHeld = new Set(), btnsPress = new Set(), btnsRel = new Set(), btnsLate = new Set();
+// A touch or click that is over before a frame has seen it is still shown as held for one frame, so mouse_down()
+// is True for every press, mouse_pressed() is True only in its first frame and mouse_released() only in the frame
+// the button is no longer held.
+function _btnDown(b) { btnsHeld.add(b); btnsPress.add(b); btnsLate.delete(b); }
+function _btnUp(b) {
+  if (!btnsHeld.has(b)) return;
+  if (btnsPress.has(b)) { btnsLate.add(b); return; }
+  btnsHeld.delete(b); btnsRel.add(b);
+}
+function _btnFrameEnd() {
+  btnsPress.clear(); btnsRel.clear();
+  for (const b of btnsLate) { btnsHeld.delete(b); btnsRel.add(b); }
+  btnsLate.clear();
+}
 let wheelUp = 0, wheelDown = 0;
 let _bpCapsLock = false;
 let stdinWait = null;
@@ -2619,7 +2633,7 @@ const _bpAssets = new Map();
 
 function _resetRuntimeState() {
   keysHeld.clear(); keysPress.clear(); keysRel.clear();
-  btnsHeld.clear(); btnsPress.clear(); btnsRel.clear();
+  btnsHeld.clear(); btnsPress.clear(); btnsRel.clear(); btnsLate.clear();
   wheelUp = 0; wheelDown = 0;
   stdinWait = null;
   stdinQ.length = 0;
@@ -3599,6 +3613,86 @@ $conIn.addEventListener('keydown', e => {
   });
 })();
 
+// ── Pointer input shared by the editor and exported games ─────────────────────────────────────────────
+// One finger (or pen) acts as the left mouse button (button 0); the mouse works as usual. The state machine
+// is deliberately small and idempotent so a browser quirk can never leave a button stuck or invent a press:
+//   * fingers use Pointer Events (touch events only where those do not exist). A held finger is never turned
+//     into a long-press: contextmenu / selection / drag are cancelled and the page never scrolls or zooms.
+//   * the mouse events a browser emulates after a touch are ignored, so a finger is never counted twice.
+//   * a button released by the browser (window loses focus, tab hidden, release outside the window) is
+//     released here too.
+// `io` = { pos(clientX, clientY), down(button), up(button), releaseAll() }. Self-contained: it is also
+// serialised into exported games with Function.prototype.toString().
+function _bpInputFactory() {
+  function install(canvas, io) {
+    const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    let touchId = null;                 // pointer / touch identifier of the finger acting as the mouse
+    let touchAt = -1e9;                 // last time a finger did anything
+    // Chromium says whether a mouse event came from a touch (sourceCapabilities); elsewhere a mouse event that
+    // arrives right after a finger did something is taken to be the emulated one.
+    const fromTouch = e => touchId !== null ||
+      (e.sourceCapabilities ? !!e.sourceCapabilities.firesTouchEvents : now() - touchAt < 700);
+    const stop = e => { if (e.cancelable) e.preventDefault(); };
+
+    // never let a long press become a context menu, a text selection or a drag
+    canvas.draggable = false;
+    for (const t of ['contextmenu', 'selectstart', 'dragstart', 'gesturestart', 'gesturechange'])
+      canvas.addEventListener(t, stop);
+
+    // ── mouse ──
+    canvas.addEventListener('mousemove', e => { if (!fromTouch(e)) io.pos(e.clientX, e.clientY); });
+    canvas.addEventListener('mousedown', e => { if (!fromTouch(e)) { io.pos(e.clientX, e.clientY); io.down(e.button); } });
+    window.addEventListener('mouseup', e => { if (!fromTouch(e)) io.up(e.button); }, true);   // also outside the canvas
+
+    // ── fingers ──
+    const begin = (id, primary, x, y) => {
+      touchAt = now();
+      if (touchId !== null && !primary) return false;        // a finger already acts as the mouse
+      touchId = id; io.pos(x, y); io.down(0);
+      return true;
+    };
+    const move = (id, x, y) => { if (id === touchId) { touchAt = now(); io.pos(x, y); } };
+    const end = (id, x, y) => {
+      if (id !== touchId) return;
+      touchAt = now();
+      if (x != null) io.pos(x, y);
+      touchId = null; io.up(0);
+    };
+
+    if (typeof window.PointerEvent === 'function') {
+      canvas.addEventListener('pointerdown', e => {
+        if (e.pointerType === 'mouse') return;
+        if (begin(e.pointerId, e.isPrimary, e.clientX, e.clientY)) { try { canvas.setPointerCapture(e.pointerId); } catch (_) {} }
+        stop(e);
+      });
+      canvas.addEventListener('pointermove', e => { if (e.pointerType !== 'mouse') move(e.pointerId, e.clientX, e.clientY); });
+      canvas.addEventListener('pointerup', e => { if (e.pointerType !== 'mouse') end(e.pointerId, e.clientX, e.clientY); });
+      canvas.addEventListener('pointercancel', e => { if (e.pointerType !== 'mouse') end(e.pointerId); });
+      canvas.addEventListener('lostpointercapture', e => { if (e.pointerType !== 'mouse') end(e.pointerId); });
+      // touch events only switch off scrolling / zooming / the iOS callout; the state comes from the pointer events
+      for (const t of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) canvas.addEventListener(t, stop, { passive: false });
+    } else {
+      const find = list => { for (const t of list) if (t.identifier === touchId) return t; return null; };
+      canvas.addEventListener('touchstart', e => {
+        stop(e);
+        if (e.touches.length === e.changedTouches.length) touchId = null;      // first finger down: forget a stale touch
+        const t = e.changedTouches[0];
+        begin(t.identifier, true, t.clientX, t.clientY);
+      }, { passive: false });
+      canvas.addEventListener('touchmove', e => { stop(e); const t = find(e.changedTouches); if (t) move(t.identifier, t.clientX, t.clientY); }, { passive: false });
+      canvas.addEventListener('touchend', e => { stop(e); const t = find(e.changedTouches); if (t) end(t.identifier, t.clientX, t.clientY); }, { passive: false });
+      canvas.addEventListener('touchcancel', e => { stop(e); const t = find(e.changedTouches); if (t) end(t.identifier); }, { passive: false });
+    }
+
+    // ── the browser took the input away (switched app / tab, lost focus): nothing stays pressed ──
+    const releaseAll = () => { touchId = null; io.releaseAll(); };
+    window.addEventListener('blur', releaseAll);
+    document.addEventListener('visibilitychange', () => { if (document.hidden) releaseAll(); });
+    window.addEventListener('pagehide', releaseAll);
+  }
+  return { install };
+}
+
 // ══════════════════════════════════════════════════════════════
 //  Canvas + live input
 // ══════════════════════════════════════════════════════════════
@@ -3609,41 +3703,11 @@ function fitCanvas() {
 }
 window.addEventListener('resize', fitCanvas);
 
-$canvas.addEventListener('mousemove', e => {
-  const r = $canvas.getBoundingClientRect();
-  mx = e.clientX - r.left; my = e.clientY - r.top;
+_bpInputFactory().install($canvas, {
+  pos(cx, cy) { const r = $canvas.getBoundingClientRect(); mx = cx - r.left; my = cy - r.top; },
+  down: _btnDown, up: _btnUp,
+  releaseAll() { for (const b of Array.from(btnsHeld)) _btnUp(b); },
 });
-$canvas.addEventListener('mousedown', e => { btnsHeld.add(e.button); btnsPress.add(e.button); });
-$canvas.addEventListener('mouseup',   e => { btnsHeld.delete(e.button); btnsRel.add(e.button); });
-$canvas.addEventListener('contextmenu', e => e.preventDefault());
-
-// ── Touch: one finger acts as the left mouse button ──────────
-// Browsers only send their emulated mousedown/mouseup AFTER the finger has lifted (both at once), so without
-// this mouse_down() could never be True while a finger is held. Touch events are handled directly instead,
-// and preventDefault() stops the emulated mouse events so nothing fires twice (or scrolls/zooms the page).
-let _touchId = null;
-const _findTouch = list => { for (const t of list) if (t.identifier === _touchId) return t; return null; };
-function _touchPos(t) { const r = $canvas.getBoundingClientRect(); mx = t.clientX - r.left; my = t.clientY - r.top; }
-$canvas.addEventListener('touchstart', e => {
-  e.preventDefault();
-  if (e.touches.length === e.changedTouches.length) _touchId = null;   // first finger down: forget any stale touch
-  if (_touchId !== null) return;                                        // a finger is already acting as the mouse
-  const t = e.changedTouches[0];
-  _touchId = t.identifier; _touchPos(t);
-  btnsHeld.add(0); btnsPress.add(0);
-}, { passive: false });
-$canvas.addEventListener('touchmove', e => {
-  e.preventDefault();
-  const t = _findTouch(e.changedTouches); if (t) _touchPos(t);
-}, { passive: false });
-const _touchEnd = e => {
-  if (e.cancelable) e.preventDefault();
-  const t = _findTouch(e.changedTouches); if (!t) return;
-  _touchPos(t); _touchId = null;
-  btnsHeld.delete(0); btnsRel.add(0);
-};
-$canvas.addEventListener('touchend', _touchEnd, { passive: false });
-$canvas.addEventListener('touchcancel', _touchEnd, { passive: false });
 
 $canvas.addEventListener('wheel', e => {
   e.preventDefault();
@@ -7231,7 +7295,7 @@ function frame(ts) {
   for (const img of _bpScreenCapImages) { img.src = ''; _bpImgDataCache.delete(img); }
   _bpScreenCapImages.length = 0;
   keysPress.clear(); keysRel.clear();
-  btnsPress.clear(); btnsRel.clear();
+  _btnFrameEnd();
   wheelUp = 0; wheelDown = 0;
   rafId = requestAnimationFrame(frame);
 }
@@ -7513,6 +7577,7 @@ function buildFile() {
     .replace(/\$\{/g, '\\${');
 
   const _bowglSrc = _bowglFactory.toString().replace(/<\/(script)/gi, '<\\/$1');
+  const _bpInputSrc = _bpInputFactory.toString().replace(/<\/(script)/gi, '<\\/$1');
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -7522,7 +7587,7 @@ function buildFile() {
 <script src="https://cdn.jsdelivr.net/pyodide/v0.27.0/full/pyodide.js"><\/script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;}
-html,body{width:100%;height:100%;overflow:hidden;background:#000;}
+html,body{width:100%;height:100%;overflow:hidden;background:#000;overscroll-behavior:none;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;}
 #screen{display:none;position:fixed;top:0;left:0;width:100%;height:100%;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;}
 #load{
   position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
@@ -7539,6 +7604,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#000;}
 <script>
 'use strict';
 ${_bowglSrc}
+${_bpInputSrc}
 const $canvas=document.getElementById('screen');
 const BE=_bowglFactory().create($canvas);
 let ctx=BE.ctx;
@@ -7547,7 +7613,10 @@ let running=false,lastTs=0,deltaTime=0.016,fpsSmooth=60,fpsLimit=0;
 let pyodide=null;
 const keysHeld=new Set(),keysPress=new Set(),keysRel=new Set();
 let mx=0,my=0;
-const btnsHeld=new Set(),btnsPress=new Set(),btnsRel=new Set();
+const btnsHeld=new Set(),btnsPress=new Set(),btnsRel=new Set(),btnsLate=new Set();
+function _btnDown(b){btnsHeld.add(b);btnsPress.add(b);btnsLate.delete(b);}
+function _btnUp(b){if(!btnsHeld.has(b))return;if(btnsPress.has(b)){btnsLate.add(b);return;}btnsHeld.delete(b);btnsRel.add(b);}
+function _btnFrameEnd(){btnsPress.clear();btnsRel.clear();for(const b of btnsLate){btnsHeld.delete(b);btnsRel.add(b);}btnsLate.clear();}
 let wheelUp=0,wheelDown=0;
 let _bpCapsLock=false;
 const _builtAssets=__BUILT_ASSETS__;
@@ -7556,16 +7625,7 @@ function _assetRecord(name){const v=_builtAssets[String(name)];return v&&typeof 
 function _assetText(name){const a=_assetRecord(name);return a?a.text!=null?String(a.text):(a.url!=null?String(a.url):null):null;}
 function fitCanvas(){$canvas.width=window.innerWidth;$canvas.height=window.innerHeight;}
 window.addEventListener('resize',fitCanvas);fitCanvas();
-$canvas.addEventListener('mousemove',e=>{mx=e.clientX;my=e.clientY;});
-$canvas.addEventListener('mousedown',e=>{btnsHeld.add(e.button);btnsPress.add(e.button);});
-$canvas.addEventListener('mouseup',e=>{btnsHeld.delete(e.button);btnsRel.add(e.button);});
-$canvas.addEventListener('contextmenu',e=>e.preventDefault());
-let _touchId=null;
-const _findTouch=l=>{for(const t of l)if(t.identifier===_touchId)return t;return null;};
-$canvas.addEventListener('touchstart',e=>{e.preventDefault();if(e.touches.length===e.changedTouches.length)_touchId=null;if(_touchId!==null)return;const t=e.changedTouches[0];_touchId=t.identifier;mx=t.clientX;my=t.clientY;btnsHeld.add(0);btnsPress.add(0);},{passive:false});
-$canvas.addEventListener('touchmove',e=>{e.preventDefault();const t=_findTouch(e.changedTouches);if(t){mx=t.clientX;my=t.clientY;}},{passive:false});
-const _touchEnd=e=>{if(e.cancelable)e.preventDefault();const t=_findTouch(e.changedTouches);if(!t)return;mx=t.clientX;my=t.clientY;_touchId=null;btnsHeld.delete(0);btnsRel.add(0);};
-$canvas.addEventListener('touchend',_touchEnd,{passive:false});$canvas.addEventListener('touchcancel',_touchEnd,{passive:false});
+_bpInputFactory().install($canvas,{pos(cx,cy){mx=cx;my=cy;},down:_btnDown,up:_btnUp,releaseAll(){for(const b of Array.from(btnsHeld))_btnUp(b);}});
 document.addEventListener('keydown',e=>{if(e.getModifierState)_bpCapsLock=e.getModifierState('CapsLock');const k=e.key.toLowerCase();if(!keysHeld.has(k))keysPress.add(k);keysHeld.add(k);});
 document.addEventListener('keyup',e=>{const k=e.key.toLowerCase();keysHeld.delete(k);keysRel.add(k);});
 window.appendConsole=(t,type)=>{if(type==='err')console.error(t);else console.log(t);};
@@ -7644,7 +7704,7 @@ const USER_TABS=\`${userTabs}\`;
 function _bpInstallTabs(){const f=pyodide.globals.get('_bp_install_tabs');try{f(USER_TABS);}finally{f.destroy();}}
 window._bp_reset = function() {
   keysHeld.clear();keysPress.clear();keysRel.clear();
-  btnsHeld.clear();btnsPress.clear();btnsRel.clear();
+  btnsHeld.clear();btnsPress.clear();btnsRel.clear();btnsLate.clear();
   lastTs=performance.now();deltaTime=0.016;fpsSmooth=60;
   _applyScreenTransform();
   if(window._bpActiveNodes){for(const n of window._bpActiveNodes){try{n.src.stop(0);}catch(e){}}window._bpActiveNodes=[];}
@@ -7688,7 +7748,7 @@ async function main(){
       BE.present();
       for(const img of _bpScreenCapImages){img.src='';_bpImgDataCache.delete(img);}
       _bpScreenCapImages.length=0;
-      keysPress.clear();keysRel.clear();btnsPress.clear();btnsRel.clear();
+      keysPress.clear();keysRel.clear();_btnFrameEnd();
       requestAnimationFrame(loop);
     });
   }
@@ -10353,7 +10413,7 @@ def update():
 </pre>
       </div>
 
-      <div class="wiki-note"><b>Touch screens:</b> a finger counts as the left mouse button (button 0). Touching the screen is <code>mouse_pressed()</code>, holding it down is <code>mouse_down()</code> and lifting it is <code>mouse_released()</code>. Only the first finger is used: a second finger is ignored while the first is down.</div>
+      <div class="wiki-note"><b>Touch screens:</b> a finger counts as the left mouse button (button 0). <code>mouse_pressed()</code> is True only in the first frame of a touch, <code>mouse_down()</code> stays True for as long as the finger is held (however long), and <code>mouse_released()</code> is True only in the frame where the finger is no longer held. Even a very quick tap is shown as <code>mouse_down()</code> for one frame before it is released. Only the first finger is used: a second finger is ignored while the first is down.</div>
 
       <div class="wiki-ref-list">
         <div class="wiki-ref" onclick="openWikiPage('mouse_wheel_fn')">mouse_wheel()</div>
