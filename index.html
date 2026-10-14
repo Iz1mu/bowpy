@@ -995,6 +995,8 @@ class Renderer {
     this._progCur = null;
     this.msaaFbo = null; this.msaaW = 0; this.msaaH = 0; this.samples = 0;
     this.layerT = null;
+    this.post = null;                  // the screen shader (see setPost)
+    this.postProgs = new Map();
     this._initGL();
     canvas.addEventListener('webglcontextlost', e => { e.preventDefault(); this.lost = true; }, false);
     canvas.addEventListener('webglcontextrestored', () => {
@@ -1002,6 +1004,8 @@ class Renderer {
       this.progs.clear(); this.globalProgs.clear(); this.textCache.clear(); this.textPixels = 0;
       this.imgTex = new WeakMap(); this.msaaFbo = null; this.msaaW = this.msaaH = 0;
       this.active = null; this.layerT = null; this._blendKey = null; this._progCur = null; this.vbN = 0;
+      this.postProgs = new Map();
+      if (this.post) { this.post.prog = null; this.post.epoch = -1; this.post.dirty = true; }
       this._initGL();
       if (this.screen) { this._allocRes(this.screen); this.screen.presentedGen = -1; }
     }, false);
@@ -1054,6 +1058,7 @@ class Renderer {
     this.samples = best;
     gl.disable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE); gl.disable(gl.DITHER);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    this.pvao = gl.createVertexArray();      // no attributes: the shader pass draws a triangle from gl_VertexID
   }
   _attribs() {
     const gl = this.gl;
@@ -1477,14 +1482,138 @@ class Renderer {
     const c = this.canvas;
     if (Math.max(1, c.width) !== S.w || Math.max(1, c.height) !== S.h) this._resizeScreen(c.width, c.height);
     this.flush();
-    if (!force && S.gen === S.presentedGen) return;
+    const P = this.post;
+    if (!force && S.gen === S.presentedGen && !(P && P.dirty)) return;
     this.commit(S);
+    if (P && this._presentPost(P, S)) { S.presentedGen = S.gen; P.dirty = false; return; }
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, S.res.fbo);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
     gl.disable(gl.SCISSOR_TEST);
     gl.blitFramebuffer(0, 0, S.w, S.h, 0, S.h, S.w, 0, gl.COLOR_BUFFER_BIT, gl.NEAREST);
     this._rebindRender();
     S.presentedGen = S.gen;
+  }
+
+  // ── the screen shader: fragment(pos) is translated to GLSL and runs for every pixel while the screen is presented ──
+  setPost(src, nslots, usesLive) {
+    if (this.lost) return 'the WebGL context is lost';
+    const P = { src, nslots, usesLive: !!usesLive, prog: null, loc: null, epoch: -1,
+                u: new Float32Array(4 * Math.max(1, nslots | 0)), live: new Float32Array(8), dirty: true };
+    const err = this._buildPost(P);
+    if (err) return err;
+    this.post = P;
+    if (this.screen) this.screen.presentedGen = -1;
+    return '';
+  }
+  clearPost() {
+    if (!this.post) return;
+    this.post = null;
+    if (this.screen) this.screen.presentedGen = -1;
+  }
+  // the values of the global variables the shader reads (a flat list of floats, four per variable)
+  setPostUniforms(u) {
+    const P = this.post;
+    if (!P) return;
+    const a = (u && typeof u.toJs === 'function') ? u.toJs() : u;
+    const d = P.u, n = Math.min(d.length, a.length);
+    let ch = false;
+    for (let i = 0; i < n; i++) { const v = Math.fround(a[i]); if (d[i] !== v) { d[i] = v; ch = true; } }
+    if (ch) P.dirty = true;
+  }
+  // time (seconds since the program started), frame time, fps, mouse position and buttons
+  tickLive(t, dt, fps, mx, my, m0, m1, m2) {
+    const P = this.post;
+    if (!P) return;
+    const L = P.live;
+    if (P.usesLive && (L[0] !== Math.fround(t) || L[3] !== Math.fround(mx) || L[4] !== Math.fround(my) || L[5] !== m0 || L[6] !== m1 || L[7] !== m2 ||
+                       L[1] !== Math.fround(dt) || L[2] !== Math.fround(fps))) P.dirty = true;
+    L[0] = t; L[1] = dt; L[2] = fps; L[3] = mx; L[4] = my; L[5] = m0; L[6] = m1; L[7] = m2;
+  }
+  _buildPost(P) {
+    const gl = this.gl;
+    const cache = this.postProgs || (this.postProgs = new Map());
+    let hit = cache.get(P.src);
+    if (!hit) {
+      const VS = '#version 300 es\nvoid main() { vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)); gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }';
+      const mk = (type, s) => { const sh = gl.createShader(type); gl.shaderSource(sh, s); gl.compileShader(sh); return sh; };
+      const vs = mk(gl.VERTEX_SHADER, VS), fs = mk(gl.FRAGMENT_SHADER, P.src);
+      const prog = gl.createProgram();
+      gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
+      const ok = gl.getProgramParameter(prog, gl.LINK_STATUS);
+      let log = '';
+      if (!ok) log = String(gl.getShaderInfoLog(fs) || gl.getShaderInfoLog(vs) || gl.getProgramInfoLog(prog) || 'unknown error').split('\n')[0];
+      gl.deleteShader(vs); gl.deleteShader(fs);
+      if (!ok) { gl.deleteProgram(prog); return 'the GPU could not compile the shader (' + log + ')'; }
+      hit = { prog, loc: { uScene: gl.getUniformLocation(prog, 'uScene'), uRes: gl.getUniformLocation(prog, 'uRes'),
+                           uT: gl.getUniformLocation(prog, 'uT'), uM: gl.getUniformLocation(prog, 'uM'), uU: gl.getUniformLocation(prog, 'uU') } };
+      if (cache.size >= 8) { const k = cache.keys().next().value; try { gl.deleteProgram(cache.get(k).prog); } catch (e) {} cache.delete(k); }
+      cache.set(P.src, hit);
+    }
+    P.prog = hit.prog; P.loc = hit.loc; P.epoch = this.epoch;
+    return '';
+  }
+  // draw the screen target onto the canvas through the shader (a full-screen triangle)
+  _presentPost(P, S) {
+    const gl = this.gl;
+    if (P.epoch !== this.epoch && this._buildPost(P)) { this.post = null; return false; }
+    const L = P.loc, v = P.live;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, S.w, S.h);
+    gl.disable(gl.SCISSOR_TEST); gl.disable(gl.BLEND); this._blendKey = null;
+    gl.useProgram(P.prog); this._progCur = null;
+    gl.activeTexture(gl.TEXTURE7);
+    gl.bindTexture(gl.TEXTURE_2D, S.res.tex);
+    gl.bindSampler(7, this.samplers[0]);
+    gl.uniform1i(L.uScene, 7);
+    gl.uniform2f(L.uRes, S.w, S.h);
+    gl.uniform4f(L.uT, v[0], v[1], v[2], v[7]);
+    gl.uniform4f(L.uM, v[3], v[4], v[5], v[6]);
+    if (L.uU) gl.uniform4fv(L.uU, P.u);
+    gl.bindVertexArray(this.pvao);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.bindVertexArray(this.vao);
+    const A = this.active || S;
+    gl.viewport(0, 0, A.w, A.h);
+    this._rebindRender();
+    return true;
+  }
+
+  // ── one pixel, fast: straight-alpha r,g,b,a packed as r<<24|g<<16|b<<8|a ──
+  // The first read after a draw resolves just that pixel (no full-screen resolve); a second read of the same picture
+  // reads the whole target once and answers the rest from memory.
+  pixelPacked(T, x, y) {
+    if (this.lost || !(x >= 0 && y >= 0 && x < T.w && y < T.h)) return 0;
+    if (T.res.epoch !== this.epoch) this._allocRes(T);
+    if (T === this.active) this.flush();
+    let px, o;
+    if (T.cpuGen === T.gen && T.cpu) { px = T.cpu; o = (y * T.w + x) * 4; }
+    else if (T.readGen === T.gen) { T.cpu = this.readPremul(T, 0, 0, T.w, T.h); T.cpuGen = T.gen; px = T.cpu; o = (y * T.w + x) * 4; }
+    else { T.readGen = T.gen; px = this._read1(T, x, y); o = 0; }
+    const a = px[o + 3];
+    if (a === 0) return 0;
+    let r = px[o], g = px[o + 1], b = px[o + 2];
+    if (a !== 255) {
+      const k = 255 / a;
+      r = Math.min(255, Math.round(r * k)); g = Math.min(255, Math.round(g * k)); b = Math.min(255, Math.round(b * k));
+    }
+    return ((r << 24) | (g << 16) | (b << 8) | a) >>> 0;
+  }
+  _read1(T, x, y) {
+    const gl = this.gl;
+    if (!this.r1buf) this.r1buf = new Uint8Array(4);
+    const out = this.r1buf;
+    gl.disable(gl.SCISSOR_TEST);
+    if (T === this.active && T.msaaDirty) {
+      // resolve only this pixel into the target's own texture (a multisample resolve needs identical rectangles);
+      // the target stays marked as not yet committed, so the next commit still copies everything
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.msaaFbo);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, T.res.fbo);
+      gl.blitFramebuffer(x, y, x + 1, y + 1, x, y, x + 1, y + 1, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    }
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, T.res.fbo);
+    gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, out);
+    this._rebindRender();
+    return out;
   }
 
   // ── pixel read-back / write ──
@@ -2364,6 +2493,8 @@ class Ctx2D {
     if (this.R.lost) return new ImageData(Math.max(1, Math.abs(sw | 0)), Math.max(1, Math.abs(sh | 0)));
     return this.R.getImageData(this.T, sx, sy, sw, sh);
   }
+  // r<<24|g<<16|b<<8|a of one pixel (straight alpha), without making an ImageData
+  bpPixel(x, y) { return this.R.pixelPacked(this.T, Math.floor(x), Math.floor(y)); }
   putImageData(img, dx, dy, rx, ry, rw, rh) {
     dx = Math.floor(+dx); dy = Math.floor(+dy);
     if (!(fin(dx) && fin(dy))) return;
@@ -2462,7 +2593,10 @@ function tryWebGL2(canvas, opts) {
       return { _canvas: N, _ctx: new Ctx2D(R, N, N) };
     },
     captureRegion(x, y, w, h) { R.syncScreen(); return R.targetToCanvas(R.screen, x, y, w, h); },
-    present() { R.present(false); }
+    present() { R.present(false); },
+    setPost: (src, n, live) => R.setPost(src, n, live), clearPost: () => R.clearPost(),
+    setPostUniforms: (u) => R.setPostUniforms(u),
+    tickLive: (t, dt, fps, mx, my, m0, m1, m2) => R.tickLive(t, dt, fps, mx, my, m0, m1, m2)
   };
 }
 
@@ -2534,6 +2668,11 @@ function createCanvas2D(canvas) {
       } else this.drawImage(img, dx, dy, dw, dh);
     };
     g.bpDrawQuad = function (img, p, tint) { quadCPU(this, img, p, tint); };
+    g.bpPixel = function (x, y) {
+      x = Math.floor(x); y = Math.floor(y);
+      const d = this.getImageData(x, y, 1, 1).data;
+      return ((d[0] << 24) | (d[1] << 16) | (d[2] << 8) | d[3]) >>> 0;
+    };
     return g;
   }
   const main = extend(canvas.getContext('2d'));
@@ -2605,6 +2744,12 @@ function _applyScreenTransform() {
 //  Runtime state
 // ══════════════════════════════════════════════════════════════
 let pyodide = null, running = false, rafId = null;
+// the screen shader is fed the time since the program started and the live mouse every frame
+let _bpRunT0 = performance.now();
+function _bpTickShader() {
+  if (BE.tickLive) BE.tickLive((performance.now() - _bpRunT0) / 1000, deltaTime, fpsSmooth, mx, my, btnsHeld.has(0) ? 1 : 0, btnsHeld.has(1) ? 1 : 0, btnsHeld.has(2) ? 1 : 0);
+}
+function _bpSetMainSrc(code) { try { pyodide.globals.set('_BP_MAIN_SRC', String(code)); } catch (e) {} }
 let lastTs = 0, deltaTime = 0.016, fpsSmooth = 60, fpsLimit = 0;
 const keysHeld = new Set(), keysPress = new Set(), keysRel = new Set();
 let mx = 0, my = 0;
@@ -3901,6 +4046,16 @@ window._py = {
   fillgrad(grad) { ctx.fillStyle=grad;ctx.fillRect(0,0,_bpTargetCanvas.width,_bpTargetCanvas.height); },
   rectgrad(x,y,w,h,grad) { ctx.fillStyle=grad;ctx.fillRect(x,y,w,h); },
   get_pixel(x,y) { const d=ctx.getImageData(x,y,1,1).data;return[d[0],d[1],d[2],d[3]]; },
+  get_pixel_packed(x,y) {
+    const c = ctx;
+    if (c.bpPixel) return c.bpPixel(x, y);
+    const d = c.getImageData(x, y, 1, 1).data;
+    return ((d[0] << 24) | (d[1] << 16) | (d[2] << 8) | d[3]) >>> 0;
+  },
+  // screen shader (fragment)
+  frag_compile(glsl, nslots, live) { return BE.setPost ? BE.setPost(String(glsl), nslots | 0, !!live) : 'the GPU renderer (WebGL2) is not in use'; },
+  frag_set(u) { if (BE.setPostUniforms) BE.setPostUniforms(u); },
+  frag_off() { if (BE.clearPost) BE.clearPost(); },
   // key/btn set accessors
   keys_held()    { return Array.from(keysHeld); },
   keys_pressed() { return Array.from(keysPress); },
@@ -4023,7 +4178,7 @@ window._py = {
   },
   // Fragment shader support – batch pixel I/O
   get_canvas_data() {
-    return Array.from(ctx.getImageData(0, 0, $canvas.width, $canvas.height).data);
+    return Array.from(_mainCtx.getImageData(0, 0, $canvas.width, $canvas.height).data);
   },
   put_canvas_data(dp) {
     // Accept list, Uint8Array, bytes (from numpy), or any pyodide proxy
@@ -4040,7 +4195,7 @@ window._py = {
     } catch(_) {
       u8 = new Uint8ClampedArray(Array.from(dp));
     }
-    ctx.putImageData(new ImageData(u8, $canvas.width, $canvas.height), 0, 0);
+    _mainCtx.putImageData(new ImageData(u8, $canvas.width, $canvas.height), 0, 0);
   },
   // Mouse wheel
   wu() { return wheelUp; },
@@ -4607,9 +4762,18 @@ def set_alpha(a):       _py.alpha(float(a))
 def reset_alpha():      _py.alpha(1.0)
 def set_blend(mode='source-over'): _py.blend(str(mode))
 def reset_blend():      _py.blend('source-over')
-def get_pixel(x,y):
-    v=_py.get_pixel(int(x),int(y)); r=v.toJs() if hasattr(v,'toJs') else list(v)
-    return tuple(int(x) for x in r)
+def get_pixel(x, y=None):
+    """get_pixel(x, y) -> (r, g, b, a)   the colour of the screen pixel at x, y, each value from 0 to 255.
+    get_pixel(pos) -> Vec4(r, g, b, a)   the colour at pos, a Vec2 from 0 to 1 ((0, 0) is the top-left corner, (1, 1) the
+                                         bottom-right), each value from 0 to 1. Between two pixels it blends them, like a
+                                         GPU texture read.
+
+    Inside fragment(pos) only the Vec2 form is used: get_pixel(pos) is the colour that was drawn at pos.
+    """
+    if y is None:
+        return _sh_sample(x)
+    v = int(_py.get_pixel_packed(int(x), int(y)))
+    return (v >> 24, (v >> 16) & 255, (v >> 8) & 255, v & 255)
 
 def screen_width():  return int(_py.sw())
 def screen_height(): return int(_py.sh())
@@ -4685,15 +4849,36 @@ def round_dec(num, dec):
 phi=1.618033988749894; root2=1.4142135623730951; root3=1.7320508075688772; root5=2.236067977499789
 
 class Vec2:
-    def __init__(s,x=0.0,y=0.0):s.x=float(x);s.y=float(y)
+    def __init__(s,x=0.0,y=0.0):
+        try: s.x=float(x);s.y=float(y)
+        except TypeError: s.x,s.y=_vflat((x,y),2,'Vec2')
     @property
     def xy(s):return s.x,s.y
     def __str__(s):return f'Vec2({s.x}, {s.y})'
     __repr__=__str__
-    def __add__(s,v):return Vec2(s.x+v.x,s.y+v.y)
+    def __getattr__(s,n):
+        if n in ('x','y','z','w','r','g','b','a') or n.startswith('__'):
+            raise AttributeError(n)
+        r=_swizzle(s,n)
+        if r is None: raise AttributeError(f"'{type(s).__name__}' object has no attribute '{n}'")
+        return r
+    def __pow__(s,v):return _vop(s,v,lambda p,q:p**q)
+    def __rpow__(s,v):return _vop(s,v,lambda p,q:p**q,True)
+    def __mod__(s,v):return _vop(s,v,lambda p,q:p%q)
+    def __rmod__(s,v):return _vop(s,v,lambda p,q:p%q,True)
+    def __floordiv__(s,v):return _vop(s,v,lambda p,q:p//q)
+    def __rfloordiv__(s,v):return _vop(s,v,lambda p,q:p//q,True)
+    def __rtruediv__(s,v):return _vop(s,v,lambda p,q:p/q,True)
+    def __add__(s,v):
+        if isinstance(v,(int,float)): return Vec2(s.x+v,s.y+v)
+        return Vec2(s.x+v.x,s.y+v.y)
     __radd__=__add__
-    def __sub__(s,v):return Vec2(s.x-v.x,s.y-v.y)
-    def __rsub__(s,v):return Vec2(v.x-s.x,v.y-s.y)
+    def __sub__(s,v):
+        if isinstance(v,(int,float)): return Vec2(s.x-v,s.y-v)
+        return Vec2(s.x-v.x,s.y-v.y)
+    def __rsub__(s,v):
+        if isinstance(v,(int,float)): return Vec2(v-s.x,v-s.y)
+        return Vec2(v.x-s.x,v.y-s.y)
     def __mul__(s,v):return Vec2(s.x*(v.x if isinstance(v,Vec2) else float(v)),s.y*(v.y if isinstance(v,Vec2) else float(v)))
     __rmul__=__mul__
     def __truediv__(s,v):return Vec2(s.x/(v.x if isinstance(v,Vec2) else float(v)),s.y/(v.y if isinstance(v,Vec2) else float(v)))
@@ -4739,12 +4924,37 @@ class Vec2:
     def one():   return Vec2( 1.0,  1.0)
 
 class Vec3:
-    def __init__(s,x=0.,y=0.,z=0.):s.x=float(x);s.y=float(y);s.z=float(z)
+    def __init__(s,x=0.,y=0.,z=0.):
+        try: s.x=float(x);s.y=float(y);s.z=float(z)
+        except TypeError: s.x,s.y,s.z=_vflat((x,y,z),3,'Vec3')
+    r=property(lambda s:s.x,lambda s,v:setattr(s,'x',float(v)))
+    g=property(lambda s:s.y,lambda s,v:setattr(s,'y',float(v)))
+    b=property(lambda s:s.z,lambda s,v:setattr(s,'z',float(v)))
     def __str__(s):return f'Vec3({s.x}, {s.y}, {s.z})'
     __repr__=__str__
-    def __add__(s,v):return Vec3(s.x+v.x,s.y+v.y,s.z+v.z)
+    def __getattr__(s,n):
+        if n in ('x','y','z','w','r','g','b','a') or n.startswith('__'):
+            raise AttributeError(n)
+        r=_swizzle(s,n)
+        if r is None: raise AttributeError(f"'{type(s).__name__}' object has no attribute '{n}'")
+        return r
+    def __pow__(s,v):return _vop(s,v,lambda p,q:p**q)
+    def __rpow__(s,v):return _vop(s,v,lambda p,q:p**q,True)
+    def __mod__(s,v):return _vop(s,v,lambda p,q:p%q)
+    def __rmod__(s,v):return _vop(s,v,lambda p,q:p%q,True)
+    def __floordiv__(s,v):return _vop(s,v,lambda p,q:p//q)
+    def __rfloordiv__(s,v):return _vop(s,v,lambda p,q:p//q,True)
+    def __rtruediv__(s,v):return _vop(s,v,lambda p,q:p/q,True)
+    def __add__(s,v):
+        if isinstance(v,(int,float)): return Vec3(s.x+v,s.y+v,s.z+v)
+        return Vec3(s.x+v.x,s.y+v.y,s.z+v.z)
     __radd__=__add__
-    def __sub__(s,v):return Vec3(s.x-v.x,s.y-v.y,s.z-v.z)
+    def __sub__(s,v):
+        if isinstance(v,(int,float)): return Vec3(s.x-v,s.y-v,s.z-v)
+        return Vec3(s.x-v.x,s.y-v.y,s.z-v.z)
+    def __rsub__(s,v):
+        if isinstance(v,(int,float)): return Vec3(v-s.x,v-s.y,v-s.z)
+        return Vec3(v.x-s.x,v.y-s.y,v.z-s.z)
     def __mul__(s,v):return Vec3(s.x*(v.x if isinstance(v,Vec3)else float(v)),s.y*(v.y if isinstance(v,Vec3)else float(v)),s.z*(v.z if isinstance(v,Vec3)else float(v)))
     __rmul__=__mul__
     def __truediv__(s,v):return Vec3(s.x/(v.x if isinstance(v,Vec3)else float(v)),s.y/(v.y if isinstance(v,Vec3)else float(v)),s.z/(v.z if isinstance(v,Vec3)else float(v)))
@@ -4791,6 +5001,134 @@ class Vec3:
     def zero():  return Vec3( 0.0,  0.0,  0.0)
     @staticmethod
     def one():   return Vec3( 1.0,  1.0,  1.0)
+
+
+def _vflat(args, dim, name):
+    """Numbers, vectors and tuples, flattened in order and padded with 0.0 up to dim values."""
+    out = []
+    for a in args:
+        if isinstance(a, (Vec2, Vec3, Vec4)):
+            out.extend(a.to_tuple())
+        elif isinstance(a, (tuple, list)):
+            out.extend(float(c) for c in a)
+        else:
+            out.append(float(a))
+    if len(out) > dim:
+        if any(out[dim:]):                       # (the unused default arguments are zeros and are simply dropped)
+            raise ValueError(f'{name}() takes at most {dim} values, got {len(out)}')
+        del out[dim:]
+    out.extend([0.0] * (dim - len(out)))
+    return out
+
+_SWZ_XYZW = {'x': 0, 'y': 1, 'z': 2, 'w': 3}
+_SWZ_RGBA = {'r': 0, 'g': 1, 'b': 2, 'a': 3}
+def _swizzle(v, name):
+    """v.xy, v.zyx, v.rgb ... (read only): a number for one letter, otherwise a Vec2 / Vec3 / Vec4."""
+    if not (1 <= len(name) <= 4):
+        return None
+    for table in (_SWZ_XYZW, _SWZ_RGBA):
+        if all(c in table for c in name):
+            t = v.to_tuple()
+            idx = [table[c] for c in name]
+            if max(idx) >= len(t):
+                return None
+            vals = [t[i] for i in idx]
+            return vals[0] if len(vals) == 1 else (Vec2, Vec3, Vec4)[len(vals) - 2](*vals)
+    return None
+
+def _vop(s, v, f, rev=False):
+    """Component-wise f(self, other) where other is a vector of the same size or a number."""
+    a = s.to_tuple()
+    if isinstance(v, (Vec2, Vec3, Vec4)):
+        b = v.to_tuple()
+        if len(b) != len(a):
+            raise TypeError(f'cannot combine a {type(s).__name__} with a {type(v).__name__}')
+    else:
+        b = (float(v),) * len(a)
+    return type(s)(*[(f(q, p) if rev else f(p, q)) for p, q in zip(a, b)])
+class Vec4:
+    """Four numbers: x, y, z, w (also called r, g, b, a). Used for colours with an alpha, 0.0 - 1.0."""
+    def __init__(s,x=0.,y=0.,z=0.,w=0.):
+        try: s.x=float(x);s.y=float(y);s.z=float(z);s.w=float(w)
+        except TypeError: s.x,s.y,s.z,s.w=_vflat((x,y,z,w),4,'Vec4')
+    r=property(lambda s:s.x,lambda s,v:setattr(s,'x',float(v)))
+    g=property(lambda s:s.y,lambda s,v:setattr(s,'y',float(v)))
+    b=property(lambda s:s.z,lambda s,v:setattr(s,'z',float(v)))
+    a=property(lambda s:s.w,lambda s,v:setattr(s,'w',float(v)))
+    def __str__(s):return f'Vec4({s.x}, {s.y}, {s.z}, {s.w})'
+    __repr__=__str__
+    def __add__(s,v):return _vop(s,v,lambda p,q:p+q)
+    __radd__=__add__
+    def __sub__(s,v):return _vop(s,v,lambda p,q:p-q)
+    def __rsub__(s,v):return _vop(s,v,lambda p,q:p-q,True)
+    def __mul__(s,v):return _vop(s,v,lambda p,q:p*q)
+    __rmul__=__mul__
+    def __truediv__(s,v):return _vop(s,v,lambda p,q:p/q)
+    def __neg__(s):return Vec4(-s.x,-s.y,-s.z,-s.w)
+    def __abs__(s):return s.length()
+    def __getitem__(s,i):return(s.x,s.y,s.z,s.w)[i]
+    def copy(s):return Vec4(s.x,s.y,s.z,s.w)
+    def to_tuple(s):return(s.x,s.y,s.z,s.w)
+    def ceil(s):return Vec4(ceil(s.x),ceil(s.y),ceil(s.z),ceil(s.w))
+    def floor(s):return Vec4(floor(s.x),floor(s.y),floor(s.z),floor(s.w))
+    def round(s):return Vec4(round(s.x),round(s.y),round(s.z),round(s.w))
+    def length(s):return math.sqrt(s.x*s.x+s.y*s.y+s.z*s.z+s.w*s.w)
+    def length_sq(s):return s.x*s.x+s.y*s.y+s.z*s.z+s.w*s.w
+    def normalized(s):l=s.length();return Vec4(s.x/l,s.y/l,s.z/l,s.w/l) if l else Vec4(0,0,0,0)
+    @staticmethod
+    def dot(a,b):return a.x*b.x+a.y*b.y+a.z*b.z+a.w*b.w
+    @staticmethod
+    def distance(a,b):return (b-a).length()
+    @staticmethod
+    def delta(a,b):
+        """Return b - a, the vector from a to b."""
+        return b-a
+    @staticmethod
+    def lerp(a,b,t):return Vec4(lerp(a.x,b.x,t),lerp(a.y,b.y,t),lerp(a.z,b.z,t),lerp(a.w,b.w,t))
+    @staticmethod
+    def zero():  return Vec4(0.0,0.0,0.0,0.0)
+    @staticmethod
+    def one():   return Vec4(1.0,1.0,1.0,1.0)
+    def __getattr__(s,n):
+        if n in ('x','y','z','w','r','g','b','a') or n.startswith('__'):
+            raise AttributeError(n)
+        r=_swizzle(s,n)
+        if r is None: raise AttributeError(f"'{type(s).__name__}' object has no attribute '{n}'")
+        return r
+    def __pow__(s,v):return _vop(s,v,lambda p,q:p**q)
+    def __rpow__(s,v):return _vop(s,v,lambda p,q:p**q,True)
+    def __mod__(s,v):return _vop(s,v,lambda p,q:p%q)
+    def __rmod__(s,v):return _vop(s,v,lambda p,q:p%q,True)
+    def __floordiv__(s,v):return _vop(s,v,lambda p,q:p//q)
+    def __rfloordiv__(s,v):return _vop(s,v,lambda p,q:p//q,True)
+    def __rtruediv__(s,v):return _vop(s,v,lambda p,q:p/q,True)
+
+def dot(a,b):
+    """Dot product of two vectors (Vec2, Vec3 or Vec4), or the product of two numbers."""
+    if isinstance(a,(int,float)): return a*b
+    return sum(p*q for p,q in zip(a.to_tuple(),b.to_tuple()))
+
+def cross(a,b):
+    """Cross product: a number for two Vec2, a Vec3 for two Vec3."""
+    if isinstance(a,Vec2): return a.x*b.y-a.y*b.x
+    return Vec3(a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x)
+
+def length(v):
+    """Length of a vector (or the absolute value of a number)."""
+    if isinstance(v,(int,float)): return abs(v)
+    return math.sqrt(sum(c*c for c in v.to_tuple()))
+
+def step(edge,x):
+    """0.0 where x < edge, otherwise 1.0 (works on numbers and on vectors)."""
+    if isinstance(x,(Vec2,Vec3,Vec4)): return type(x)(*[step(edge,c) for c in x.to_tuple()])
+    return 0.0 if x<edge else 1.0
+
+def smoothstep(edge0,edge1,x):
+    """Smooth 0 -> 1 transition between edge0 and edge1 (clamped, S-shaped). Works on numbers and on vectors."""
+    if isinstance(x,(Vec2,Vec3,Vec4)): return type(x)(*[smoothstep(edge0,edge1,c) for c in x.to_tuple()])
+    if edge1==edge0: return step(edge0,x)
+    t=max(0.0,min(1.0,(x-edge0)/(edge1-edge0)))
+    return t*t*(3.0-2.0*t)
 
 class Matrix:
     def __init__(s,w,h,d=None):
@@ -5080,103 +5418,6 @@ def draw_image_quad(img, p1, p2, p3, p4, tint=None):
     pts = [_pt2(p1), _pt2(p2), _pt2(p3), _pt2(p4)]
     _py.img_draw_quad(img._h, pts, _css_clear(tint) if tint is not None else None)
 
-# ── Fragment shader ────────────────────────────────────────────
-
-_INV255 = 1.0 / 255.0
-
-def fragment(fn):
-    """Apply a per-pixel shader function to the entire canvas.
-
-    fn(r, g, b, pos) → Vec3(r, g, b)
-      r, g, b  – current pixel color, 0.0 – 1.0
-      pos      – Vec2(x, y) UV coordinates: (0,0) top-left, (1,1) bottom-right
-      return     Vec3(r, g, b) in 0.0 – 1.0  (alpha is never modified)
-
-    FAST PATH (automatic):  if fn can be called with numpy arrays it is called
-    once for the entire image at C / GPU speed via numpy broadcasting.
-    Write fn to work on scalars — numpy will vectorise it automatically when
-    all maths uses +, -, *, /, clamp(), lerp(), sin(), cos(), etc.
-
-    FALLBACK: per-pixel Python loop, used when fn relies on control-flow that
-    numpy cannot vectorise (if/else on pixel values, recursion, etc.).  The
-    fallback transparently skips fully-transparent pixels for extra speed.
-
-    Examples:
-        # Invert (numpy-vectorised automatically):
-        def invert(r, g, b, pos):
-            return Vec3(1-r, 1-g, 1-b)
-        fragment(invert)
-
-        # Radial vignette (also numpy-vectorised):
-        def vignette(r, g, b, pos):
-            d = ((pos.x - 0.5)**2 + (pos.y - 0.5)**2) ** 0.5 * 1.4
-            f = 1.0 - (d if d < 1.0 else 1.0)  # or: clamp(d,0,1)
-            return Vec3(r*f, g*f, b*f)
-        fragment(vignette)
-    """
-    cw = W(); ch = H(); n = cw * ch
-    if n == 0:
-        return
-
-    raw_js = _py.get_canvas_data()
-    flat   = raw_js.to_py() if hasattr(raw_js, 'to_py') else raw_js
-
-    # ── Fast path: numpy vectorised ───────────────────────────────
-    try:
-        import numpy as _np
-
-        # Build (H, W) float32 planes from the raw pixel buffer
-        arr  = _np.frombuffer(bytes(bytearray(flat)), dtype=_np.uint8).copy().reshape(ch, cw, 4)
-        r_f  = arr[:, :, 0].astype(_np.float32) * _INV255
-        g_f  = arr[:, :, 1].astype(_np.float32) * _INV255
-        b_f  = arr[:, :, 2].astype(_np.float32) * _INV255
-        # UV grids — shape (H, W)
-        xs   = _np.linspace(0.0, 1.0, cw, endpoint=False, dtype=_np.float32)[_np.newaxis, :]
-        ys   = _np.linspace(0.0, 1.0, ch, endpoint=False, dtype=_np.float32)[:, _np.newaxis]
-        xs   = _np.broadcast_to(xs, (ch, cw)).copy()
-        ys   = _np.broadcast_to(ys, (ch, cw)).copy()
-
-        res = fn(r_f, g_f, b_f, Vec2(xs, ys))
-        # Vec2(xs, ys) works because Vec2 stores x/y as-is (floats/arrays)
-
-        def _to_u8(v):
-            a = _np.asarray(v, dtype=_np.float32)
-            _np.clip(a, 0.0, 1.0, out=a)
-            return (a * 255 + 0.5).astype(_np.uint8)
-
-        arr[:, :, 0] = _to_u8(res.x)
-        arr[:, :, 1] = _to_u8(res.y)
-        arr[:, :, 2] = _to_u8(res.z)
-        _py.put_canvas_data(arr.tobytes())
-        return
-    except Exception:
-        pass   # fn is not numpy-compatible → fall through to per-pixel loop
-
-    # ── Per-pixel fallback (optimised) ────────────────────────────
-    data   = bytearray(flat)
-    inv_cw = 1.0 / cw if cw > 1 else 1.0
-    inv_ch = 1.0 / ch if ch > 1 else 1.0
-    _clamp = clamp
-    _Vec2  = Vec2
-    _Vec3x = float
-    i255   = 255
-
-    for i in range(n):
-        b4 = i * 4
-        if data[b4 + 3] == 0:
-            continue   # skip fully transparent pixels
-        res = fn(
-            data[b4]     * _INV255,
-            data[b4 + 1] * _INV255,
-            data[b4 + 2] * _INV255,
-            _Vec2((i % cw) * inv_cw, (i // cw) * inv_ch)
-        )
-        data[b4]     = min(i255, max(0, int(float(res.x) * i255 + 0.5)))
-        data[b4 + 1] = min(i255, max(0, int(float(res.y) * i255 + 0.5)))
-        data[b4 + 2] = min(i255, max(0, int(float(res.z) * i255 + 0.5)))
-
-    _py.put_canvas_data(bytes(data))
-
 # ── Sound ─────────────────────────────────────────────────────
 
 class Sound:
@@ -5267,7 +5508,7 @@ def include(name):
 
     - Any assets embedded inside that file (images, sounds, other libs ...) are
       registered automatically, so nested include() calls inside the file work too.
-    - Top-level setup() and update() definitions inside the included file are
+    - Top-level setup(), update() and fragment() definitions inside the included file are
       silently ignored — only the host file's lifecycle hooks are used.
     - All other variables, classes, and functions become available globally.
 
@@ -5309,12 +5550,13 @@ def include(name):
     # ── 2. Strip top-level setup() / update() definitions ────────
     # We parse with ast so that only genuine top-level function defs
     # named 'setup' or 'update' are removed; anything else is kept.
+    _BP_SRC_FILES[str(name)] = code
     try:
         tree = _ast.parse(code, filename=str(name))
         tree.body = [
             node for node in tree.body
             if not (isinstance(node, _ast.FunctionDef)
-                    and node.name in ('setup', 'update'))
+                    and node.name in ('setup', 'update', 'fragment'))
         ]
         _ast.fix_missing_locations(tree)
         code_obj = compile(tree, str(name), 'exec')
@@ -5431,6 +5673,7 @@ def _reset_controlled():
     _asset_registry.clear()
     # Reset the draw target to the main screen canvas
     _py.surface_reset_target()
+    _bp_frag_reset()
 
 
 __STRICTS = {}   # {var_name: {type, ...}}  – readable, but managed by strict()
@@ -6149,15 +6392,1931 @@ def _bp_install_tabs(tabs_json, merge=False):
     for base in fresh:                      # run them (a tab used earlier by another tab has already run)
         _bp_exec_tab(base)
 
+# ── GPU shaders ───────────────────────────────────────────────────────────────────────────────────────
+# fragment(pos) is translated from Python to GLSL ES 3.00 and runs for every pixel on the GPU.
+# The translator understands a practical subset of Python (see the wiki page of fragment()). It infers the
+# type of every value (bool / int / float / Vec2 / Vec3 / Vec4 / arrays of them), turns your global
+# variables into uniforms that are re-read every frame, and compiles the helper functions you call.
+import ast as _sh_ast, math as _sh_math, builtins as _sh_builtins, types as _sh_types, re as _sh_re
+
+_SH_MAX_SLOTS = 192        # vec4 uniform slots available to the program's variables
+_SH_LOOP_CAP = 1024        # iterations after which a shader 'while' loop is cut off (it must never hang the GPU)
+_SH_DIMS = {'vec2': 2, 'vec3': 3, 'vec4': 4}
+_SH_RANK = {'bool': 0, 'int': 1, 'float': 2}
+_SH_VEC_OF = {2: 'vec2', 3: 'vec3', 4: 'vec4'}
+_SH_COLOUR = ('bool', 'int', 'float', 'vec3', 'vec4')
+
+
+class _ShaderError(Exception):
+    """The shader uses something that cannot run on the GPU (the message says what and where)."""
+
+
+class _ShUnknown(Exception):
+    """Internal: a value whose type is not known yet in this pass."""
+
+
+def _sh_is_vec(t):
+    return isinstance(t, str) and t in _SH_DIMS
+
+
+def _sh_is_arr(t):
+    return isinstance(t, tuple)
+
+
+def _sh_is_scalar(t):
+    return t in _SH_RANK
+
+
+def _sh_unify(a, b):
+    if a == b:
+        return a
+    if a in _SH_RANK and b in _SH_RANK:
+        return a if _SH_RANK[a] >= _SH_RANK[b] else b
+    return None
+
+
+def _sh_tname(t):
+    if _sh_is_arr(t):
+        return 'list of %s' % _sh_tname(t[1])
+    return {'bool': 'bool', 'int': 'int', 'float': 'float', 'vec2': 'Vec2', 'vec3': 'Vec3', 'vec4': 'Vec4',
+            'void': 'nothing'}.get(t, str(t))
+
+
+def _sh_ident(name):
+    s = _sh_re.sub(r'[^A-Za-z0-9_]', lambda m: '_x%X_' % ord(m.group(0)), name)
+    while '__' in s:
+        s = s.replace('__', '_u_')
+    return s
+
+
+def _sh_float(v):
+    v = float(v)
+    if v != v or v in (float('inf'), float('-inf')):
+        raise _ShaderError('a number that is infinite or not-a-number cannot be used in a shader')
+    r = repr(v)
+    if 'e' not in r and '.' not in r:
+        r += '.0'
+    return r
+
+
+def _sh_zero(t):
+    if t == 'float':
+        return '0.0'
+    if t == 'int':
+        return '0'
+    if t == 'bool':
+        return 'false'
+    if _sh_is_vec(t):
+        return '%s(0.0)' % t
+    return '0'
+
+
+# ── GLSL helper functions, emitted only when used ──────────────────────────────────────────────────────
+_SH_HELPERS = {
+    'sq': 'float bp_sq(float x) { return x * x; }\\nvec2 bp_sq(vec2 x) { return x * x; }\\nvec3 bp_sq(vec3 x) { return x * x; }\\nvec4 bp_sq(vec4 x) { return x * x; }',
+    'cube': 'float bp_cube(float x) { return x * x * x; }\\nvec2 bp_cube(vec2 x) { return x * x * x; }\\nvec3 bp_cube(vec3 x) { return x * x * x; }\\nvec4 bp_cube(vec4 x) { return x * x * x; }',
+    'pow': 'float bp_pow(float x, float y) { if (x >= 0.0) return pow(x, y); float r = pow(-x, y); return (mod(y, 2.0) == 0.0) ? r : -r; }',
+    'idiv': 'int bp_idiv(int a, int b) { int q = a / b; return ((a % b) != 0 && ((a ^ b) < 0)) ? q - 1 : q; }',
+    'imod': 'int bp_imod(int a, int b) { int m = a % b; return (m != 0 && ((m ^ b) < 0)) ? m + b : m; }',
+    'round': 'float bp_round(float x) { return roundEven(x); }\\nvec2 bp_round(vec2 x) { return roundEven(x); }\\nvec3 bp_round(vec3 x) { return roundEven(x); }\\nvec4 bp_round(vec4 x) { return roundEven(x); }',
+    'norm': 'vec2 bp_normalized(vec2 v) { float l = length(v); return l > 0.0 ? v / l : v; }\\nvec3 bp_normalized(vec3 v) { float l = length(v); return l > 0.0 ? v / l : v; }\\nvec4 bp_normalized(vec4 v) { float l = length(v); return l > 0.0 ? v / l : v; }',
+    'nhash': ('float bp_nhash(int ix, int iy, int iz) {\\n'
+              '  uint h = uint(ix) * 1619u + uint(iy) * 31337u + uint(iz) * 6791u;\\n'
+              '  h ^= h >> 13; h = h * 1274126177u; h ^= h >> 16;\\n'
+              '  return float(h) / 4294967295.0;\\n}'),
+    'noise1': ('float bp_noise1(float x, bool sm) {\\n'
+               '  float fl = floor(x); int ix = int(fl); float fx = x - fl;\\n'
+               '  float u = sm ? fx * fx * (3.0 - 2.0 * fx) : fx;\\n'
+               '  return mix(bp_nhash(ix, 0, 0), bp_nhash(ix + 1, 0, 0), u);\\n}'),
+    'noise2': ('float bp_noise2(float x, float y, bool sm) {\\n'
+               '  float fx0 = floor(x), fy0 = floor(y); int ix = int(fx0), iy = int(fy0); float fx = x - fx0, fy = y - fy0;\\n'
+               '  float u = sm ? fx * fx * (3.0 - 2.0 * fx) : fx; float v = sm ? fy * fy * (3.0 - 2.0 * fy) : fy;\\n'
+               '  float a = bp_nhash(ix, iy, 0), b = bp_nhash(ix + 1, iy, 0), c = bp_nhash(ix, iy + 1, 0), d = bp_nhash(ix + 1, iy + 1, 0);\\n'
+               '  return mix(mix(a, b, u), mix(c, d, u), v);\\n}'),
+    'noise3': ('float bp_noise3(float x, float y, float z, bool sm) {\\n'
+               '  float fx0 = floor(x), fy0 = floor(y), fz0 = floor(z); int ix = int(fx0), iy = int(fy0), iz = int(fz0);\\n'
+               '  float fx = x - fx0, fy = y - fy0, fz = z - fz0;\\n'
+               '  float u = sm ? fx * fx * (3.0 - 2.0 * fx) : fx; float v = sm ? fy * fy * (3.0 - 2.0 * fy) : fy; float w = sm ? fz * fz * (3.0 - 2.0 * fz) : fz;\\n'
+               '  float a000 = bp_nhash(ix, iy, iz), a100 = bp_nhash(ix + 1, iy, iz), a010 = bp_nhash(ix, iy + 1, iz), a110 = bp_nhash(ix + 1, iy + 1, iz);\\n'
+               '  float a001 = bp_nhash(ix, iy, iz + 1), a101 = bp_nhash(ix + 1, iy, iz + 1), a011 = bp_nhash(ix, iy + 1, iz + 1), a111 = bp_nhash(ix + 1, iy + 1, iz + 1);\\n'
+               '  return mix(mix(mix(a000, a100, u), mix(a010, a110, u), v), mix(mix(a001, a101, u), mix(a011, a111, u), v), w);\\n}'),
+}
+_SH_HELPER_DEPS = {'noise1': ['nhash'], 'noise2': ['nhash'], 'noise3': ['nhash']}
+_SH_HELPER_ORDER = ['sq', 'cube', 'pow', 'idiv', 'imod', 'round', 'norm', 'nhash', 'noise1', 'noise2', 'noise3']
+
+_SH_UNSUPPORTED = {
+    'ListComp': 'list comprehensions', 'SetComp': 'set comprehensions', 'DictComp': 'dict comprehensions',
+    'GeneratorExp': 'generator expressions', 'Lambda': 'lambda functions', 'Dict': 'dictionaries', 'Set': 'sets',
+    'JoinedStr': 'f-strings', 'Starred': 'starred (*) arguments', 'Await': 'await', 'Yield': 'yield',
+    'YieldFrom': 'yield', 'NamedExpr': 'the := operator', 'Slice': 'slices', 'FormattedValue': 'f-strings',
+    'Try': 'try / except', 'TryStar': 'try / except', 'With': 'with blocks', 'Raise': 'raise', 'Delete': 'del',
+    'ClassDef': 'classes', 'FunctionDef': 'functions defined inside functions', 'AsyncFunctionDef': 'async functions',
+    'Import': 'import', 'ImportFrom': 'import', 'Global': 'global', 'Nonlocal': 'nonlocal', 'Match': 'match',
+    'AsyncFor': 'async for', 'AsyncWith': 'async with',
+}
+
+
+class _ShFunc:
+    """One translated instance of a Python function (one per distinct set of argument types)."""
+    def __init__(self, key, name, ptypes):
+        self.key = key
+        self.name = name              # GLSL name
+        self.ptypes = ptypes
+        self.ret = None               # return type once known ('void' when nothing is returned)
+        self.code = None
+
+
+class _ShCompiler:
+    def __init__(self, api, runtime=None):
+        self.api = api                              # BowPy API objects by name (identity decides what is built in)
+        self.rt = runtime or {}                     # callbacks: source_of(fn), is_mobile(), consts(globals)
+        self.funcs = {}                             # key -> _ShFunc
+        self.order = []                             # finished functions, callees first
+        self.stack = []
+        self.helpers = set()
+        self.uniforms = []                          # [{key, kind, type, slot, count, g, name}]
+        self.uni_index = {}                         # (id(globals), name) -> uniform entry
+        self.nslots = 0
+        self.uses_scene = False
+        self.uses_live = False
+        self._mk_builtin_ids()
+
+    # ── what counts as built in ──
+    _FUNC_NAMES = ('sin cos tan asin acos atan atan2 sinh cosh tanh sqrt exp exp2 log log2 log10 floor ceil trunc round '
+                   'abs fabs min max pow hypot degrees radians fmod copysign int float bool len range '
+                   'clamp lerp map_range smooth_step smoothstep step fract sign normalize distance dot cross length '
+                   'noise noise1 noise2 noise3 get_pixel W H dt delta_time fps get_time mouse_x mouse_y mouse_pos '
+                   'mouse_down is_mobile screen_width screen_height').split()
+
+    def _mk_builtin_ids(self):
+        ids = {}
+        for name in self._FUNC_NAMES:
+            for src in (self.api, vars(_sh_math), vars(_sh_builtins)):
+                o = src.get(name)
+                if o is not None and not isinstance(o, (int, float, str)):
+                    ids.setdefault(id(o), name)
+        self.bi_ids = ids
+        self.vec_cls = {}
+        for n, t in (('Vec2', 'vec2'), ('Vec3', 'vec3'), ('Vec4', 'vec4')):
+            c = self.api.get(n)
+            if c is not None:
+                self.vec_cls[id(c)] = t
+        self.math_consts = {}
+        for n in ('pi', 'tau', 'e', 'inf', 'nan'):
+            v = getattr(_sh_math, n, None)
+            if v is not None:
+                self.math_consts[n] = v
+
+    # ── errors ──
+    def fail(self, node, msg):
+        ctx = self.fn_ctx
+        where = ''
+        if node is not None and getattr(node, 'lineno', None):
+            where = '%s line %d: ' % (ctx['file'] if ctx else '?', node.lineno)
+        elif ctx:
+            where = '%s: ' % ctx['file']
+        raise _ShaderError('%s%s' % (where, msg))
+
+    fn_ctx = None
+
+    # ═════════════════════ entry ═════════════════════
+    def compile_entry(self, fn):
+        if not isinstance(fn, _sh_types.FunctionType):
+            raise _ShaderError('fragment must be a function defined with def')
+        node, info = self.source_of(fn)
+        if node is None:
+            raise _ShaderError('fragment(): the source code of the function is not available')
+        self.fn_ctx = {'file': info}
+        a = node.args
+        if a.vararg or a.kwarg or a.kwonlyargs or len(a.args) != 1 or a.defaults:
+            self.fail(node, 'fragment must take exactly one argument: def fragment(pos)')
+        f = self.instance(fn, ['vec2'], node=node, is_entry=True)
+        # the shader's colour: a Vec3 (or a plain number, a grey) is opaque, a Vec4 sets its own alpha
+        rt = f.ret
+        if rt in ('float', 'int', 'bool'):
+            conv = 'vec4(vec3(%s), 1.0)' % self.cv('R', rt, 'float')
+        elif rt == 'vec3':
+            conv = 'vec4(R, 1.0)'
+        elif rt == 'vec4':
+            conv = 'R'
+        else:
+            raise _ShaderError('fragment() must return a colour: Vec3(r, g, b), Vec4(r, g, b, a), (r, g, b) or a grey level, '
+                               'each from 0 to 1 (it returns %s)' % ('nothing' if rt in (None, 'void') else _sh_tname(rt)))
+        return f, conv
+
+    def source_of(self, fn):
+        r = self.rt.get('source_of')
+        if r is None:
+            raise _ShaderError('no source lookup available')
+        return r(fn)
+
+    # ═════════════════════ function instances ═════════════════════
+    def instance(self, fn, argtypes, node=None, is_entry=False):
+        key = (id(fn), tuple(argtypes))
+        f = self.funcs.get(key)
+        if f is not None:
+            if f.code is None:
+                self.fail(node, 'recursion is not supported in shaders (%s calls itself)' % fn.__name__)
+            return f
+        fnode, info = self.source_of(fn)
+        if fnode is None:
+            self.fail(node, 'the source code of %s() is not available, so it cannot run on the GPU' % fn.__name__)
+        sig = ''.join({'bool': 'b', 'int': 'i', 'float': 'f', 'vec2': '2', 'vec3': '3', 'vec4': '4'}.get(t, 'a') for t in argtypes)
+        gl_name = 'f%d_%s_%s' % (len(self.funcs), _sh_ident(fn.__name__), sig)
+        f = _ShFunc(key, gl_name, list(argtypes))
+        self.funcs[key] = f
+        saved = (self.fn_ctx, getattr(self, 'out', None), getattr(self, 'ind', 1), getattr(self, 'loop_depth', 0))
+        try:
+            self.build(f, fn, fnode, info, is_entry)
+        finally:
+            self.fn_ctx, self.out, self.ind, self.loop_depth = saved
+        self.order.append(f)
+        return f
+
+    def build(self, f, fn, fnode, info, is_entry=False):
+        a = fnode.args
+        names = [x.arg for x in a.args]
+        if a.vararg or a.kwarg or a.kwonlyargs:
+            self.fail(fnode, '%s(): *args / **kwargs are not supported in shaders' % fn.__name__)
+        if len(f.ptypes) != len(names):
+            self.fail(fnode, '%s() takes %d argument(s)' % (fn.__name__, len(names)))
+        ctx = {'fn': fn, 'g': fn.__globals__, 'file': info, 'node': fnode, 'name': fn.__name__,
+               'params': names, 'ptypes': dict(zip(names, f.ptypes)), 'vars': dict(zip(names, f.ptypes)),
+               'assigned': self.assigned_names(fnode),
+               'entry': is_entry, 'ret': None, 'changed': False, 'skipped': False, 'tmp': 0, 'consts': self.rt.get('consts', lambda g: set())(fn.__globals__)}
+        self.fn_ctx = ctx
+        self.stack.append(f.key)
+        try:
+            body = fnode.body
+            lines = []
+            for attempt in range(10):
+                ctx['changed'] = False
+                ctx['skipped'] = False
+                ctx['tmp'] = 0
+                self.out = []
+                self.ind = 1
+                self.loop_depth = 0
+                self.stmts(body)
+                lines = self.out
+                if not ctx['changed'] and not ctx['skipped']:
+                    break
+            else:
+                self.fail(fnode, 'could not work out the types of the variables in %s()' % fn.__name__)
+            if ctx['skipped']:
+                self.fail(fnode, 'could not work out the type of a variable in %s()' % fn.__name__)
+        finally:
+            self.stack.pop()
+        f.ret = ctx['ret'] if ctx['ret'] is not None else 'void'
+        rtype = f.ret
+        params = ', '.join('%s %s' % (t, 'v_' + _sh_ident(n)) for n, t in zip(names, f.ptypes))
+        decl = []
+        for n, t in ctx['vars'].items():
+            if n in names:
+                continue
+            decl.append('  %s %s = %s;' % (self.glsl_t(t), 'v_' + _sh_ident(n), _sh_zero(t)))
+        tail = '' if rtype == 'void' else '  return %s;\\n' % _sh_zero(rtype)
+        f.code = '%s %s(%s) {\\n%s\\n%s\\n%s}' % (rtype, f.name, params, '\\n'.join(decl), '\\n'.join(lines), tail)
+
+    def glsl_t(self, t):
+        return t
+
+    def assigned_names(self, fnode):
+        """Every name the function assigns (Python makes those local for the whole function)."""
+        out = set()
+
+        def targets(t):
+            if isinstance(t, _sh_ast.Name):
+                out.add(t.id)
+            elif isinstance(t, (_sh_ast.Tuple, _sh_ast.List)):
+                for e in t.elts:
+                    targets(e)
+        for node in _sh_ast.walk(fnode):
+            if isinstance(node, _sh_ast.Assign):
+                for t in node.targets:
+                    targets(t)
+            elif isinstance(node, (_sh_ast.AugAssign, _sh_ast.AnnAssign)):
+                targets(node.target)
+            elif isinstance(node, (_sh_ast.For, _sh_ast.AsyncFor)):
+                targets(node.target)
+        return out
+
+    # ═════════════════════ conversions ═════════════════════
+    def cv(self, code, frm, to):
+        """Convert an expression between types (scalars promote; a scalar fills a vector)."""
+        if frm == to:
+            return code
+        if to == 'float' and frm in ('int', 'bool'):
+            return 'float(%s)' % code
+        if to == 'int' and frm in ('float', 'bool'):
+            return 'int(%s)' % code
+        if to == 'bool' and frm in ('int', 'float'):
+            return '(%s != %s)' % (code, '0' if frm == 'int' else '0.0')
+        if _sh_is_vec(to) and frm in _SH_RANK:
+            c = code if frm == 'float' else 'float(%s)' % code
+            return '%s(%s)' % (to, c)
+        raise _ShaderError('cannot use %s where %s is needed' % (_sh_tname(frm), _sh_tname(to)))
+
+    def conv(self, node, code, frm, to):
+        try:
+            return self.cv(code, frm, to)
+        except _ShaderError as e:
+            self.fail(node, str(e))
+
+    def truth(self, node, code, t):
+        if t == 'bool':
+            return code
+        if t == 'int':
+            return '(%s != 0)' % code
+        if t == 'float':
+            return '(%s != 0.0)' % code
+        self.fail(node, 'a %s cannot be used as a condition' % _sh_tname(t))
+
+    # ═════════════════════ statements ═════════════════════
+    def emit(self, line):
+        self.out.append('  ' * self.ind + line)
+
+    def stmts(self, body):
+        for s in body:
+            try:
+                self.stmt(s)
+            except _ShUnknown:
+                self.fn_ctx['skipped'] = True
+
+    def stmt(self, n):
+        t = type(n).__name__
+        if t in _SH_UNSUPPORTED:
+            self.fail(n, '%s cannot be used in a shader (it runs on the GPU)' % _SH_UNSUPPORTED[t])
+        m = getattr(self, 'st_' + t, None)
+        if m is None:
+            self.fail(n, 'this statement (%s) is not supported in shaders' % t)
+        m(n)
+
+    def st_Pass(self, n):
+        pass
+
+    def st_Assert(self, n):
+        pass
+
+    def st_Expr(self, n):
+        v = n.value
+        if isinstance(v, _sh_ast.Constant):
+            return                                        # docstring
+        code, t = self.ex(v, allow_void=True)
+        if isinstance(v, _sh_ast.Call):
+            self.emit('%s;' % code)
+
+    def st_Return(self, n):
+        ctx = self.fn_ctx
+        if n.value is None:
+            self.emit('return;')
+            return
+        code, t = self.ex(n.value)
+        if _sh_is_arr(t):
+            self.fail(n, 'a list cannot be returned from a shader function')
+        cur = ctx['ret']
+        if cur is None:
+            ctx['ret'] = t; ctx['changed'] = True
+        elif cur != t:
+            u = _sh_unify(cur, t)
+            if u is None and ctx.get('entry') and cur in _SH_COLOUR and t in _SH_COLOUR:
+                u = 'vec4'                    # the screen shader may return Vec3 in one place and Vec4 in another
+            if u is None:
+                self.fail(n, 'returns %s here but %s elsewhere' % (_sh_tname(t), _sh_tname(cur)))
+            if u != cur:
+                ctx['ret'] = u; ctx['changed'] = True
+        want = ctx['ret']
+        if ctx.get('entry') and want == 'vec4' and t != 'vec4':
+            if t == 'vec3':
+                self.emit('return vec4(%s, 1.0);' % code)
+            elif t in _SH_RANK:
+                self.emit('return vec4(vec3(%s), 1.0);' % self.cv(code, t, 'float'))
+            else:
+                self.fail(n, 'fragment() must return a colour: Vec3, Vec4, (r, g, b) or a grey level from 0 to 1 (this returns %s)' % _sh_tname(t))
+            return
+        self.emit('return %s;' % self.conv(n, code, t, want))
+
+    def st_If(self, n):
+        c, t = self.ex(n.test)
+        self.emit('if (%s) {' % self.truth(n.test, c, t))
+        self.ind += 1; self.stmts(n.body); self.ind -= 1
+        if n.orelse:
+            self.emit('} else {')
+            self.ind += 1; self.stmts(n.orelse); self.ind -= 1
+        self.emit('}')
+
+    def st_Break(self, n):
+        if self.loop_depth == 0:
+            self.fail(n, "'break' outside a loop")
+        self.emit('break;')
+
+    def st_Continue(self, n):
+        if self.loop_depth == 0:
+            self.fail(n, "'continue' outside a loop")
+        self.emit('continue;')
+
+    def tmpname(self, base):
+        self.fn_ctx['tmp'] += 1
+        return '%s%d' % (base, self.fn_ctx['tmp'])
+
+    def st_While(self, n):
+        if n.orelse:
+            self.fail(n, "'while ... else' is not supported in shaders")
+        k = self.tmpname('w_')
+        self.emit('for (int %s = 0; %s < %d; %s++) {' % (k, k, _SH_LOOP_CAP, k))
+        self.ind += 1
+        c, t = self.ex(n.test)
+        self.emit('if (!%s) break;' % self.truth(n.test, c, t))
+        self.loop_depth += 1; self.stmts(n.body); self.loop_depth -= 1
+        self.ind -= 1
+        self.emit('}')
+
+    def st_For(self, n):
+        if n.orelse:
+            self.fail(n, "'for ... else' is not supported in shaders")
+        if not isinstance(n.target, _sh_ast.Name):
+            self.fail(n, 'a for loop can only count with a single variable')
+        it = n.iter
+        var = n.target.id
+        if isinstance(it, _sh_ast.Call) and isinstance(it.func, _sh_ast.Name) and self.is_builtin(it.func.id, 'range'):
+            if it.keywords or not (1 <= len(it.args) <= 3):
+                self.fail(n, 'range() takes 1 to 3 arguments')
+            vals = []
+            for a in it.args:
+                c, t = self.ex(a)
+                if t not in _SH_RANK:
+                    self.fail(a, 'range() needs numbers')
+                vals.append(self.cv(c, t, 'int'))
+            if len(vals) == 1:
+                start, stop, step = '0', vals[0], '1'
+            elif len(vals) == 2:
+                start, stop, step = vals[0], vals[1], '1'
+            else:
+                start, stop, step = vals
+            self.declare(n, var, 'int')
+            k = self.tmpname('i_')
+            lit = None
+            if len(it.args) == 3 and isinstance(it.args[2], _sh_ast.Constant) and isinstance(it.args[2].value, int) and not isinstance(it.args[2].value, bool):
+                lit = it.args[2].value
+            elif len(it.args) == 3 and isinstance(it.args[2], _sh_ast.UnaryOp) and isinstance(it.args[2].op, _sh_ast.USub) and isinstance(it.args[2].operand, _sh_ast.Constant):
+                lit = -it.args[2].operand.value
+            elif len(it.args) < 3:
+                lit = 1
+            if lit == 0:
+                self.fail(n, 'range() step must not be zero')
+            if lit is not None:
+                cond = '%s < %s' % (k, stop) if lit > 0 else '%s > %s' % (k, stop)
+            else:
+                cond = '(%s > 0 ? %s < %s : %s > %s)' % (step, k, stop, k, stop)
+            self.emit('for (int %s = %s; %s; %s += %s) {' % (k, start, cond, k, step))
+            self.ind += 1
+            self.emit('%s = %s;' % ('v_' + _sh_ident(var), k))
+            self.loop_depth += 1; self.stmts(n.body); self.loop_depth -= 1
+            self.ind -= 1
+            self.emit('}')
+            return
+        # for item in LIST (a list or tuple of numbers / vectors in a global variable)
+        code, t = self.ex(it)
+        if _sh_is_arr(t):
+            k = self.tmpname('i_')
+            self.declare(n, var, t[1])
+            self.emit('for (int %s = 0; %s < %d; %s++) {' % (k, k, t[2], k))
+            self.ind += 1
+            self.emit('%s = %s;' % ('v_' + _sh_ident(var), self.arr_get(code, t, k)))
+            self.loop_depth += 1; self.stmts(n.body); self.loop_depth -= 1
+            self.ind -= 1
+            self.emit('}')
+            return
+        self.fail(n, "a for loop in a shader can only use range(...) or a list stored in a global variable")
+
+    def declare(self, node, name, t):
+        """Record the type of a local variable (hoisted to the top of the function)."""
+        ctx = self.fn_ctx
+        if t is None:
+            raise _ShUnknown()
+        if t == 'void':
+            self.fail(node, "this call does not return a value")
+        cur = ctx['vars'].get(name)
+        if cur is None:
+            ctx['vars'][name] = t; ctx['changed'] = True
+            return t
+        if cur == t:
+            return cur
+        u = _sh_unify(cur, t)
+        if u is None:
+            self.fail(node, "the variable '%s' is %s here but %s elsewhere - a shader variable keeps one type"
+                      % (name, _sh_tname(t), _sh_tname(cur)))
+        if u != cur:
+            if name in ctx['params']:
+                self.fail(node, "the parameter '%s' is %s and cannot take %s" % (name, _sh_tname(cur), _sh_tname(t)))
+            ctx['vars'][name] = u; ctx['changed'] = True
+        return u
+
+    def st_Assign(self, n):
+        # a = b = value
+        code, t = self.ex(n.value)
+        if _sh_is_arr(t):
+            self.fail(n, 'lists can only be read from global variables in a shader (they cannot be created or changed here)')
+        for tgt in n.targets:
+            self.assign_to(n, tgt, code, t, n.value)
+
+    def st_AnnAssign(self, n):
+        if n.value is None:
+            return
+        code, t = self.ex(n.value)
+        self.assign_to(n, n.target, code, t, n.value)
+
+    def st_AugAssign(self, n):
+        tgt = n.target
+        load = _sh_ast.copy_location(self.as_load(tgt), tgt)
+        fake = _sh_ast.BinOp(left=load, op=n.op, right=n.value)
+        _sh_ast.copy_location(fake, n)
+        code, t = self.ex(fake)
+        self.assign_to(n, tgt, code, t, n.value)
+
+    def as_load(self, tgt):
+        if isinstance(tgt, _sh_ast.Name):
+            return _sh_ast.Name(id=tgt.id, ctx=_sh_ast.Load())
+        if isinstance(tgt, _sh_ast.Attribute):
+            return _sh_ast.Attribute(value=tgt.value, attr=tgt.attr, ctx=_sh_ast.Load())
+        if isinstance(tgt, _sh_ast.Subscript):
+            return _sh_ast.Subscript(value=tgt.value, slice=tgt.slice, ctx=_sh_ast.Load())
+        self.fail(tgt, 'cannot assign to this')
+
+    def assign_to(self, node, tgt, code, t, valnode):
+        if isinstance(tgt, _sh_ast.Name):
+            name = tgt.id
+            self.check_local_name(tgt, name)
+            ty = self.declare(node, name, t)
+            self.emit('%s = %s;' % ('v_' + _sh_ident(name), self.conv(node, code, t, ty)))
+        elif isinstance(tgt, (_sh_ast.Tuple, _sh_ast.List)):
+            self.unpack(node, tgt, code, t, valnode)
+        elif isinstance(tgt, _sh_ast.Attribute):
+            base, bt = self.ex(tgt.value)
+            if not isinstance(tgt.value, _sh_ast.Name) or tgt.value.id not in self.fn_ctx['vars']:
+                self.fail(tgt, 'only components of a local variable can be assigned (like v.x = 1.0)')
+            if not _sh_is_vec(bt):
+                self.fail(tgt, 'only vector components can be assigned')
+            idx = self.swizzle_idx(tgt, tgt.attr, bt)
+            if len(idx) != 1:
+                self.fail(tgt, "several components cannot be assigned at once (v.%s = ...): assign them one by one, like v.%s = ..." % (tgt.attr, tgt.attr[0]))
+            self.emit('%s.%s = %s;' % (base, tgt.attr, self.conv(node, code, t, 'float')))
+        elif isinstance(tgt, _sh_ast.Subscript):
+            base, bt = self.ex(tgt.value)
+            if not isinstance(tgt.value, _sh_ast.Name) or tgt.value.id not in self.fn_ctx['vars'] or not _sh_is_vec(bt):
+                self.fail(tgt, 'only components of a local vector variable can be assigned (like v[0] = 1.0)')
+            i = self.const_index(tgt.slice, _SH_DIMS[bt])
+            if i is None:
+                self.fail(tgt, 'the index of a vector component must be a number written in the code (0, 1, 2 or 3)')
+            self.emit('%s[%d] = %s;' % (base, i, self.conv(node, code, t, 'float')))
+        else:
+            self.fail(tgt, 'cannot assign to this in a shader')
+
+    def check_local_name(self, node, name):
+        # assigning to a name that is a global would create a local in Python, shadowing it for the whole function
+        pass
+
+    def unpack(self, node, tgt, code, t, valnode):
+        names = tgt.elts
+        for e in names:
+            if not isinstance(e, _sh_ast.Name):
+                self.fail(e, 'unpacking can only assign to plain variables')
+        if isinstance(valnode, (_sh_ast.Tuple, _sh_ast.List)) and len(valnode.elts) == len(names):
+            vals = [self.ex(x) for x in valnode.elts]
+            tmps = []
+            for (c, ty), e in zip(vals, names):
+                if _sh_is_arr(ty) or ty not in _SH_RANK and not _sh_is_vec(ty):
+                    self.fail(valnode, 'cannot unpack this value')
+                tn = self.tmpname('u_')
+                self.emit('%s %s = %s;' % (ty, tn, c))
+                tmps.append((tn, ty))
+            for (tn, ty), e in zip(tmps, names):
+                tt = self.declare(node, e.id, ty)
+                self.emit('%s = %s;' % ('v_' + _sh_ident(e.id), self.conv(node, tn, ty, tt)))
+            return
+        if not _sh_is_vec(t):
+            self.fail(node, 'only a vector or a tuple of the same length can be unpacked')
+        if _SH_DIMS[t] != len(names):
+            self.fail(node, 'cannot unpack a %s into %d variables' % (_sh_tname(t), len(names)))
+        tn = self.tmpname('u_')
+        self.emit('%s %s = %s;' % (t, tn, code))
+        for i, e in enumerate(names):
+            tt = self.declare(node, e.id, 'float')
+            self.emit('%s = %s;' % ('v_' + _sh_ident(e.id), self.conv(node, '%s[%d]' % (tn, i), 'float', tt)))
+
+    # ═════════════════════ expressions ═════════════════════
+    def ex(self, n, allow_void=False):
+        t = type(n).__name__
+        if t in _SH_UNSUPPORTED:
+            self.fail(n, '%s cannot be used in a shader (it runs on the GPU)' % _SH_UNSUPPORTED[t])
+        m = getattr(self, 'ex_' + t, None)
+        if m is None:
+            self.fail(n, 'this kind of expression (%s) is not supported in shaders' % t)
+        code, ty = m(n)
+        if ty == 'void' and not allow_void:
+            self.fail(n, 'this call does not return a value')
+        return code, ty
+
+    def ex_Constant(self, n):
+        v = n.value
+        if isinstance(v, bool):
+            return ('true' if v else 'false'), 'bool'
+        if isinstance(v, int):
+            if abs(v) > 2147483647:
+                return _sh_float(v), 'float'
+            return str(v), 'int'
+        if isinstance(v, float):
+            return _sh_float(v), 'float'
+        if isinstance(v, str):
+            self.fail(n, 'text cannot be used in a shader')
+        self.fail(n, '%r cannot be used in a shader' % (v,))
+
+    def ex_Name(self, n):
+        name = n.id
+        ctx = self.fn_ctx
+        if name in ctx['vars']:
+            return 'v_' + _sh_ident(name), ctx['vars'][name]
+        if name in ctx['assigned']:
+            raise _ShUnknown()            # a local that is assigned later in the function: its type is not known yet
+        return self.global_value(n, name)
+
+    def ex_Tuple(self, n):
+        k = len(n.elts)
+        if not (2 <= k <= 4):
+            self.fail(n, 'a tuple in a shader is a colour or a vector, so it must have 2, 3 or 4 numbers')
+        parts = []
+        for e in n.elts:
+            c, t = self.ex(e)
+            if t not in _SH_RANK:
+                self.fail(e, 'a tuple in a shader can only hold numbers')
+            parts.append(self.cv(c, t, 'float'))
+        return '%s(%s)' % (_SH_VEC_OF[k], ', '.join(parts)), _SH_VEC_OF[k]
+
+    ex_List = ex_Tuple
+
+    def ex_UnaryOp(self, n):
+        c, t = self.ex(n.operand)
+        op = n.op
+        if isinstance(op, _sh_ast.Not):
+            return '(!%s)' % self.truth(n.operand, c, t), 'bool'
+        if isinstance(op, _sh_ast.USub):
+            if t == 'bool':
+                return '(-%s)' % self.cv(c, t, 'int'), 'int'
+            if t in ('int', 'float') or _sh_is_vec(t):
+                return '(-%s)' % c, t
+        if isinstance(op, _sh_ast.UAdd):
+            if t == 'bool':
+                return self.cv(c, t, 'int'), 'int'
+            if t in ('int', 'float') or _sh_is_vec(t):
+                return c, t
+        self.fail(n, 'this operator cannot be used on a %s in a shader' % _sh_tname(t))
+
+    def ex_BoolOp(self, n):
+        parts = []
+        for v in n.values:
+            c, t = self.ex(v)
+            parts.append(self.truth(v, c, t))
+        op = ' && ' if isinstance(n.op, _sh_ast.And) else ' || '
+        return '(%s)' % op.join(parts), 'bool'
+
+    def ex_IfExp(self, n):
+        c, t = self.ex(n.test)
+        a, ta = self.ex(n.body)
+        b, tb = self.ex(n.orelse)
+        u = _sh_unify(ta, tb)
+        if u is None:
+            self.fail(n, 'the two sides of this if-else give %s and %s' % (_sh_tname(ta), _sh_tname(tb)))
+        return '(%s ? %s : %s)' % (self.truth(n.test, c, t), self.conv(n, a, ta, u), self.conv(n, b, tb, u)), u
+
+    def ex_Compare(self, n):
+        parts = []
+        left, lt = self.ex(n.left)
+        for op, rnode in zip(n.ops, n.comparators):
+            right, rt = self.ex(rnode)
+            sym = {_sh_ast.Lt: '<', _sh_ast.LtE: '<=', _sh_ast.Gt: '>', _sh_ast.GtE: '>=', _sh_ast.Eq: '==', _sh_ast.NotEq: '!='}.get(type(op))
+            if sym is None:
+                self.fail(n, "'is' / 'in' comparisons are not supported in shaders")
+            if _sh_is_vec(lt) or _sh_is_vec(rt) or _sh_is_arr(lt) or _sh_is_arr(rt):
+                self.fail(n, 'vectors and lists cannot be compared in a shader - compare their components (a.x == b.x)')
+            else:
+                if lt not in _SH_RANK or rt not in _SH_RANK:
+                    self.fail(n, 'cannot compare %s with %s' % (_sh_tname(lt), _sh_tname(rt)))
+                u = lt if _SH_RANK[lt] >= _SH_RANK[rt] else rt
+                if u == 'bool' and sym not in ('==', '!='):
+                    u = 'int'
+                parts.append('(%s %s %s)' % (self.cv(left, lt, u), sym, self.cv(right, rt, u)))
+            left, lt = right, rt
+        return (parts[0] if len(parts) == 1 else '(%s)' % ' && '.join(parts)), 'bool'
+
+    def arith_types(self, n, lt, rt):
+        if lt not in _SH_RANK and not _sh_is_vec(lt) or rt not in _SH_RANK and not _sh_is_vec(rt):
+            self.fail(n, 'cannot do arithmetic with %s and %s' % (_sh_tname(lt), _sh_tname(rt)))
+        if _sh_is_vec(lt) and _sh_is_vec(rt) and lt != rt:
+            self.fail(n, 'cannot combine a %s and a %s' % (_sh_tname(lt), _sh_tname(rt)))
+
+    def ex_BinOp(self, n):
+        l, lt = self.ex(n.left)
+        r, rt = self.ex(n.right)
+        op = n.op
+        self.arith_types(n, lt, rt)
+        sym = {_sh_ast.Add: '+', _sh_ast.Sub: '-', _sh_ast.Mult: '*', _sh_ast.Div: '/'}.get(type(op))
+        vec = _sh_is_vec(lt) or _sh_is_vec(rt)
+        if sym is not None:
+            if vec:
+                vt = lt if _sh_is_vec(lt) else rt
+                lc = l if _sh_is_vec(lt) else self.cv(l, lt, 'float')
+                rc = r if _sh_is_vec(rt) else self.cv(r, rt, 'float')
+                return '(%s %s %s)' % (lc, sym, rc), vt
+            if sym == '/':
+                return '(%s / %s)' % (self.cv(l, lt, 'float'), self.cv(r, rt, 'float')), 'float'
+            u = lt if _SH_RANK[lt] >= _SH_RANK[rt] else rt
+            if u == 'bool':
+                u = 'int'
+            return '(%s %s %s)' % (self.cv(l, lt, u), sym, self.cv(r, rt, u)), u
+        if isinstance(op, _sh_ast.Mod):
+            if vec:
+                vt = lt if _sh_is_vec(lt) else rt
+                lc = l if _sh_is_vec(lt) else '%s(%s)' % (vt, self.cv(l, lt, 'float'))
+                rc = r if _sh_is_vec(rt) else self.cv(r, rt, 'float')
+                return 'mod(%s, %s)' % (lc, rc), vt
+            if lt != 'float' and rt != 'float':
+                self.helpers.add('imod')
+                return 'bp_imod(%s, %s)' % (self.cv(l, lt, 'int'), self.cv(r, rt, 'int')), 'int'
+            return 'mod(%s, %s)' % (self.cv(l, lt, 'float'), self.cv(r, rt, 'float')), 'float'
+        if isinstance(op, _sh_ast.FloorDiv):
+            if vec:
+                vt = lt if _sh_is_vec(lt) else rt
+                lc = l if _sh_is_vec(lt) else '%s(%s)' % (vt, self.cv(l, lt, 'float'))
+                rc = r if _sh_is_vec(rt) else '%s(%s)' % (vt, self.cv(r, rt, 'float'))
+                return 'floor(%s / %s)' % (lc, rc), vt
+            if lt != 'float' and rt != 'float':
+                self.helpers.add('idiv')
+                return 'bp_idiv(%s, %s)' % (self.cv(l, lt, 'int'), self.cv(r, rt, 'int')), 'int'
+            return 'floor(%s / %s)' % (self.cv(l, lt, 'float'), self.cv(r, rt, 'float')), 'float'
+        if isinstance(op, _sh_ast.Pow):
+            return self.power(n, l, lt, r, rt)
+        self.fail(n, 'this operator is not supported in shaders (bit operations and @ are not available)')
+
+    def power(self, n, l, lt, r, rt):
+        # literal exponents turn into plain multiplication (fast, and correct for negative bases)
+        exp = None
+        rn = n.right
+        if isinstance(rn, _sh_ast.Constant) and isinstance(rn.value, (int, float)) and not isinstance(rn.value, bool):
+            exp = rn.value
+        if _sh_is_vec(lt):
+            if exp == 2:
+                self.helpers.add('sq'); return 'bp_sq(%s)' % l, lt
+            if exp == 3:
+                self.helpers.add('cube'); return 'bp_cube(%s)' % l, lt
+            if exp == 0.5:
+                return 'sqrt(%s)' % l, lt
+            rc = r if _sh_is_vec(rt) else '%s(%s)' % (lt, self.cv(r, rt, 'float'))
+            return 'pow(%s, %s)' % (l, rc), lt
+        if _sh_is_vec(rt):
+            lc = '%s(%s)' % (rt, self.cv(l, lt, 'float'))
+            return 'pow(%s, %s)' % (lc, r), rt
+        if lt in ('int', 'bool') and exp is not None and isinstance(exp, int) and 0 <= exp <= 4:
+            li = self.cv(l, lt, 'int')
+            if exp == 0:
+                return '1', 'int'
+            if exp == 1:
+                return li, 'int'
+            return '(%s)' % ' * '.join([li] * exp), 'int'
+        lf, rf = self.cv(l, lt, 'float'), self.cv(r, rt, 'float')
+        if exp == 2:
+            self.helpers.add('sq'); return 'bp_sq(%s)' % lf, 'float'
+        if exp == 3:
+            self.helpers.add('cube'); return 'bp_cube(%s)' % lf, 'float'
+        if exp == 0.5:
+            return 'sqrt(%s)' % lf, 'float'
+        if exp == 1:
+            return lf, 'float'
+        self.helpers.add('pow')
+        return 'bp_pow(%s, %s)' % (lf, rf), 'float'
+
+    # ── attributes, subscripts ──
+    _SWZ = {'xyzw': 'xyzw', 'rgba': 'rgba'}
+
+    def swizzle_idx(self, node, attr, t):
+        dim = _SH_DIMS[t]
+        for set_ in ('xyzw', 'rgba'):
+            if attr and all(ch in set_ for ch in attr):
+                idx = [set_.index(ch) for ch in attr]
+                if len(idx) > 4:
+                    break
+                if max(idx) >= dim:
+                    self.fail(node, "a %s has no component '%s'" % (_sh_tname(t), attr))
+                return idx
+        self.fail(node, "a %s has no attribute '%s'" % (_sh_tname(t), attr))
+
+    def ex_Attribute(self, n):
+        # module attributes: math.pi, tabname.CONSTANT
+        mod = self.module_of(n.value)
+        if mod is not None:
+            return self.global_value(n, n.attr, g=mod.__dict__, qual=getattr(mod, '__name__', '?'))
+        c, t = self.ex(n.value)
+        if _sh_is_vec(t):
+            idx = self.swizzle_idx(n, n.attr, t)
+            return '%s.%s' % (c, n.attr), ('float' if len(idx) == 1 else _SH_VEC_OF[len(idx)])
+        self.fail(n, "'.%s' cannot be used on %s in a shader" % (n.attr, _sh_tname(t)))
+
+    def const_index(self, sl, dim):
+        v = None
+        if isinstance(sl, _sh_ast.Constant) and isinstance(sl.value, int) and not isinstance(sl.value, bool):
+            v = sl.value
+        elif isinstance(sl, _sh_ast.UnaryOp) and isinstance(sl.op, _sh_ast.USub) and isinstance(sl.operand, _sh_ast.Constant) \\
+                and isinstance(sl.operand.value, int):
+            v = -sl.operand.value
+        if v is None:
+            return None
+        if v < 0:
+            v += dim
+        if not (0 <= v < dim):
+            return None
+        return v
+
+    def ex_Subscript(self, n):
+        c, t = self.ex(n.value)
+        if _sh_is_vec(t):
+            i = self.const_index(n.slice, _SH_DIMS[t])
+            if i is None:
+                self.fail(n, 'the index of a vector component must be 0 .. %d, written as a number' % (_SH_DIMS[t] - 1))
+            return '%s[%d]' % (c, i), 'float'
+        if _sh_is_arr(t):
+            size = t[2]
+            ci = self.const_index(n.slice, size)
+            if ci is not None:
+                return self.arr_get(c, t, str(ci)), t[1]
+            ic, it = self.ex(n.slice)
+            if it not in _SH_RANK:
+                self.fail(n, 'a list index must be a number')
+            return self.arr_get(c, t, 'clamp(%s, 0, %d)' % (self.cv(ic, it, 'int'), size - 1)), t[1]
+        self.fail(n, 'a %s cannot be indexed in a shader' % _sh_tname(t))
+
+    def arr_get(self, code, t, idx):
+        """code is 'uU:<first slot>' for a uniform array; idx is a GLSL int expression."""
+        base = int(code.split(':')[1])
+        elem = t[1]
+        slot = 'uU[%d + %s]' % (base, idx)
+        if elem == 'float':
+            return '%s.x' % slot
+        if elem == 'bool':
+            return '(%s.x > 0.5)' % slot
+        return slot if elem == 'vec4' else '%s.%s' % (slot, 'xy' if elem == 'vec2' else 'xyz')
+
+    # ═════════════════════ globals ═════════════════════
+    def module_of(self, node):
+        """If node names a module (math, a code tab ...) return it."""
+        if isinstance(node, _sh_ast.Name):
+            if node.id in self.fn_ctx['vars']:
+                return None
+            obj = self.lookup(node.id)
+            if isinstance(obj, _sh_types.ModuleType):
+                return obj
+        return None
+
+    def lookup(self, name, g=None):
+        g = self.fn_ctx['g'] if g is None else g
+        if name in g:
+            return g[name]
+        return getattr(_sh_builtins, name, None)
+
+    def is_builtin(self, name, want):
+        if name in self.fn_ctx['vars']:
+            return False
+        obj = self.lookup(name)
+        return self.bi_ids.get(id(obj)) == want
+
+    def global_value(self, node, name, g=None, qual=None):
+        """A name that is not a local variable: a constant, a global variable (-> uniform), or an error."""
+        g = self.fn_ctx['g'] if g is None else g
+        if name not in g:
+            hint = ' (it is not available in shaders)' if hasattr(_sh_builtins, name) else ''
+            self.fail(node, "the name '%s' is not defined%s" % (qual and '%s.%s' % (qual, name) or name, hint))
+        obj = g[name]
+        if name in self.math_consts and obj is self.math_consts[name]:
+            return _sh_float(obj), 'float'
+        # numeric values that BowPy itself defines (pi ...) and constants made with const() are baked into the shader
+        consts = self.fn_ctx['consts']
+        baked = (name in consts) or (self.api.get(name) is obj and isinstance(obj, (int, float)) and not isinstance(obj, bool))
+        if isinstance(obj, bool):
+            return self.scalar_global(node, name, g, obj, 'bool', baked)
+        if isinstance(obj, (int, float)):
+            return self.scalar_global(node, name, g, obj, 'float', baked, int_lit=isinstance(obj, int))
+        vt = self.vec_type_of(obj)
+        if vt is not None:
+            if baked:
+                return '%s(%s)' % (vt, ', '.join(_sh_float(c) for c in self.vec_parts(obj))), vt
+            return self.uniform(node, name, g, 'vec', vt, 1)
+        if isinstance(obj, (list, tuple)) and len(obj) > 0:
+            et = self.elem_type(node, name, obj)
+            if et is not None:
+                if isinstance(obj, tuple) and 2 <= len(obj) <= 4 and et == 'float':
+                    return self.uniform(node, name, g, 'vec', _SH_VEC_OF[len(obj)], 1, tuple_vec=True)
+                n_ = len(obj)
+                if n_ > _SH_MAX_SLOTS:
+                    self.fail(node, "the list '%s' has %d items; at most %d fit in a shader" % (name, n_, _SH_MAX_SLOTS))
+                return self.uniform(node, name, g, 'arr', ('arr', et, n_), n_)
+        if isinstance(obj, (list, tuple)):
+            self.fail(node, "the list '%s' cannot be used in a shader: it must hold only numbers, or only Vec2/Vec3/Vec4 of the same kind" % name)
+        if isinstance(obj, str):
+            self.fail(node, "the text variable '%s' cannot be used in a shader" % name)
+        if isinstance(obj, _sh_types.FunctionType) or callable(obj):
+            self.fail(node, "'%s' is a function: call it with () inside the shader" % name)
+        self.fail(node, "the global variable '%s' (a %s) cannot be used in a shader; shaders can read numbers, booleans, Vec2/Vec3/Vec4 and lists of those"
+                  % (name, type(obj).__name__))
+
+    def vec_type_of(self, obj):
+        t = self.vec_cls.get(id(type(obj)))
+        return t
+
+    def vec_parts(self, v):
+        t = self.vec_type_of(v)
+        d = _SH_DIMS[t]
+        return [float(getattr(v, c)) for c in 'xyzw'[:d]]
+
+    def elem_type(self, node, name, seq):
+        kinds = set()
+        for v in seq:
+            if isinstance(v, bool):
+                kinds.add('bool')
+            elif isinstance(v, (int, float)):
+                kinds.add('float')
+            elif self.vec_type_of(v) is not None:
+                kinds.add(self.vec_type_of(v))
+            elif isinstance(v, (tuple, list)) and 2 <= len(v) <= 4 and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v):
+                kinds.add(_SH_VEC_OF[len(v)])
+            else:
+                return None
+        if len(kinds) != 1:
+            if kinds <= {'float'}:
+                return 'float'
+            return None
+        return kinds.pop()
+
+    def scalar_global(self, node, name, g, obj, t, baked, int_lit=False):
+        if baked:
+            if t == 'bool':
+                return ('true' if obj else 'false'), 'bool'
+            return (str(obj), 'int') if int_lit and abs(obj) <= 2147483647 else (_sh_float(obj), 'float')
+        return self.uniform(node, name, g, 'scalar', t, 1)
+
+    def uniform(self, node, name, g, kind, t, count, tuple_vec=False):
+        key = (id(g), name)
+        u = self.uni_index.get(key)
+        if u is None:
+            if self.nslots + count > _SH_MAX_SLOTS:
+                self.fail(node, 'the shader uses too many global variables / list items (the limit is %d values)' % _SH_MAX_SLOTS)
+            u = {'key': key, 'kind': kind, 'type': t, 'slot': self.nslots, 'count': count, 'g': g, 'name': name, 'tuple_vec': tuple_vec}
+            self.nslots += count
+            self.uniforms.append(u)
+            self.uni_index[key] = u
+        slot = u['slot']
+        if kind == 'scalar':
+            if t == 'bool':
+                return '(uU[%d].x > 0.5)' % slot, 'bool'
+            return 'uU[%d].x' % slot, 'float'
+        if kind == 'vec':
+            sw = {'vec2': 'xy', 'vec3': 'xyz', 'vec4': 'xyzw'}[t]
+            return ('uU[%d]' % slot if t == 'vec4' else 'uU[%d].%s' % (slot, sw)), t
+        return 'uU:%d' % slot, t
+
+    # ═════════════════════ calls ═════════════════════
+    def ex_Call(self, n):
+        f = n.func
+        # tab.func(...)  /  math.sin(...)
+        if isinstance(f, _sh_ast.Attribute):
+            mod = self.module_of(f.value)
+            if mod is not None:
+                obj = self.lookup(f.attr, mod.__dict__)
+                if obj is None:
+                    self.fail(n, "'%s' has no function called '%s'" % (getattr(mod, '__name__', 'module'), f.attr))
+                return self.call_obj(n, obj, f.attr)
+            # Vec2.dot(a, b)  /  Vec3.lerp(a, b, t) ...
+            if isinstance(f.value, _sh_ast.Name) and f.value.id not in self.fn_ctx['vars']:
+                cls = self.lookup(f.value.id)
+                vt = self.vec_cls.get(id(cls))
+                if vt is not None:
+                    return self.vec_static(n, vt, f.attr)
+            # vector methods:  v.length()  v.normalized() ...
+            c, t = self.ex(f.value)
+            if _sh_is_vec(t):
+                return self.vec_method(n, c, t, f.attr)
+            self.fail(n, "'.%s()' cannot be called on %s in a shader" % (f.attr, _sh_tname(t)))
+        if isinstance(f, _sh_ast.Name):
+            if f.id in self.fn_ctx['vars']:
+                self.fail(n, "'%s' is a variable, not a function" % f.id)
+            obj = self.lookup(f.id)
+            if obj is None and f.id not in self.fn_ctx['g']:
+                self.fail(n, "the function '%s' is not defined" % f.id)
+            return self.call_obj(n, obj, f.id)
+        self.fail(n, 'only plain function calls can be used in a shader')
+
+    def call_obj(self, n, obj, name):
+        if id(obj) in self.vec_cls:
+            return self.vec_ctor(n, self.vec_cls[id(obj)])
+        bn = self.bi_ids.get(id(obj))
+        if bn is not None:
+            return self.builtin(n, bn)
+        if isinstance(obj, _sh_types.FunctionType):
+            return self.call_user(n, obj)
+        if getattr(obj, '__module__', None) == 'random' or name in ('random', 'randint', 'uniform', 'choice', 'shuffle'):
+            self.fail(n, "random numbers are not available in shaders - use noise2(x, y) for a pattern that depends on the position")
+        self.fail(n, "'%s' cannot be called in a shader%s" % (name, '' if callable(obj) else ' (it is not a function)'))
+
+    def args(self, n, minn=None, maxn=None, kw=()):
+        if minn is not None and len(n.args) < minn or maxn is not None and len(n.args) > maxn:
+            name = n.func.id if isinstance(n.func, _sh_ast.Name) else n.func.attr
+            self.fail(n, '%s() takes %s argument(s)' % (name, minn if minn == maxn else '%s to %s' % (minn, maxn)))
+        for k in n.keywords:
+            if k.arg not in kw:
+                self.fail(n, "unexpected keyword argument '%s'" % k.arg)
+        for a in n.args:
+            if isinstance(a, _sh_ast.Starred):
+                self.fail(n, 'starred (*) arguments are not supported in shaders')
+        return [self.ex(a) for a in n.args]
+
+    def fl(self, node, c, t):
+        if t not in _SH_RANK:
+            self.fail(node, 'a number is needed here, not %s' % _sh_tname(t))
+        return self.cv(c, t, 'float')
+
+    def call_user(self, n, fn):
+        fnode, info = self.source_of(fn)
+        if fnode is None:
+            self.fail(n, 'the source of %s() is not available, so it cannot run on the GPU' % fn.__name__)
+        a = fnode.args
+        names = [x.arg for x in a.args]
+        if a.vararg or a.kwarg or a.kwonlyargs:
+            self.fail(n, '%s(): *args / **kwargs are not supported in shaders' % fn.__name__)
+        for x in n.args:
+            if isinstance(x, _sh_ast.Starred):
+                self.fail(n, 'starred (*) arguments are not supported in shaders')
+        vals = [self.ex(x) for x in n.args]
+        if len(vals) > len(names):
+            self.fail(n, '%s() takes %d argument(s) but %d were given' % (fn.__name__, len(names), len(vals)))
+        by_name = {}
+        for k in n.keywords:
+            if k.arg is None or k.arg not in names:
+                self.fail(n, "%s() has no argument '%s'" % (fn.__name__, k.arg))
+            if names.index(k.arg) < len(vals):
+                self.fail(n, "%s() got more than one value for '%s'" % (fn.__name__, k.arg))
+            by_name[k.arg] = self.ex(k.value)
+        defaults = list(fn.__defaults__ or ())
+        first_default = len(names) - len(defaults)
+        full = list(vals)
+        for i in range(len(vals), len(names)):
+            nm = names[i]
+            if nm in by_name:
+                full.append(by_name[nm])
+            elif i >= first_default:
+                full.append(self.const_value(n, defaults[i - first_default]))
+            else:
+                self.fail(n, "%s() is missing the argument '%s'" % (fn.__name__, nm))
+        types = []
+        for (c, t) in full:
+            if _sh_is_arr(t):
+                self.fail(n, 'lists cannot be passed to shader functions (use the global list directly)')
+            types.append(t)
+        f = self.instance(fn, types, node=n)
+        code = '%s(%s)' % (f.name, ', '.join(c for c, t in full))
+        return code, f.ret
+
+    def const_value(self, node, v):
+        if isinstance(v, bool):
+            return ('true' if v else 'false'), 'bool'
+        if isinstance(v, int):
+            return str(v), 'int'
+        if isinstance(v, float):
+            return _sh_float(v), 'float'
+        vt = self.vec_type_of(v)
+        if vt is not None:
+            return '%s(%s)' % (vt, ', '.join(_sh_float(c) for c in self.vec_parts(v))), vt
+        self.fail(node, 'a default argument value of this kind cannot be used in a shader')
+
+    # ── vectors ──
+    def vec_ctor(self, n, vt):
+        dim = _SH_DIMS[vt]
+        if n.keywords:
+            self.fail(n, '%s() does not take keyword arguments in a shader' % vt.replace('vec', 'Vec'))
+        comps = []
+        for a in n.args:
+            c, t = self.ex(a)
+            if t in _SH_RANK:
+                comps.append((self.cv(c, t, 'float'), 1))
+            elif _sh_is_vec(t):
+                comps.append((c, _SH_DIMS[t]))
+            else:
+                self.fail(a, 'a vector is made from numbers, not from %s' % _sh_tname(t))
+        total = sum(k for c, k in comps)
+        if total > dim:
+            self.fail(n, '%s() was given %d values' % (vt.replace('vec', 'Vec'), total))
+        if not comps:
+            return '%s(0.0)' % vt, vt
+        parts = [c for c, k in comps] + ['0.0'] * (dim - total)
+        if len(comps) == 1 and comps[0][1] == dim:
+            return comps[0][0], vt
+        return '%s(%s)' % (vt, ', '.join(parts)), vt
+
+    def vec_static(self, n, vt, attr):
+        nm = vt.replace('vec', 'Vec')
+        dim = _SH_DIMS[vt]
+        consts = {'zero': 0.0, 'one': 1.0}
+        dirs = {'up': (0.0, -1.0, 0.0), 'down': (0.0, 1.0, 0.0), 'left': (-1.0, 0.0, 0.0), 'right': (1.0, 0.0, 0.0),
+                'front': (0.0, 0.0, 1.0), 'back': (0.0, 0.0, -1.0)}
+        if attr in consts and not n.args:
+            return '%s(%s)' % (vt, _sh_float(consts[attr])), vt
+        if attr in dirs and not n.args and not (dim == 2 and attr in ('front', 'back')):
+            return '%s(%s)' % (vt, ', '.join(_sh_float(x) for x in dirs[attr][:dim])), vt
+        if attr == 'dot':
+            (a, ta), (b, tb) = self.vecs(n, vt, 2)
+            return 'dot(%s, %s)' % (a, b), 'float'
+        if attr == 'distance':
+            (a, ta), (b, tb) = self.vecs(n, vt, 2)
+            return 'distance(%s, %s)' % (a, b), 'float'
+        if attr == 'delta':
+            (a, ta), (b, tb) = self.vecs(n, vt, 2)
+            return '(%s - %s)' % (b, a), vt
+        if attr == 'lerp':
+            args = self.args(n, 3, 3)
+            (a, ta), (b, tb), (t, tt) = args
+            if ta != vt or tb != vt or tt not in _SH_RANK:
+                self.fail(n, '%s.lerp(a, b, t) needs two %s and a number' % (nm, nm))
+            return 'mix(%s, %s, %s)' % (a, b, self.cv(t, tt, 'float')), vt
+        if attr == 'cross':
+            (a, ta), (b, tb) = self.vecs(n, vt, 2)
+            if vt == 'vec2':
+                return '(%s.x * %s.y - %s.y * %s.x)' % (a, b, a, b), 'float'
+            if vt == 'vec3':
+                return 'cross(%s, %s)' % (a, b), 'vec3'
+        if attr == 'from_angle' and vt == 'vec2':
+            args = self.args(n, 1, 2)
+            ang = self.fl(n, *args[0])
+            ln = self.fl(n, *args[1]) if len(args) > 1 else '1.0'
+            return '(vec2(cos(radians(%s)), sin(radians(%s))) * %s)' % (ang, ang, ln), 'vec2'
+        self.fail(n, "%s.%s() is not available in shaders" % (nm, attr))
+
+    def vecs(self, n, vt, count):
+        args = self.args(n, count, count)
+        for (c, t), a in zip(args, n.args):
+            if t != vt:
+                self.fail(a, 'a %s is needed here, not %s' % (_sh_tname(vt), _sh_tname(t)))
+        return args
+
+    def vec_method(self, n, c, t, attr):
+        dim = _SH_DIMS[t]
+        if n.args or n.keywords:
+            if attr not in ('rotated', 'rotated_x', 'rotated_y', 'rotated_z'):
+                self.fail(n, '.%s() takes no arguments' % attr)
+        if attr == 'length':
+            return 'length(%s)' % c, 'float'
+        if attr == 'length_sq':
+            return 'dot(%s, %s)' % (c, c), 'float'
+        if attr == 'normalized':
+            self.helpers.add('norm')
+            return 'bp_normalized(%s)' % c, t
+        if attr in ('copy', 'to_tuple'):
+            return c, t
+        if attr in ('floor', 'ceil'):
+            return '%s(%s)' % (attr, c), t
+        if attr == 'round':
+            self.helpers.add('round')
+            return 'bp_round(%s)' % c, t
+        if attr == 'angle' and t == 'vec2':
+            return 'degrees(atan(%s.y, %s.x))' % (c, c), 'float'
+        if attr == 'rotated' and t == 'vec2':
+            args = self.args(n, 1, 1)
+            a = self.fl(n, *args[0])
+            return '(mat2(cos(radians(%s)), sin(radians(%s)), -sin(radians(%s)), cos(radians(%s))) * %s)' % (a, a, a, a, c), 'vec2'
+        self.fail(n, "'.%s()' is not available on a %s in shaders" % (attr, _sh_tname(t)))
+
+    # ── built-in functions ──
+    def builtin(self, n, name):
+        m = getattr(self, 'bi_' + name, None)
+        if m is not None:
+            return m(n)
+        fn1 = {'sin': 'sin', 'cos': 'cos', 'tan': 'tan', 'asin': 'asin', 'acos': 'acos', 'atan': 'atan', 'sinh': 'sinh',
+               'cosh': 'cosh', 'tanh': 'tanh', 'sqrt': 'sqrt', 'exp': 'exp', 'exp2': 'exp2', 'log2': 'log2',
+               'floor': 'floor', 'ceil': 'ceil', 'trunc': 'trunc', 'fract': 'fract', 'degrees': 'degrees', 'radians': 'radians'}
+        if name in fn1:
+            (c, t), = self.args(n, 1, 1)
+            if t in _SH_RANK:
+                return '%s(%s)' % (fn1[name], self.cv(c, t, 'float')), 'float'
+            if _sh_is_vec(t):
+                return '%s(%s)' % (fn1[name], c), t
+            self.fail(n, '%s() needs a number' % name)
+        self.fail(n, "%s() is not available in shaders" % name)
+
+    def bi_log(self, n):
+        args = self.args(n, 1, 2)
+        x = self.fl(n, *args[0]) if args[0][1] in _SH_RANK else args[0][0]
+        if len(args) == 2:
+            return '(log(%s) / log(%s))' % (x, self.fl(n, *args[1])), 'float'
+        t = args[0][1]
+        return 'log(%s)' % x, ('float' if t in _SH_RANK else t)
+
+    def bi_log10(self, n):
+        (c, t), = self.args(n, 1, 1)
+        return '(log(%s) * 0.4342944819032518)' % self.fl(n, c, t), 'float'
+
+    def bi_atan2(self, n):
+        (a, ta), (b, tb) = self.args(n, 2, 2)
+        return 'atan(%s, %s)' % (self.fl(n, a, ta), self.fl(n, b, tb)), 'float'
+
+    def bi_fabs(self, n):
+        (c, t), = self.args(n, 1, 1)
+        return 'abs(%s)' % self.fl(n, c, t), 'float'
+
+    def bi_abs(self, n):
+        (c, t), = self.args(n, 1, 1)
+        if t == 'bool':
+            return self.cv(c, t, 'int'), 'int'
+        if t in ('int', 'float') or _sh_is_vec(t):
+            return 'abs(%s)' % c, t
+        self.fail(n, 'abs() needs a number or a vector')
+
+    def bi_round(self, n):
+        args = self.args(n, 1, 2, kw=('ndigits',))
+        c, t = args[0]
+        if t not in _SH_RANK and not _sh_is_vec(t):
+            self.fail(n, 'round() needs a number or a vector')
+        cc = self.cv(c, t, 'float') if t in _SH_RANK else c
+        rt = 'float' if t in _SH_RANK else t
+        self.helpers.add('round')
+        nd = None
+        if len(args) == 2:
+            nd = n.args[1]
+        elif n.keywords:
+            nd = n.keywords[0].value
+        if nd is None:
+            return 'bp_round(%s)' % cc, rt
+        if not (isinstance(nd, _sh_ast.Constant) and isinstance(nd.value, int)):
+            self.fail(n, 'the number of digits of round() must be written as a number in a shader')
+        k = 10.0 ** nd.value
+        return '(bp_round(%s * %s) / %s)' % (cc, _sh_float(k), _sh_float(k)), rt
+
+    def bi_hypot(self, n):
+        args = self.args(n, 1, 4)
+        parts = [self.fl(n, c, t) for c, t in args]
+        if len(parts) == 1:
+            return 'abs(%s)' % parts[0], 'float'
+        return 'length(%s(%s))' % (_SH_VEC_OF[len(parts)], ', '.join(parts)), 'float'
+
+    def bi_pow(self, n):
+        (a, ta), (b, tb) = self.args(n, 2, 2)
+        fake = _sh_ast.BinOp(left=n.args[0], op=_sh_ast.Pow(), right=n.args[1])
+        _sh_ast.copy_location(fake, n)
+        return self.power(fake, a, ta, b, tb) if ta in _SH_RANK or _sh_is_vec(ta) else self.fail(n, 'pow() needs numbers')
+
+    def bi_fmod(self, n):
+        (a, ta), (b, tb) = self.args(n, 2, 2)
+        x, y = self.fl(n, a, ta), self.fl(n, b, tb)
+        return '(%s - %s * trunc(%s / %s))' % (x, y, x, y), 'float'
+
+    def bi_copysign(self, n):
+        (a, ta), (b, tb) = self.args(n, 2, 2)
+        return '(abs(%s) * (%s < 0.0 ? -1.0 : 1.0))' % (self.fl(n, a, ta), self.fl(n, b, tb)), 'float'
+
+    def minmax(self, n, fname):
+        args = self.args(n, 2, 8)
+        ts = [t for c, t in args]
+        for a, t in zip(n.args, ts):
+            if t not in _SH_RANK and not _sh_is_vec(t):
+                self.fail(a, '%s() needs numbers (or vectors of the same size)' % fname)
+        vecs = {t for t in ts if _sh_is_vec(t)}
+        if len(vecs) > 1:
+            self.fail(n, 'cannot mix vectors of different sizes in %s()' % fname)
+        if vecs:
+            vt = vecs.pop()
+            parts = [c if t == vt else '%s(%s)' % (vt, self.cv(c, t, 'float')) for c, t in args]
+            rt = vt
+        else:
+            rt = 'float' if 'float' in ts else 'int'
+            parts = [self.cv(c, t, rt) for c, t in args]
+        code = parts[0]
+        for p in parts[1:]:
+            code = '%s(%s, %s)' % (fname, code, p)
+        return code, rt
+
+    def bi_min(self, n):
+        return self.minmax(n, 'min')
+
+    def bi_max(self, n):
+        return self.minmax(n, 'max')
+
+    def bi_clamp(self, n):
+        (v, tv), (lo, tl), (hi, th) = self.args(n, 3, 3)
+        for a, t in zip(n.args, (tv, tl, th)):
+            if t not in _SH_RANK and not _sh_is_vec(t):
+                self.fail(a, 'clamp() needs numbers (or a vector and numbers)')
+        if _sh_is_vec(tv):
+            lo2 = lo if _sh_is_vec(tl) else self.cv(lo, tl, 'float')
+            hi2 = hi if _sh_is_vec(th) else self.cv(hi, th, 'float')
+            return 'max(%s, min(%s, %s))' % (lo2, hi2, v), tv
+        if _sh_is_vec(tl) or _sh_is_vec(th):
+            self.fail(n, 'clamp(): the bounds can only be vectors when the value is a vector')
+        rt = 'float' if 'float' in (tv, tl, th) else 'int'
+        return 'max(%s, min(%s, %s))' % (self.cv(lo, tl, rt), self.cv(hi, th, rt), self.cv(v, tv, rt)), rt
+
+    def bi_lerp(self, n):
+        (a, ta), (b, tb), (t, tt) = self.args(n, 3, 3)
+        if _sh_is_vec(ta) or _sh_is_vec(tb):
+            vt = ta if _sh_is_vec(ta) else tb
+            if (_sh_is_vec(ta) and ta != vt) or (_sh_is_vec(tb) and tb != vt):
+                self.fail(n, 'lerp() cannot mix vectors of different sizes')
+            a2 = a if ta == vt else self.cv(a, ta, vt)
+            b2 = b if tb == vt else self.cv(b, tb, vt)
+            if tt == vt:
+                return 'mix(%s, %s, %s)' % (a2, b2, t), vt
+            return 'mix(%s, %s, %s)' % (a2, b2, self.fl(n, t, tt)), vt
+        return 'mix(%s, %s, %s)' % (self.fl(n, a, ta), self.fl(n, b, tb), self.fl(n, t, tt)), 'float'
+
+    def bi_map_range(self, n):
+        (v, tv), (a1, t1), (a2, t2), (b1, t3), (b2, t4) = self.args(n, 5, 5)
+        V, A1, A2, B1, B2 = (self.fl(n, c, t) for c, t in ((v, tv), (a1, t1), (a2, t2), (b1, t3), (b2, t4)))
+        return '(%s != %s ? %s + (%s - %s) / (%s - %s) * (%s - %s) : %s)' % (A1, A2, B1, V, A1, A2, A1, B2, B1, B1), 'float'
+
+    def bi_smooth_step(self, n):
+        (c, t), = self.args(n, 1, 1)
+        if t in _SH_RANK:
+            x = self.cv(c, t, 'float')
+            self.helpers.add('sq')
+            return '(bp_sq(%s) * (3.0 - 2.0 * %s))' % (x, x), 'float'
+        if _sh_is_vec(t):
+            self.helpers.add('sq')
+            return '(bp_sq(%s) * (3.0 - 2.0 * %s))' % (c, c), t
+        self.fail(n, 'smooth_step() needs a number')
+
+    def bi_smoothstep(self, n):
+        (e0, t0), (e1, t1), (x, tx) = self.args(n, 3, 3)
+        if _sh_is_vec(tx):
+            a = e0 if _sh_is_vec(t0) else self.fl(n, e0, t0)
+            b = e1 if _sh_is_vec(t1) else self.fl(n, e1, t1)
+            return 'smoothstep(%s, %s, %s)' % (a, b, x), tx
+        return 'smoothstep(%s, %s, %s)' % (self.fl(n, e0, t0), self.fl(n, e1, t1), self.fl(n, x, tx)), 'float'
+
+    def bi_step(self, n):
+        (e, te), (x, tx) = self.args(n, 2, 2)
+        if _sh_is_vec(tx):
+            return 'step(%s, %s)' % (e if _sh_is_vec(te) else self.fl(n, e, te), x), tx
+        return 'step(%s, %s)' % (self.fl(n, e, te), self.fl(n, x, tx)), 'float'
+
+    def bi_sign(self, n):
+        (c, t), = self.args(n, 1, 1)
+        if t == 'bool':
+            c, t = self.cv(c, t, 'int'), 'int'
+        if t == 'int':
+            return 'sign(%s)' % c, 'int'
+        if t == 'float' or _sh_is_vec(t):
+            return 'sign(%s)' % c, t
+        self.fail(n, 'sign() needs a number')
+
+    def bi_normalize(self, n):
+        args = self.args(n, 1, 3)
+        v = self.fl(n, *args[0])
+        lo = self.fl(n, *args[1]) if len(args) > 1 else '0.0'
+        hi = self.fl(n, *args[2]) if len(args) > 2 else '1.0'
+        return '(%s != %s ? (%s - %s) / (%s - %s) : 0.0)' % (hi, lo, v, lo, hi, lo), 'float'
+
+    def bi_distance(self, n):
+        if len(n.args) != 4:
+            self.fail(n, 'distance() takes four numbers: distance(x1, y1, x2, y2). For two Vec2 use Vec2.distance(a, b)')
+        args = self.args(n, 4, 4)
+        x1, y1, x2, y2 = (self.fl(n, c, t) for c, t in args)
+        return 'length(vec2(%s - %s, %s - %s))' % (x2, x1, y2, y1), 'float'
+
+    def bi_dot(self, n):
+        (a, ta), (b, tb) = self.args(n, 2, 2)
+        if not _sh_is_vec(ta) or ta != tb:
+            self.fail(n, 'dot() needs two vectors of the same size')
+        return 'dot(%s, %s)' % (a, b), 'float'
+
+    def bi_cross(self, n):
+        (a, ta), (b, tb) = self.args(n, 2, 2)
+        if ta != tb or ta not in ('vec2', 'vec3'):
+            self.fail(n, 'cross() needs two Vec2 or two Vec3')
+        if ta == 'vec2':
+            return '(%s.x * %s.y - %s.y * %s.x)' % (a, b, a, b), 'float'
+        return 'cross(%s, %s)' % (a, b), 'vec3'
+
+    def bi_length(self, n):
+        (c, t), = self.args(n, 1, 1)
+        if _sh_is_vec(t):
+            return 'length(%s)' % c, 'float'
+        self.fail(n, 'length() needs a vector')
+
+    # casts
+    def bi_float(self, n):
+        (c, t), = self.args(n, 1, 1)
+        if t in _SH_RANK:
+            return self.cv(c, t, 'float'), 'float'
+        self.fail(n, 'float() needs a number')
+
+    def bi_int(self, n):
+        (c, t), = self.args(n, 1, 1)
+        if t in _SH_RANK:
+            return self.cv(c, t, 'int'), 'int'
+        self.fail(n, 'int() needs a number')
+
+    def bi_bool(self, n):
+        (c, t), = self.args(n, 1, 1)
+        return self.truth(n, c, t), 'bool'
+
+    def bi_len(self, n):
+        (c, t), = self.args(n, 1, 1)
+        if _sh_is_arr(t):
+            return str(t[2]), 'int'
+        if _sh_is_vec(t):
+            return str(_SH_DIMS[t]), 'int'
+        self.fail(n, 'len() needs a list or a vector')
+
+    def bi_range(self, n):
+        self.fail(n, 'range() can only be used in a for loop in a shader')
+
+    # noise (the very same hash and interpolation as noise1/2/3 in BowPy, so the GPU matches the CPU)
+    def bi_noise1(self, n):
+        args = self.args(n, 1, 2, kw=('smooth',))
+        self.helpers.update(('noise1', 'nhash'))
+        sm = self.smooth_arg(n, args, 1)
+        return 'bp_noise1(%s, %s)' % (self.fl(n, *args[0]), sm), 'float'
+
+    def bi_noise2(self, n):
+        args = self.args(n, 1, 3, kw=('smooth',))
+        self.helpers.update(('noise2', 'nhash'))
+        sm = self.smooth_arg(n, args, 2)
+        y = self.fl(n, *args[1]) if len(args) > 1 else '0.0'
+        return 'bp_noise2(%s, %s, %s)' % (self.fl(n, *args[0]), y, sm), 'float'
+
+    bi_noise = bi_noise2
+
+    def bi_noise3(self, n):
+        args = self.args(n, 1, 4, kw=('smooth',))
+        self.helpers.update(('noise3', 'nhash'))
+        sm = self.smooth_arg(n, args, 3)
+        y = self.fl(n, *args[1]) if len(args) > 1 else '0.0'
+        z = self.fl(n, *args[2]) if len(args) > 2 else '0.0'
+        return 'bp_noise3(%s, %s, %s, %s)' % (self.fl(n, *args[0]), y, z, sm), 'float'
+
+    def smooth_arg(self, n, args, pos):
+        node = None
+        if len(n.args) > pos:
+            node = n.args[pos]
+        for k in n.keywords:
+            if k.arg == 'smooth':
+                node = k.value
+        if node is None:
+            return 'true'
+        c, t = self.ex(node)
+        return self.truth(node, c, t)
+
+    # the screen
+    def bi_get_pixel(self, n):
+        if len(n.args) != 1 or n.keywords:
+            self.fail(n, 'inside fragment(), get_pixel() takes one Vec2 from 0 to 1: get_pixel(pos)')
+        (c, t), = self.args(n, 1, 1)
+        if t != 'vec2':
+            self.fail(n, 'inside fragment(), get_pixel() takes one Vec2 from 0 to 1: get_pixel(pos)')
+        self.uses_scene = True
+        return 'bp_get_pixel(%s)' % c, 'vec4'
+
+    def live(self, n, nargs=0):
+        self.args(n, nargs, nargs)
+        self.uses_live = True
+
+    def bi_W(self, n):
+        self.live(n); return 'int(uRes.x)', 'int'
+
+    def bi_H(self, n):
+        self.live(n); return 'int(uRes.y)', 'int'
+
+    bi_screen_width = bi_W
+    bi_screen_height = bi_H
+
+    def bi_dt(self, n):
+        self.live(n); return 'uT.y', 'float'
+
+    bi_delta_time = bi_dt
+
+    def bi_fps(self, n):
+        self.live(n); return 'uT.z', 'float'
+
+    def bi_get_time(self, n):
+        self.live(n); return 'uT.x', 'float'
+
+    def bi_mouse_x(self, n):
+        self.live(n); return 'uM.x', 'float'
+
+    def bi_mouse_y(self, n):
+        self.live(n); return 'uM.y', 'float'
+
+    def bi_mouse_pos(self, n):
+        self.live(n); return 'uM.xy', 'vec2'
+
+    def bi_mouse_down(self, n):
+        if len(n.args) > 1 or n.keywords:
+            self.fail(n, 'mouse_down() takes one argument')
+        b = 0
+        if n.args:
+            a = n.args[0]
+            if not (isinstance(a, _sh_ast.Constant) and a.value in (0, 1, 2) and not isinstance(a.value, bool)):
+                self.fail(n, 'in a shader, mouse_down() needs the button written as 0, 1 or 2')
+            b = a.value
+        self.uses_live = True
+        return '(%s > 0.5)' % ('uM.z', 'uM.w', 'uT.w')[b], 'bool'
+
+    def bi_is_mobile(self, n):
+        self.args(n, 0, 0)
+        f = self.rt.get('is_mobile')
+        return ('true' if (f and f()) else 'false'), 'bool'
+
+    # ═════════════════════ whole program ═════════════════════
+    def program(self, fn):
+        f, conv = self.compile_entry(fn)
+        parts = ['#version 300 es', 'precision highp float;', 'precision highp int;']
+        parts.append('uniform sampler2D uScene;\\nuniform vec2 uRes;\\nuniform vec4 uT;\\nuniform vec4 uM;\\nuniform vec4 uU[%d];\\nout vec4 outColor;' % max(1, self.nslots))
+        parts.append('vec4 bp_get_pixel(vec2 p) { vec4 t = textureLod(uScene, p, 0.0); return t.a > 0.0 ? vec4(t.rgb / t.a, t.a) : vec4(0.0); }')
+        need = set(self.helpers)
+        for h, deps in _SH_HELPER_DEPS.items():
+            if h in need:
+                need.update(deps)
+        for h in _SH_HELPER_ORDER:
+            if h in need:
+                parts.append(_SH_HELPERS[h])
+        for g in self.order:
+            parts.append(g.code)
+        body = ('void main() {\\n'
+                '  vec2 pos = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y) / uRes;\\n'
+                '  %s R = %s(pos);\\n'
+                '  vec4 c = clamp(%s, 0.0, 1.0);\\n'
+                '  outColor = vec4(c.rgb * c.a, c.a);\\n}') % (
+                    f.ret, f.name, conv)
+        parts.append(body)
+        return '\\n'.join(parts) + '\\n'
+
+
+
+# ── Running the shader: where the source comes from, the per-frame uniforms, the CPU fallback ───────────
+_BP_MAIN_SRC = ''          # source code of main.bpy (the host sets it before every run)
+_BP_SRC_FILES = {}         # file name -> source code of include()d files
+_FRAG = {'fn': None, 'mode': 'off', 'pack': None, 'scene': None, 'src': None, 'warned': False}
+_SH_TREES = {}
+
+
+def _sh_source_of(fn):
+    """(the ast of a function, the file name to show in messages) - None when the source is not known."""
+    code = fn.__code__
+    fname = code.co_filename
+    src = None
+    shown = fname
+    if fname == '<exec>':
+        src = _BP_MAIN_SRC
+        shown = 'main.bpy'
+    else:
+        for rec in _BP_TAB_SRC.values():
+            if rec[0] == fname:
+                src = rec[1]
+                break
+        if src is None:
+            src = _BP_SRC_FILES.get(fname)
+    if not src:
+        return None, shown
+    key = (fname, len(src), hash(src))
+    idx = _SH_TREES.get(key)
+    if idx is None:
+        try:
+            tree = _sh_ast.parse(src, filename=fname)
+        except SyntaxError:
+            return None, shown
+        idx = {}
+        for node in _sh_ast.walk(tree):
+            if isinstance(node, _sh_ast.FunctionDef):
+                first = min([d.lineno for d in node.decorator_list] + [node.lineno])
+                idx[(node.name, first)] = node
+        if len(_SH_TREES) > 16:
+            _SH_TREES.clear()
+        _SH_TREES[key] = idx
+    return idx.get((fn.__name__, code.co_firstlineno)), shown
+
+
+def _sh_consts(g):
+    c = g.get('__CONSTS')
+    return c if c else ()
+
+
+def _sh_comps(v):
+    t = type(v)
+    if t is Vec2:
+        return (v.x, v.y)
+    if t is Vec3:
+        return (v.x, v.y, v.z)
+    if t is Vec4:
+        return (v.x, v.y, v.z, v.w)
+    return tuple(float(c) for c in v)
+
+
+def _sh_make_packer(comp):
+    """A function that reads the global variables the shader uses and returns them as a flat list of floats."""
+    ents = [(u['g'], u['name'], u['kind'], u['type'], u['slot'], u['count']) for u in comp.uniforms]
+    n4 = 4 * max(1, comp.nslots)
+
+    def pack():
+        out = [0.0] * n4
+        for g, name, kind, t, slot, count in ents:
+            try:
+                v = g[name]
+            except KeyError:
+                raise NameError("fragment(): the global variable '%s' does not exist any more" % name) from None
+            i = slot * 4
+            try:
+                if kind == 'scalar':
+                    out[i] = (1.0 if v else 0.0) if t == 'bool' else float(v)
+                elif kind == 'vec':
+                    c = _sh_comps(v)
+                    if len(c) != _SH_DIMS[t]:
+                        raise ValueError('it must stay a %s' % _sh_tname(t))
+                    for k in range(len(c)):
+                        out[i + k] = c[k]
+                else:
+                    if len(v) != count:
+                        raise ValueError('the list must keep its %d items' % count)
+                    et = t[1]
+                    if et == 'float' or et == 'bool':
+                        for j in range(count):
+                            out[i + 4 * j] = (1.0 if v[j] else 0.0) if et == 'bool' else float(v[j])
+                    else:
+                        d = _SH_DIMS[et]
+                        for j in range(count):
+                            c = _sh_comps(v[j])
+                            if len(c) != d:
+                                raise ValueError('every item must stay a %s' % _sh_tname(et))
+                            for k in range(d):
+                                out[i + 4 * j + k] = c[k]
+            except (TypeError, ValueError) as e:
+                raise TypeError("fragment(): the global variable '%s' can no longer be used by the shader: %s" % (name, e)) from None
+        return out
+    return pack
+
+
+_SH_RUNTIME = {'source_of': _sh_source_of, 'is_mobile': is_mobile, 'consts': _sh_consts}
+
+
+def _bp_shader_glsl(fn):
+    """Translate fragment(pos) to GLSL. Returns (compiler, source). Raises _ShaderError."""
+    comp = _ShCompiler(_BP_API, _SH_RUNTIME)
+    return comp, comp.program(fn)
+
+
+def _sh_warn(msg):
+    f = getattr(js, 'appendConsole', None)
+    if f is not None:
+        f(msg, 'warn')
+    else:
+        print(msg)
+
+
+def _bp_frag_reset():
+    """Forget the shader (a new run starts, or the program stopped): the next run starts with the default fragment()."""
+    _FRAG.update(fn=None, mode='off', pack=None, scene=None, src=None, warned=False)
+    g = globals()
+    if g.get('fragment') is not _bp_default_fragment:
+        try:
+            g['fragment'] = _bp_default_fragment
+        except Exception:
+            pass
+    try:
+        _py.frag_off()
+    except Exception:
+        pass
+
+
+def _bp_frag_select(fn):
+    st = _FRAG
+    st.update(fn=fn, mode='off', pack=None, scene=None, src=None)
+    _py.frag_off()
+    if fn is None or fn is _bp_default_fragment or not callable(fn):
+        return
+    code = getattr(fn, '__code__', None)
+    if code is not None and (code.co_argcount != 1 or code.co_flags & 0x0C or code.co_kwonlyargcount):
+        raise TypeError('fragment() must take exactly one argument: def fragment(pos): ...  pos is a Vec2 from 0 to 1 and '
+                        'get_pixel(pos) is the colour that was drawn there (the old fragment(r, g, b, pos) form is gone)')
+    reason = None
+    try:
+        comp, glsl = _bp_shader_glsl(fn)
+    except _ShaderError as e:
+        reason = str(e)
+    except Exception as e:                         # a bug in the translator must never stop the program
+        reason = 'internal error while translating the shader (%s: %s)' % (type(e).__name__, e)
+    else:
+        err = 'forced onto the CPU' if st.get('no_gpu') else _py.frag_compile(glsl, comp.nslots, bool(comp.uses_live))
+        if not err:
+            st['mode'] = 'gpu'
+            st['pack'] = _sh_make_packer(comp) if comp.nslots else None
+            st['glsl'] = glsl
+            return
+        reason = str(err)
+    st['mode'] = 'cpu'
+    if not st['warned']:
+        st['warned'] = True
+        _sh_warn('fragment() cannot run on the GPU, so it runs on the CPU, which is very slow: %s' % reason)
+
+
+def _bp_frag_tick():
+    """Once per frame, after update(): send the shader's variables to the GPU (or run it on the CPU)."""
+    fn = globals().get('fragment')
+    st = _FRAG
+    if fn is not st['fn']:
+        _bp_frag_select(fn)
+    m = st['mode']
+    if m == 'gpu':
+        pk = st['pack']
+        if pk is not None:
+            _py.frag_set(pk())
+    elif m == 'cpu':
+        _bp_frag_cpu(fn)
+
+
+def _bp_frag_restore():
+    """CPU shader: bring back the picture as it was drawn, so only the display is shaded (like the GPU path)."""
+    st = _FRAG
+    scene = st['scene']
+    if scene is not None:
+        st['scene'] = None
+        if len(scene) == W() * H() * 4:
+            _py.put_canvas_data(scene)
+
+
+def _sh_rgba(res):
+    if isinstance(res, (int, float)):
+        r = g = b = float(res)
+        a = 1.0
+    else:
+        t = res.to_tuple() if hasattr(res, 'to_tuple') else tuple(res)
+        if len(t) == 3:
+            r, g, b = t
+            a = 1.0
+        elif len(t) == 4:
+            r, g, b, a = t
+        else:
+            raise TypeError('fragment() must return a colour: Vec3(r, g, b), Vec4(r, g, b, a), a tuple or a grey level, each from 0 to 1')
+    return (min(1.0, max(0.0, r)), min(1.0, max(0.0, g)), min(1.0, max(0.0, b)), min(1.0, max(0.0, a)))
+
+
+def _bp_frag_cpu(fn):
+    st = _FRAG
+    w, h = W(), H()
+    if w * h == 0:
+        return
+    raw = _py.get_canvas_data()
+    buf = bytes(raw.to_py() if hasattr(raw, 'to_py') else raw)
+    st['scene'] = buf
+    out = bytearray(buf)
+    st['src'] = (buf, w, h)
+    try:
+        iw, ih = 1.0 / w, 1.0 / h
+        i = 0
+        for y in range(h):
+            v = (y + 0.5) * ih
+            for x in range(w):
+                res = fn(Vec2((x + 0.5) * iw, v))
+                t = type(res)
+                if t is Vec3:
+                    r = res.x; g = res.y; b = res.z; a = 1.0
+                elif t is Vec4:
+                    r = res.x; g = res.y; b = res.z; a = res.w
+                else:
+                    r, g, b, a = _sh_rgba(res)
+                out[i] = 0 if r <= 0.0 else (255 if r >= 1.0 else int(r * 255 + 0.5))
+                out[i + 1] = 0 if g <= 0.0 else (255 if g >= 1.0 else int(g * 255 + 0.5))
+                out[i + 2] = 0 if b <= 0.0 else (255 if b >= 1.0 else int(b * 255 + 0.5))
+                out[i + 3] = 0 if a <= 0.0 else (255 if a >= 1.0 else int(a * 255 + 0.5))
+                i += 4
+    finally:
+        st['src'] = None
+    _py.put_canvas_data(bytes(out))
+
+
+# ── get_pixel(pos): the colour of the picture at a position from 0 to 1 (bilinear, like a GPU texture read) ──
+_SH_K255 = 1.0 / 255.0
+
+
+def _sh_fetch_live(x, y):
+    v = int(_py.get_pixel_packed(x, y))
+    return (v >> 24, (v >> 16) & 255, (v >> 8) & 255, v & 255)
+
+
+def _sh_sample(pos):
+    try:
+        if type(pos) is Vec2:
+            u = pos.x; v = pos.y
+        elif isinstance(pos, (tuple, list)):
+            u = float(pos[0]); v = float(pos[1])
+        else:
+            u = float(pos.x); v = float(pos.y)
+    except (AttributeError, TypeError, IndexError):
+        raise TypeError('get_pixel() takes get_pixel(x, y) with pixel numbers, or get_pixel(pos) with a Vec2 from 0 to 1') from None
+    cpu = _FRAG['src']
+    if cpu is not None:
+        buf, w, h = cpu
+    else:
+        buf = None
+        w = int(_py.sw()); h = int(_py.sh())
+    fx = u * w - 0.5
+    fy = v * h - 0.5
+    x0 = math.floor(fx)
+    y0 = math.floor(fy)
+    tx = fx - x0
+    ty = fy - y0
+    # weights that are only rounding noise are dropped, so reading at a pixel centre costs one pixel
+    if tx < 0.002:
+        tx = 0.0
+    elif tx > 0.998:
+        x0 += 1
+        tx = 0.0
+    if ty < 0.002:
+        ty = 0.0
+    elif ty > 0.998:
+        y0 += 1
+        ty = 0.0
+    xa = x0 if 0 <= x0 < w else (0 if x0 < 0 else w - 1)
+    ya = y0 if 0 <= y0 < h else (0 if y0 < 0 else h - 1)
+    if tx == 0.0 and ty == 0.0:
+        if buf is not None:
+            i = (ya * w + xa) * 4
+            a = buf[i + 3]
+            if a == 255:
+                return Vec4(buf[i] * _SH_K255, buf[i + 1] * _SH_K255, buf[i + 2] * _SH_K255, 1.0)
+            if a == 0:
+                return Vec4(0.0, 0.0, 0.0, 0.0)
+            return Vec4(buf[i] * _SH_K255, buf[i + 1] * _SH_K255, buf[i + 2] * _SH_K255, a * _SH_K255)
+        p = int(_py.get_pixel_packed(xa, ya))
+        return Vec4((p >> 24) * _SH_K255, ((p >> 16) & 255) * _SH_K255, ((p >> 8) & 255) * _SH_K255, (p & 255) * _SH_K255)
+    xb = x0 + 1
+    xb = xb if xb < w else w - 1
+    yb = y0 + 1
+    yb = yb if yb < h else h - 1
+    if buf is not None:
+        def fetch(x, y):
+            j = (y * w + x) * 4
+            return (buf[j], buf[j + 1], buf[j + 2], buf[j + 3])
+    else:
+        fetch = _sh_fetch_live
+    r = g = b = a = 0.0
+    for xx, yy, wt in ((xa, ya, (1 - tx) * (1 - ty)), (xb, ya, tx * (1 - ty)), (xa, yb, (1 - tx) * ty), (xb, yb, tx * ty)):
+        if wt <= 0.0:
+            continue
+        pr, pg, pb, pa = fetch(xx, yy)
+        al = pa * _SH_K255
+        k = wt * al * _SH_K255
+        r += pr * k
+        g += pg * k
+        b += pb * k
+        a += wt * al
+    if a > 0.0:
+        return Vec4(min(1.0, r / a), min(1.0, g / a), min(1.0, b / a), min(1.0, a))
+    return Vec4(0.0, 0.0, 0.0, 0.0)
+
+
+def fragment(pos):
+    """The screen shader: define your own fragment(pos) to change how every pixel of the screen looks.
+
+    pos is a Vec2 from 0 to 1 - (0, 0) is the top-left of the screen, (1, 1) the bottom-right. Return the
+    colour of that pixel as a Vec3(r, g, b) (opaque) or a Vec4(r, g, b, a), each value from 0 to 1.
+    get_pixel(pos) gives the colour that was drawn at a position, as a Vec4.
+
+    The default shader leaves the picture as it is:
+
+        def fragment(pos):
+            return get_pixel(pos)
+
+    Your function runs once per pixel, every frame, after update() - on the GPU, so it is very fast. For that,
+    BowPy turns it into a GPU program: use numbers, Vec2 / Vec3 / Vec4, math functions, if / for / while,
+    your own helper functions and your global variables (they are read again every frame).
+
+    Example (a pulsing vignette):
+        def fragment(pos):
+            c = get_pixel(pos)
+            d = length(pos - Vec2(0.5, 0.5)) * (1.2 + 0.2 * sin(get_time() * 3))
+            return c.rgb * (1.0 - clamp(d, 0, 1))
+    """
+    if callable(pos):
+        raise TypeError('fragment() is now a function you define yourself: write  def fragment(pos): ...  where pos is '
+                        'a Vec2 from 0 to 1, and return the colour of that pixel (see the wiki page of fragment()).')
+    return get_pixel(pos)
+
+
+_bp_default_fragment = fragment
+
 _BP_RESERVED = set(globals().keys())
 _BP_API.update({k: v for k, v in globals().items() if not k.startswith('__')})
-_HAS_UPDATE=False; _HAS_SETUP=False
+_HAS_UPDATE=False; _HAS_SETUP=False; _HAS_FRAG=False; _HAS_LOOP=False
 def _check():
-    global _HAS_UPDATE,_HAS_SETUP
+    global _HAS_UPDATE,_HAS_SETUP,_HAS_FRAG,_HAS_LOOP
     g=globals(); _HAS_UPDATE=callable(g.get('update')); _HAS_SETUP=callable(g.get('setup'))
+    _f=g.get('fragment'); _HAS_FRAG=callable(_f) and _f is not _bp_default_fragment
+    _HAS_LOOP=_HAS_UPDATE or _HAS_FRAG     # a program that only defines fragment() is animated too
 def _setup():
     if _HAS_SETUP: globals()['setup']()
 def _frame():
+    if _FRAG['scene'] is not None: _bp_frag_restore()      # (CPU shader) the picture is back as it was drawn
     # Tick all live Timer instances (dt in ms = fps * 0.001 equivalent)
     _dt_ms = float(_py.dt()) * 1000.0
     _i = 0
@@ -6178,6 +8337,7 @@ def _frame():
         except Exception:
             _BP_KEY_RECORDERS.pop(_i)
     if _HAS_UPDATE: globals()['update']()
+    _bp_frag_tick()                                         # the screen shader: send its variables to the GPU
 `;
 
 // ══════════════════════════════════════════════════════════════
@@ -7290,7 +9450,8 @@ function frame(ts) {
     window.appendConsole(err.message, 'err');
     stopCode(); return;
   }
-  BE.present();   // show the finished frame (WebGL: copy the screen target onto the canvas)
+  _bpTickShader();
+  BE.present();   // show the finished frame (WebGL: copy the screen target onto the canvas, through the fragment() shader)
   // Clear img_from_screen cache accumulated this frame
   for (const img of _bpScreenCapImages) { img.src = ''; _bpImgDataCache.delete(img); }
   _bpScreenCapImages.length = 0;
@@ -7311,15 +9472,17 @@ async function runCode() {
   switchTab('screen'); fitCanvas();
   ctx.clearRect(0, 0, $canvas.width, $canvas.height);
   running = true; setStatus('Running', 's-run');
+  _bpRunT0 = performance.now();
   try {
     const prog = _bpGetProgram();
     window._bpLastProgram = prog;
     window._bpLastUserCode = prog.main;
     pyodide.runPython('_reset_controlled()');
     _bpInstallTabs(prog);   // every extra tab becomes a module (utils.bpy -> utils)
+    _bpSetMainSrc(prog.main);
     await pyodide.runPythonAsync(prog.main);
     pyodide.runPython('_check()');
-    if (pyodide.runPython('_HAS_UPDATE')) {
+    if (pyodide.runPython('_HAS_LOOP')) {
       pyodide.runPython('_setup()');
       // wait for all registered Image/Sound assets to finish loading
       if (!pyodide.runPython('_all_assets_ready()')) {
@@ -7366,11 +9529,13 @@ function stopCode(msg = true) {
 
 window._bp_reset = function() {
   _resetRuntimeState();
+  try { pyodide.runPython('_bp_frag_reset()'); } catch (e) {}
   ctx.clearRect(0, 0, $canvas.width, $canvas.height);
   const prog = _bpGetProgram();
   const code = window._bpCurrentCode || prog.main;
   try {
     _bpInstallTabs(prog);
+    _bpSetMainSrc(code);
     pyodide.runPython(code);
     pyodide.runPython('_check()');
     if (pyodide.runPython('_HAS_SETUP')) pyodide.runPython('_setup()');
@@ -7391,10 +9556,12 @@ for _k in list(globals().keys()):
   if (window._bpLastUserCode !== undefined) {
     pyodide.runPython('_reset_controlled()');
     if (window._bpLastProgram) _bpInstallTabs(window._bpLastProgram);
+    _bpRunT0 = performance.now();
+    _bpSetMainSrc(window._bpLastUserCode);
     await pyodide.runPythonAsync(window._bpLastUserCode);
     pyodide.runPython('__bp_restore_keep(js._bpResetSnapshot)');
     pyodide.runPython('_check()');
-    if (pyodide.runPython('_HAS_UPDATE')) {
+    if (pyodide.runPython('_HAS_LOOP')) {
       pyodide.runPython('_setup()');
       if (!pyodide.runPython('_all_assets_ready()')) {
         window.appendConsole('Waiting for assets...', 'sys');
@@ -7610,6 +9777,9 @@ const BE=_bowglFactory().create($canvas);
 let ctx=BE.ctx;
 const _mainCtx=ctx;let _bpTargetCanvas=$canvas;
 let running=false,lastTs=0,deltaTime=0.016,fpsSmooth=60,fpsLimit=0;
+let _bpRunT0=performance.now();
+function _bpTickShader(){if(BE.tickLive)BE.tickLive((performance.now()-_bpRunT0)/1000,deltaTime,fpsSmooth,mx,my,btnsHeld.has(0)?1:0,btnsHeld.has(1)?1:0,btnsHeld.has(2)?1:0);}
+function _bpSetMainSrc(code){try{pyodide.globals.set('_BP_MAIN_SRC',String(code));}catch(e){}}
 let pyodide=null;
 const keysHeld=new Set(),keysPress=new Set(),keysRel=new Set();
 let mx=0,my=0;
@@ -7671,11 +9841,15 @@ window._py={
   fillgrad(grad){ctx.fillStyle=grad;ctx.fillRect(0,0,_bpTargetCanvas.width,_bpTargetCanvas.height);},
   rectgrad(x,y,w,h,grad){ctx.fillStyle=grad;ctx.fillRect(x,y,w,h);},
   get_pixel(x,y){const d=ctx.getImageData(x,y,1,1).data;return[d[0],d[1],d[2],d[3]];},
+  get_pixel_packed(x,y){const c=ctx;if(c.bpPixel)return c.bpPixel(x,y);const d=c.getImageData(x,y,1,1).data;return((d[0]<<24)|(d[1]<<16)|(d[2]<<8)|d[3])>>>0;},
+  frag_compile(glsl,nslots,live){return BE.setPost?BE.setPost(String(glsl),nslots|0,!!live):'the GPU renderer (WebGL2) is not in use';},
+  frag_set(u){if(BE.setPostUniforms)BE.setPostUniforms(u);},
+  frag_off(){if(BE.clearPost)BE.clearPost();},
   galpha(){return ctx.globalAlpha;},screen_pos(x,y){if(x!==undefined&&y!==undefined){screenX=Number(x)||0;screenY=Number(y)||0;}return[screenX,screenY];},screen_rot(angle,ox,oy){if(angle!==undefined){screenRot=Number(angle)||0;if(ox!==undefined&&oy!==undefined){screenRotOx=Number(ox)||0;screenRotOy=Number(oy)||0;}}return[screenRot,screenRotOx,screenRotOy];},
   img_create(url){const stored=_builtAssets[String(url)];const img=new window.Image();img.crossOrigin='anonymous';img.src=stored||String(url);return img;},
   img_draw(img,x,y,w,h,angle,ox,oy,tint){if(!img||!img.complete||!img.naturalWidth)return;const flipX=w<0;const flipY=h<0;const iw=(w===0)?img.naturalWidth:Math.abs(w);const ih=(h===0)?img.naturalHeight:Math.abs(h);const px=-iw*ox;const py=-ih*oy;const tintRGB=(tint!==undefined&&tint!==null&&tint!==""&&tint!=="none")?_bpColorToRGB(tint):null;ctx.save();ctx.translate(x,y);ctx.rotate(angle);if(flipX||flipY)ctx.scale(flipX?-1:1,flipY?-1:1);ctx.bpDrawImage(img,px,py,iw,ih,tintRGB);ctx.restore();},
-  get_canvas_data(){return Array.from(ctx.getImageData(0,0,$canvas.width,$canvas.height).data);},
-  put_canvas_data(dp){let u8;try{const raw=(dp&&typeof dp.toJs==='function')?dp.toJs():dp;if(raw instanceof Uint8Array||raw instanceof Uint8ClampedArray){u8=(raw instanceof Uint8ClampedArray)?raw:new Uint8ClampedArray(raw.buffer,raw.byteOffset,raw.byteLength);}else if(raw instanceof ArrayBuffer){u8=new Uint8ClampedArray(raw);}else{u8=new Uint8ClampedArray(Array.isArray(raw)?raw:Array.from(raw));}}catch(_){u8=new Uint8ClampedArray(Array.from(dp));}ctx.putImageData(new ImageData(u8,$canvas.width,$canvas.height),0,0);},img_draw_quad(img,pts,tint){if(!img||!img.complete||!img.naturalWidth)return;const rawPts=pts&&pts.toJs?pts.toJs():Array.from(pts||[]);if(rawPts.length!==4)return;const m=ctx.getTransform();const p=rawPts.map(pt=>{const q=pt&&pt.toJs?pt.toJs():Array.from(pt);const x=Number(q[0]),y=Number(q[1]);return[m.a*x+m.c*y+m.e,m.b*x+m.d*y+m.f];});ctx.bpDrawQuad(img,p,_bpColorToRGB(tint));},
+  get_canvas_data(){return Array.from(_mainCtx.getImageData(0,0,$canvas.width,$canvas.height).data);},
+  put_canvas_data(dp){let u8;try{const raw=(dp&&typeof dp.toJs==='function')?dp.toJs():dp;if(raw instanceof Uint8Array||raw instanceof Uint8ClampedArray){u8=(raw instanceof Uint8ClampedArray)?raw:new Uint8ClampedArray(raw.buffer,raw.byteOffset,raw.byteLength);}else if(raw instanceof ArrayBuffer){u8=new Uint8ClampedArray(raw);}else{u8=new Uint8ClampedArray(Array.isArray(raw)?raw:Array.from(raw));}}catch(_){u8=new Uint8ClampedArray(Array.from(dp));}_mainCtx.putImageData(new ImageData(u8,$canvas.width,$canvas.height),0,0);},img_draw_quad(img,pts,tint){if(!img||!img.complete||!img.naturalWidth)return;const rawPts=pts&&pts.toJs?pts.toJs():Array.from(pts||[]);if(rawPts.length!==4)return;const m=ctx.getTransform();const p=rawPts.map(pt=>{const q=pt&&pt.toJs?pt.toJs():Array.from(pt);const x=Number(q[0]),y=Number(q[1]);return[m.a*x+m.c*y+m.e,m.b*x+m.d*y+m.f];});ctx.bpDrawQuad(img,p,_bpColorToRGB(tint));},
   img_size(img){return[img.naturalWidth||0,img.naturalHeight||0];},
   img_ready(img){return!!(img&&img.complete&&img.naturalWidth);},img_from_screen(x1,y1,x2,y2,keep){const minX=Math.max(0,Math.floor(Math.min(x1,x2)));const minY=Math.max(0,Math.floor(Math.min(y1,y2)));const maxX=Math.min($canvas.width,Math.ceil(Math.max(x1,x2)));const maxY=Math.min($canvas.height,Math.ceil(Math.max(y1,y2)));const w=Math.max(0,maxX-minX);const h=Math.max(0,maxY-minY);const c=BE.captureRegion(minX,minY,w,h);const img=new window.Image();img.src=c.toDataURL("image/png");if(!keep)_bpScreenCapImages.push(img);return img;},
   snd_create(url){const stored=_builtAssets[String(url)];const src=stored&&typeof stored==='object'?(stored.url||String(url)):(stored||String(url));const h={buf:null};const ac=window._bpAC||(window._bpAC=new AudioContext());fetch(src).then(r=>r.arrayBuffer()).then(buf=>ac.decodeAudioData(buf).then(d=>{h.buf=d;})).catch(()=>{});return h;},
@@ -7711,7 +9885,9 @@ window._bp_reset = function() {
   ctx.clearRect(0, 0, $canvas.width, $canvas.height);
   const code = USER_CODE;
   try {
+    try{pyodide.runPython('_bp_frag_reset()');}catch(e){}
     _bpInstallTabs();
+    _bpSetMainSrc(code);
     pyodide.runPython(code);
     pyodide.runPython('_check()');
     if (pyodide.runPython('_HAS_SETUP')) pyodide.runPython('_setup()');
@@ -7724,8 +9900,10 @@ async function main(){
   pyodide=await loadPyodide();
   await pyodide.runPythonAsync(PRELUDE);
   running=true;
+  _bpRunT0=performance.now();
   pyodide.runPython('_reset_controlled()');
   _bpInstallTabs();
+  _bpSetMainSrc(USER_CODE);
   await pyodide.runPythonAsync(USER_CODE);
   pyodide.runPython('_check()');
   pyodide.runPython('_setup()');
@@ -7735,7 +9913,7 @@ async function main(){
   }
   document.getElementById('load').style.display='none';
   $canvas.style.display='block';
-  if(pyodide.runPython('_HAS_UPDATE')){
+  if(pyodide.runPython('_HAS_LOOP')){
     lastTs=performance.now();
     requestAnimationFrame(function loop(ts){
       if(!running)return;
@@ -7745,6 +9923,7 @@ async function main(){
       fpsSmooth+=(1/(raw||0.001)-fpsSmooth)*0.08;_applyScreenTransform();
       try{pyodide.runPython('_frame()');}
       catch(e){console.error(e.message);running=false;return;}
+      _bpTickShader();
       BE.present();
       for(const img of _bpScreenCapImages){img.src='';_bpImgDataCache.delete(img);}
       _bpScreenCapImages.length=0;
@@ -7820,6 +9999,10 @@ const WIKI_DOCS = {
         <div class="wiki-member" onclick="openWikiPage('vec3_overview')">
           <div class="wiki-member-name">↗ Vec3</div>
           <div class="wiki-member-desc">3D vector class with cross product and axis rotations.</div>
+        </div>
+        <div class="wiki-member" onclick="openWikiPage('vec4_overview')">
+          <div class="wiki-member-name">↗ Vec4</div>
+          <div class="wiki-member-desc">4-component vector and colour with alpha (r, g, b, a).</div>
         </div>
         <div class="wiki-member" onclick="openWikiPage('matrix_overview')">
           <div class="wiki-member-name">▦ Matrix</div>
@@ -9489,7 +11672,7 @@ def update():
       <div class="wiki-members">
         <div class="wiki-member" onclick="openWikiPage('gradients')"><div class="wiki-member-name">linear_gradient() / radial_gradient()</div><div class="wiki-member-desc">Create gradient objects.</div></div>
         <div class="wiki-member" onclick="openWikiPage('fill_gradient')"><div class="wiki-member-name">fill_gradient() / rect_gradient()</div><div class="wiki-member-desc">Apply a gradient fill.</div></div>
-        <div class="wiki-member" onclick="openWikiPage('fragment_fn')"><div class="wiki-member-name">fragment()</div><div class="wiki-member-desc">Per-pixel shader applied to the whole canvas.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('fragment_fn')"><div class="wiki-member-name">fragment()</div><div class="wiki-member-desc">Your own GPU shader: runs for every pixel of the screen.</div></div>
       </div>
       <h2 class="wiki-h2">Images</h2>
       <div class="wiki-members">
@@ -9825,7 +12008,7 @@ def update():
     desc: "Sets a single pixel at (x, y) to the given color.",
     signature: `<span class="ws-fn">draw_pixel</span><span class="ws-pun">(</span><span class="ws-param">x</span><span class="ws-pun">, </span><span class="ws-param">y</span><span class="ws-pun">, </span><span class="ws-param">color</span><span class="ws-pun">=WHITE</span><span class="ws-pun">)</span>`,
     body: `
-      <div class="wiki-note"><b>Performance:</b> Calling draw_pixel() in a tight loop is slow. For bulk pixel operations prefer <code>fragment()</code>.</div>
+      <div class="wiki-note"><b>Performance:</b> Calling draw_pixel() in a tight loop is slow. For effects on every pixel write a <code>fragment(pos)</code> shader, which runs on the GPU.</div>
 
       <div class="wiki-example">
         <div class="wiki-example-title">Dot grid</div>
@@ -9875,10 +12058,13 @@ def update():
     title: "get_pixel()",
     category: "Graphics",
     type: "function",
-    desc: "Reads the RGBA color of a canvas pixel at (x, y), returning a tuple (r, g, b, a) in 0–255.",
-    signature: `<span class="ws-fn">get_pixel</span><span class="ws-pun">(</span><span class="ws-param">x</span><span class="ws-pun">, </span><span class="ws-param">y</span><span class="ws-pun">) →</span> <span class="ws-cls">tuple[int, int, int, int]</span>`,
+    desc: "Reads the colour of the screen. get_pixel(x, y) gives (r, g, b, a) from 0 to 255 for one pixel; get_pixel(pos) takes a Vec2 from 0 to 1 and gives a Vec4 from 0 to 1.",
+    signature: `<span class="ws-fn">get_pixel</span><span class="ws-pun">(</span><span class="ws-param">x</span><span class="ws-pun">, </span><span class="ws-param">y</span><span class="ws-pun">) →</span> <span class="ws-cls">tuple[int, int, int, int]</span><br><span class="ws-fn">get_pixel</span><span class="ws-pun">(</span><span class="ws-param">pos</span><span class="ws-pun">) →</span> <span class="ws-cls">Vec4</span>`,
     body: `
-      <div class="wiki-note"><b>Performance:</b> Each call reads back from the GPU. Avoid inside tight loops; use <code>fragment()</code> for bulk pixel reads.</div>
+      <p class="wiki-p"><code>get_pixel(x, y)</code> reads the pixel at the pixel position <code>x, y</code> (0 is the top-left). <code>get_pixel(pos)</code> reads at a position from 0 to 1 - <code>(0, 0)</code> is the top-left corner and <code>(1, 1)</code> the bottom-right - and blends the pixels around it, exactly like a GPU texture read. It is the form to use inside <code>fragment(pos)</code>, where it is a single fast texture read.</p>
+
+      <div class="wiki-note"><b>Performance:</b> The first read after something was drawn asks the GPU for that one pixel. Further reads of the same picture are answered from a copy, so a loop over many pixels is fast as long as nothing is drawn in between. For work on every pixel use <code>fragment()</code>, which does it on the GPU.</div>
+      <div class="wiki-note">Reading outside <code>update()</code>'s picture is never affected by <code>fragment()</code>: you always read what the program drew, not what the shader shows.</div>
 
       <div class="wiki-example">
         <div class="wiki-example-title">Sample a pixel under the mouse</div>
@@ -9889,6 +12075,20 @@ def update():
     r, g, b, a = get_pixel(mouse_x(), mouse_y())
     draw_text(8, 8, f"R:{r} G:{g} B:{b}", "white", 14)
 </pre>
+      </div>
+
+      <div class="wiki-example">
+        <div class="wiki-example-title">Read at a position from 0 to 1</div>
+<pre>
+def update():
+    clear(rgb(30, 60, 120))
+    c = get_pixel(Vec2(0.5, 0.5))      # the middle of the screen
+    draw_text(8, 8, f"{c.r:.2f} {c.g:.2f} {c.b:.2f} {c.a:.2f}", "white", 14)
+</pre>
+      </div>
+
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('fragment_fn')">fragment()</div>
       </div>
     `
   },
@@ -10100,46 +12300,124 @@ def update():
     title: "fragment()",
     category: "Graphics",
     type: "function",
-    desc: "Applies a per-pixel shader function to the entire canvas. The function receives (r, g, b, pos) and returns a Vec3(r, g, b).",
-    signature: `<span class="ws-fn">fragment</span><span class="ws-pun">(</span><span class="ws-param">fn</span><span class="ws-pun">)</span>`,
+    desc: "Define fragment(pos) to shade every pixel of the screen on the GPU. pos is a Vec2 from 0 to 1 and the function returns the colour of that pixel.",
+    signature: `<span class="ws-kw">def</span> <span class="ws-fn">fragment</span><span class="ws-pun">(</span><span class="ws-param">pos</span><span class="ws-pun">) →</span> <span class="ws-cls">Vec3 | Vec4 | tuple | float</span>`,
     body: `
-      <p class="wiki-p">The shader function is called once for every pixel. <code>r</code>, <code>g</code>, <code>b</code> are the current pixel's color channels in 0.0–1.0. <code>pos</code> is a Vec2 with UV coordinates: (0,0) at the top-left, (1,1) at the bottom-right.</p>
+      <p class="wiki-p"><code>fragment(pos)</code> is a function <b>you define</b>. After <code>update()</code> has drawn the frame, BowPy calls it for every pixel of the screen and shows the colours it returns. <code>pos</code> is a <code>Vec2</code> from 0 to 1: <code>(0, 0)</code> is the top-left corner and <code>(1, 1)</code> the bottom-right. <code>get_pixel(pos)</code> gives the colour that was drawn at a position, as a <code>Vec4</code>.</p>
 
-      <p class="wiki-p">BowPy automatically tries to vectorise the function with NumPy for near-GPU performance. If the function uses Python-only control flow it falls back to a per-pixel loop.</p>
+      <p class="wiki-p">The default shader leaves the picture as it is:</p>
+<pre>
+def fragment(pos):
+    return get_pixel(pos)
+</pre>
 
+      <p class="wiki-p">BowPy turns your function into a GPU program, so it runs for all pixels at the same time. A shader that does a few hundred operations per pixel still runs at full speed. The picture that your program drew is not changed: <code>get_pixel()</code> inside <code>update()</code> still reads the picture without the shader.</p>
+
+      <h2 class="wiki-h2">What to return</h2>
+      <div class="wiki-members">
+        <div class="wiki-member"><div class="wiki-member-name">Vec3(r, g, b)  or  (r, g, b)</div><div class="wiki-member-desc">An opaque colour.</div></div>
+        <div class="wiki-member"><div class="wiki-member-name">Vec4(r, g, b, a)  or  (r, g, b, a)</div><div class="wiki-member-desc">A colour with transparency. Use <code>get_pixel(pos)</code> as it is to keep the picture's own alpha.</div></div>
+        <div class="wiki-member"><div class="wiki-member-name">a number</div><div class="wiki-member-desc">A grey level (0 is black, 1 is white).</div></div>
+      </div>
+      <p class="wiki-p">Every value goes from 0 to 1 and is clamped to that range. Different returns in different branches are fine (a Vec3 in one place and a Vec4 in another).</p>
+
+      <h2 class="wiki-h2">Examples</h2>
       <div class="wiki-example">
-        <div class="wiki-example-title">Invert colors on the canvas</div>
+        <div class="wiki-example-title">Vignette</div>
 <pre>
 def update():
     clear(rgb(30, 60, 120))
-    draw_circle(W()/2, H()/2, 60, "orange")
+    draw_circle(W()/2, H()/2, 80, "orange")
 
-    def invert(r, g, b, pos):
-        return Vec3(1-r, 1-g, 1-b)
-
-    fragment(invert)
+def fragment(pos):
+    c = get_pixel(pos)
+    d = Vec2.distance(pos, Vec2(0.5, 0.5)) * 1.4
+    f = clamp(1.0 - d, 0, 1)
+    return Vec3(c.r * f, c.g * f, c.b * f)
 </pre>
       </div>
 
       <div class="wiki-example">
-        <div class="wiki-example-title">Radial vignette</div>
+        <div class="wiki-example-title">Invert the part of the screen left of the mouse</div>
 <pre>
 def update():
-    clear("white")
-    draw_rect(60, 60, 200, 120, "cyan")
+    clear(rgb(30, 60, 120))
+    draw_circle(W()/2, H()/2, 80, "orange")
 
-    def vignette(r, g, b, pos):
-        d = ((pos.x - 0.5)**2 + (pos.y - 0.5)**2) ** 0.5 * 1.4
-        f = clamp(1.0 - d, 0, 1)
-        return Vec3(r*f, g*f, b*f)
-
-    fragment(vignette)
+def fragment(pos):
+    c = get_pixel(pos)
+    if pos.x * W() < mouse_x():
+        return Vec3(1 - c.r, 1 - c.g, 1 - c.b)
+    return c
 </pre>
       </div>
 
+      <div class="wiki-example">
+        <div class="wiki-example-title">Waves (global variables are read again every frame)</div>
+<pre>
+amount = 0.01
+
+def update():
+    global amount
+    amount = 0.005 + 0.01 * abs(sin(get_time()))
+    clear(rgb(30, 60, 120))
+    draw_text(40, H()/2, "BowPy", "white", 64)
+
+def fragment(pos):
+    wave = sin(pos.y * 40 + get_time() * 3) * amount
+    return get_pixel(pos + Vec2(wave, 0))
+</pre>
+      </div>
+
+      <div class="wiki-example">
+        <div class="wiki-example-title">Pixelate, with a helper function</div>
+<pre>
+blocks = 48
+
+def update():
+    clear(rgb(30, 60, 120))
+    draw_circle(W()/2, H()/2, 80, "orange")
+
+def snap(p):
+    return Vec2(floor(p.x * blocks) / blocks, floor(p.y * blocks) / blocks)
+
+def fragment(pos):
+    return get_pixel(snap(pos) + Vec2(0.5 / blocks, 0.5 / blocks))
+</pre>
+      </div>
+
+      <div class="wiki-example">
+        <div class="wiki-example-title">A program with only a shader (no update needed)</div>
+<pre>
+def fragment(pos):
+    t = get_time()
+    v = sin(pos.x * 10 + t) + sin(pos.y * 10 + t * 1.3) + sin((pos.x + pos.y) * 10 + t * 0.7)
+    return Vec3(0.5 + 0.5 * sin(v), 0.5 + 0.5 * sin(v + 2), 0.5 + 0.5 * sin(v + 4))
+</pre>
+      </div>
+
+      <h2 class="wiki-h2">What a shader can use</h2>
+      <ul class="wiki-list">
+        <li>Numbers, <code>True</code>/<code>False</code>, <code>Vec2</code>, <code>Vec3</code>, <code>Vec4</code> and tuples of 2 to 4 numbers. Swizzles can be read: <code>c.rgb</code>, <code>p.xy</code>, <code>v.zyx</code>.</li>
+        <li><code>+ - * / // % **</code>, comparisons of numbers, <code>and</code> / <code>or</code> / <code>not</code>, <code>a if c else b</code>.</li>
+        <li><code>if</code> / <code>elif</code> / <code>else</code>, <code>for i in range(...)</code>, <code>for x in a_global_list</code>, <code>while</code> (stopped after 1024 turns), <code>break</code>, <code>continue</code>.</li>
+        <li>Your own functions, also from other tabs (<code>utils.warp(pos)</code>). They can be called with different kinds of values; recursion is not possible.</li>
+        <li>Math: <code>sin cos tan asin acos atan atan2 sqrt exp log pow abs min max floor ceil round fract sign hypot radians degrees</code>, <code>lerp clamp map_range smoothstep step smooth_step</code>, <code>dot cross length distance normalize</code> and <code>noise()</code>, <code>noise1/2/3()</code>, the Vec methods (<code>.length()</code>, <code>.normalized()</code>, <code>.rotated()</code>, <code>Vec2.distance()</code> ...).</li>
+        <li><code>get_pixel(pos)</code>, <code>get_time()</code> (seconds since the program started), <code>dt()</code>, <code>fps()</code>, <code>W()</code>, <code>H()</code>, <code>mouse_x()</code>, <code>mouse_y()</code>, <code>mouse_pos()</code>, <code>mouse_down()</code> (the button has to be written as 0, 1 or 2) and <code>is_mobile()</code>.</li>
+        <li>Global variables: numbers, booleans, Vec2/Vec3/Vec4, tuples and lists of those (up to 192 values together). They are sent to the GPU every frame as they are at the end of <code>update()</code>. On the GPU numbers have about 7 digits of precision: pass big values such as <code>time.time()</code> as a difference or use <code>get_time()</code> inside the shader. Variables that are made with <code>const()</code> are built into the shader.</li>
+      </ul>
+      <div class="wiki-note"><b>Not possible in a shader:</b> <code>random</code>, text, dictionaries, classes, <code>lambda</code>, <code>print</code>, imports, comparing whole vectors or lists, and assigning several components at once (<code>v.xy = ...</code>; write <code>v.x = ...</code> and <code>v.y = ...</code>).</div>
+
+      <h2 class="wiki-h2">When the shader cannot run on the GPU</h2>
+      <p class="wiki-p">If the shader uses something from the list above, or the browser has no WebGL2, BowPy prints a warning that says what and where, and runs your function on the CPU instead. That gives the same picture but it is very slow (the whole screen is calculated in Python every frame), so fix the shader if you see the warning. Mistakes in the shader (a wrong name, a wrong kind of value) are reported the same way, with the file and line.</p>
+
+      <div class="wiki-note"><b>Changed:</b> the older <code>fragment(fn)</code> that was called with a function and received <code>r, g, b, pos</code> has been replaced by this one. To port it, write <code>def fragment(pos): c = get_pixel(pos)</code> and use <code>c.r</code>, <code>c.g</code>, <code>c.b</code> where it used <code>r</code>, <code>g</code>, <code>b</code>.</div>
+
       <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('get_pixel')">get_pixel()</div>
         <div class="wiki-ref" onclick="openWikiPage('vec2_overview')">Vec2</div>
         <div class="wiki-ref" onclick="openWikiPage('vec3_overview')">Vec3</div>
+        <div class="wiki-ref" onclick="openWikiPage('vec4_overview')">Vec4</div>
       </div>
     `
   },
@@ -10835,6 +13113,41 @@ def update():
         <div class="wiki-member" onclick="openWikiPage('vec3_consts')"><div class="wiki-member-name">Direction constants</div><div class="wiki-member-desc">up, down, left, right, front, back, zero, one.</div></div>
         <div class="wiki-member" onclick="openWikiPage('vec3_copy')"><div class="wiki-member-name">.copy() / .to_tuple()</div><div class="wiki-member-desc">Clone or convert to tuple.</div></div>
         <div class="wiki-member" onclick="openWikiPage('vec3_round')"><div class="wiki-member-name">.ceil() / .floor() / .round()</div><div class="wiki-member-desc">Component-wise rounding.</div></div>
+      </div>
+    `
+  },
+
+  "vec4_overview": {
+    title: "Vec4 Overview",
+    category: "Vec4",
+    type: "class",
+    desc: "A 4-component vector (x, y, z, w) that is also a colour with alpha (r, g, b, a). get_pixel(pos) returns one.",
+    body: `
+      <p class="wiki-p">Vec4 stores four floats. Its components are called <code>x, y, z, w</code> and also <code>r, g, b, a</code>, so a colour can be read as <code>c.r</code> or <code>c.x</code>. It supports <code>+ - * /</code> (with another Vec4 or a number), <code>**</code>, <code>%</code>, <code>//</code>, <code>.length()</code>, <code>.normalized()</code>, <code>.copy()</code>, <code>.to_tuple()</code>, <code>.floor()</code>, <code>.ceil()</code>, <code>.round()</code>, <code>Vec4.dot(a, b)</code>, <code>Vec4.lerp(a, b, t)</code>, <code>Vec4.distance(a, b)</code>, <code>Vec4.zero()</code> and <code>Vec4.one()</code>.</p>
+
+      <p class="wiki-p">Vec2, Vec3 and Vec4 can be built from each other, and from tuples. Missing values are 0:</p>
+<pre>
+c = get_pixel(pos)            # Vec4(r, g, b, a)
+rgb = c.rgb                   # Vec3 (read-only swizzle)
+bgr = c.bgr                   # Vec3(b, g, r)
+c2  = Vec4(rgb * 0.5, c.a)    # Vec4 from a Vec3 and a number
+p   = Vec3(Vec2(1, 2), 3)     # Vec3(1.0, 2.0, 3.0)
+</pre>
+
+      <h2 class="wiki-h2">Functions that work on numbers and vectors</h2>
+      <div class="wiki-members">
+        <div class="wiki-member"><div class="wiki-member-name">dot(a, b)</div><div class="wiki-member-desc">Dot product of two vectors.</div></div>
+        <div class="wiki-member"><div class="wiki-member-name">cross(a, b)</div><div class="wiki-member-desc">Cross product (a number for two Vec2, a Vec3 for two Vec3).</div></div>
+        <div class="wiki-member"><div class="wiki-member-name">length(v)</div><div class="wiki-member-desc">Length of a vector.</div></div>
+        <div class="wiki-member"><div class="wiki-member-name">step(edge, x)</div><div class="wiki-member-desc">0 below the edge, 1 from it (on numbers and vectors).</div></div>
+        <div class="wiki-member"><div class="wiki-member-name">smoothstep(edge0, edge1, x)</div><div class="wiki-member-desc">Smooth 0 to 1 transition (on numbers and vectors).</div></div>
+      </div>
+      <p class="wiki-p">Vec2 and Vec3 also read swizzles (<code>v.xy</code>, <code>v.zyx</code>, <code>c.rgb</code>) and accept a plain number in <code>+</code> and <code>-</code>.</p>
+
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('fragment_fn')">fragment()</div>
+        <div class="wiki-ref" onclick="openWikiPage('get_pixel')">get_pixel()</div>
+        <div class="wiki-ref" onclick="openWikiPage('vec3_overview')">Vec3</div>
       </div>
     `
   },
