@@ -7,6 +7,7 @@
 <script src="https://cdn.jsdelivr.net/pyodide/v0.27.0/full/pyodide.js"></script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,600;1,400&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600&family=JetBrains+Mono:ital,wght@0,400;0,600;1,400&family=Source+Code+Pro:ital,wght@0,400;0,600;1,400&family=Inter:wght@400;500;600&display=swap');
 
 *{margin:0;padding:0;box-sizing:border-box;}
 :root{
@@ -28,6 +29,20 @@
   --pink:  #f06baf;
   --font-code: 'IBM Plex Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace;
   --font-ui:   'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+
+  /* set by the Settings tab */
+  color-scheme: dark;
+  --ed-fs: 13px;            /* editor font size */
+  --ed-lh: 21px;            /* editor line height */
+  --tab-size: 4;
+  --con-fs: 12px;           /* console font size */
+  --con-bg:  #070910;
+  --con-out: #9aafc4;
+  --bdr3:    #30374d;
+  --scroll-hover: #2e3448;
+  --run-bg: #0d2318;  --run-bdr: #1d5c30;  --run-hover: #12342a;  --run-glow: #3ec97e30;
+  --stop-bg: #220f0e; --stop-bdr: #5c1e1c; --stop-hover: #3d1a18;
+  --sel: #5b9cf640;
 
   /* syntax colors */
   --sy-kw:   #c586c0;
@@ -88,10 +103,10 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--txt);font
   cursor:pointer;font:600 12px var(--font-ui);
   transition:all .12s;white-space:nowrap;line-height:1;
 }
-.btn-run{background:#0d2318;border-color:#1d5c30;color:var(--green);}
-.btn-run:hover:not(:disabled){background:#12342a;border-color:var(--green);box-shadow:0 0 10px #3ec97e30;}
-.btn-stop{background:#220f0e;border-color:#5c1e1c;color:var(--red);}
-.btn-stop:hover:not(:disabled){background:#3d1a18;border-color:var(--red);}
+.btn-run{background:var(--run-bg);border-color:var(--run-bdr);color:var(--green);}
+.btn-run:hover:not(:disabled){background:var(--run-hover);border-color:var(--green);box-shadow:0 0 10px var(--run-glow);}
+.btn-stop{background:var(--stop-bg);border-color:var(--stop-bdr);color:var(--red);}
+.btn-stop:hover:not(:disabled){background:var(--stop-hover);border-color:var(--red);}
 .btn:disabled{background:var(--bg3);border-color:var(--bdr);color:var(--txt3);cursor:not-allowed;}
 .btn-io{background:var(--bg3);border-color:var(--bdr);color:var(--txt2);}
 .btn-io:hover{background:var(--bg4);border-color:var(--txt3);color:var(--txt);}
@@ -156,7 +171,7 @@ kbd{
 }
 .subtab:hover .subtab-x,.subtab.active .subtab-x{color:var(--txt2);}
 .subtab-x:hover{background:var(--bg4);color:var(--txt);}
-.subtab-x.armed{width:auto;padding:0 5px;background:#220f0e;color:var(--red);font:600 10px var(--font-ui);}
+.subtab-x.armed{width:auto;padding:0 5px;background:var(--stop-bg);color:var(--red);font:600 10px var(--font-ui);}
 .subtab-edit,.subtab-edit:hover{cursor:text;gap:0;padding:0 12px;background:var(--bg);border-bottom-color:var(--blue);color:var(--txt);}
 .subtab-edit.invalid{border-bottom-color:var(--red);}
 .subtab-input{min-width:4ch;padding:0;border:none;outline:none;background:transparent;color:var(--txt);font:12px var(--font-code);}
@@ -172,7 +187,7 @@ kbd{
 #subtab-msg{
   display:none;position:absolute;top:calc(100% + 4px);left:0;
   max-width:min(440px,calc(100vw - 16px));padding:6px 10px;border-radius:5px;
-  background:#220f0e;border:1px solid #5c1e1c;color:var(--red);
+  background:var(--stop-bg);border:1px solid var(--stop-bdr);color:var(--red);
   font:12px/1.4 var(--font-ui);box-shadow:0 6px 18px #0009;pointer-events:none;
 }
 #subtab-msg.show{display:block;}
@@ -186,9 +201,9 @@ kbd{
 
 /* line numbers */
 #lnums{
-  width:52px;flex-shrink:0;overflow:hidden;
+  width:calc(var(--ed-fs) * 4);flex-shrink:0;overflow:hidden;
   background:var(--bg2);border-right:1px solid var(--bdr2);
-  font:13px var(--font-code);line-height:21px;color:var(--txt3);
+  font:var(--ed-fs) var(--font-code);line-height:var(--ed-lh);color:var(--txt3);
   padding:14px 10px 14px 0;text-align:right;
   user-select:none;white-space:pre;
   pointer-events:none;
@@ -202,9 +217,9 @@ kbd{
 /* highlight mirror — exact same font/padding as textarea */
 #hl{
   position:absolute;top:0;left:0;
-  font:13px var(--font-code);line-height:21px;
+  font:var(--ed-fs) var(--font-code);line-height:var(--ed-lh);
   padding:14px 16px;
-  tab-size:4;
+  tab-size:var(--tab-size);
   white-space:pre;
   overflow:visible;         /* parent #ed-inner clips; no scroll state */
   pointer-events:none;
@@ -219,21 +234,21 @@ kbd{
   background:transparent;
   color:transparent;
   caret-color:var(--txt);
-  font:13px var(--font-code);line-height:21px;
+  font:var(--ed-fs) var(--font-code);line-height:var(--ed-lh);
   padding:14px 16px;
-  tab-size:4;
+  tab-size:var(--tab-size);
   white-space:pre;
   overflow:auto;
   z-index:2;
   scrollbar-width:thin;scrollbar-color:var(--bg4) transparent;
 }
-#editor::selection{background:#5b9cf640;}
+#editor::selection{background:var(--sel);}
 
 /* ── HOVER TOOLTIP (functions / methods / classes) ── */
 #hover-tip{
   position:fixed;left:0;top:0;z-index:3000;display:none;flex-direction:column;
   max-width:min(600px,calc(100vw - 16px));min-width:140px;
-  background:var(--bg3);border:1px solid #30374d;border-radius:6px;
+  background:var(--bg3);border:1px solid var(--bdr3);border-radius:6px;
   box-shadow:0 10px 30px #000c,0 2px 6px #0008;
   font:12.5px/1.5 var(--font-ui);color:var(--txt);overflow:hidden;
 }
@@ -296,21 +311,21 @@ kbd{
 #con-clr:hover{color:var(--txt);background:var(--bg4);}
 #con-out{
   flex:1;overflow-y:auto;padding:8px 14px;
-  font:12px/1.55 var(--font-code);background:#070910;
+  font:var(--con-fs)/1.55 var(--font-code);background:var(--con-bg);
   scrollbar-width:thin;scrollbar-color:var(--bg3) transparent;
 }
 .cl{white-space:pre-wrap;word-break:break-all;padding:0 0 1px;}
-.cout{color:#9aafc4;}.cerr{color:var(--red);}.cwarn{color:var(--oran);}
+.cout{color:var(--con-out);}.cerr{color:var(--red);}.cwarn{color:var(--oran);}
 .cok{color:var(--cyan);}.csys{color:var(--txt3);font-style:italic;}
 #con-in-row{
   display:flex;align-items:center;padding:5px 14px;
-  background:#070910;border-top:1px solid var(--bdr2);
+  background:var(--con-bg);border-top:1px solid var(--bdr2);
   flex-shrink:0;gap:8px;
 }
-#con-prompt{color:var(--green);font:12px var(--font-code);user-select:none;}
+#con-prompt{color:var(--green);font:var(--con-fs) var(--font-code);user-select:none;}
 #con-in{
   flex:1;background:transparent;border:none;outline:none;
-  color:var(--txt);font:12px var(--font-code);
+  color:var(--txt);font:var(--con-fs) var(--font-code);
 }
 #con-in::placeholder{color:var(--txt3);}
 
@@ -357,7 +372,7 @@ kbd{
 #drop-overlay{
   position:fixed;inset:0;z-index:9999;
   border:3px dashed var(--blue);border-radius:10px;margin:8px;
-  background:rgba(11,13,17,.88);
+  background:color-mix(in srgb,var(--bg) 88%,transparent);
   display:none;align-items:center;justify-content:center;
   color:var(--blue);font:700 18px var(--font-ui);pointer-events:none;
 }
@@ -367,7 +382,7 @@ body.dropping #drop-overlay{display:flex;}
 ::-webkit-scrollbar{width:5px;height:5px;}
 ::-webkit-scrollbar-track{background:transparent;}
 ::-webkit-scrollbar-thumb{background:var(--bg4);border-radius:3px;}
-::-webkit-scrollbar-thumb:hover{background:#2e3448;}
+::-webkit-scrollbar-thumb:hover{background:var(--scroll-hover);}
 
 /* ── WIKI TAB ── */
 #wiki-tab{flex-direction:row;background:var(--bg);}
@@ -431,11 +446,11 @@ body.dropping #drop-overlay{display:flex;}
   font:700 10px var(--font-ui);text-transform:uppercase;letter-spacing:.06em;
   margin-bottom:10px;
 }
-.wiki-tag-function{background:#1a2a3a;color:var(--blue);border:1px solid #1e3a5a;}
-.wiki-tag-class{background:#142a20;color:var(--cyan);border:1px solid #1d4530;}
-.wiki-tag-guide{background:#231a30;color:var(--purp);border:1px solid #3a2a52;}
-.wiki-tag-method{background:#232018;color:var(--oran);border:1px solid #52420f;}
-.wiki-tag-example{background:#231818;color:var(--red);border:1px solid #4c1a1a;}
+.wiki-tag-function{background:color-mix(in srgb,var(--blue) 14%,var(--bg2));color:var(--blue);border:1px solid color-mix(in srgb,var(--blue) 32%,var(--bg2));}
+.wiki-tag-class{background:color-mix(in srgb,var(--cyan) 14%,var(--bg2));color:var(--cyan);border:1px solid color-mix(in srgb,var(--cyan) 32%,var(--bg2));}
+.wiki-tag-guide{background:color-mix(in srgb,var(--purp) 14%,var(--bg2));color:var(--purp);border:1px solid color-mix(in srgb,var(--purp) 32%,var(--bg2));}
+.wiki-tag-method{background:color-mix(in srgb,var(--oran) 14%,var(--bg2));color:var(--oran);border:1px solid color-mix(in srgb,var(--oran) 32%,var(--bg2));}
+.wiki-tag-example{background:color-mix(in srgb,var(--red) 14%,var(--bg2));color:var(--red);border:1px solid color-mix(in srgb,var(--red) 32%,var(--bg2));}
 .wiki-desc{font:14px/1.7 var(--font-ui);color:var(--txt2);margin-bottom:14px;}
 .wiki-sig{
   font:13px var(--font-code);background:var(--bg2);border:1px solid var(--bdr);
@@ -459,7 +474,7 @@ body.dropping #drop-overlay{display:flex;}
 .wiki-example{background:var(--bg2);border:1px solid var(--bdr);border-left:3px solid var(--blue);border-radius:0 6px 6px 0;padding:12px 14px;margin-bottom:12px;}
 .wiki-example-title{font:700 10px var(--font-ui);text-transform:uppercase;letter-spacing:.08em;color:var(--blue);margin-bottom:8px;}
 .wiki-example pre{font:12px var(--font-code);line-height:1.7;color:var(--txt);white-space:pre-wrap;}
-.wiki-note{background:#1c1d24;border:1px solid var(--bdr);border-left:3px solid var(--oran);border-radius:0 6px 6px 0;padding:10px 14px;margin-bottom:12px;font:12px/1.6 var(--font-ui);color:var(--txt2);}
+.wiki-note{background:color-mix(in srgb,var(--oran) 6%,var(--bg2));border:1px solid var(--bdr);border-left:3px solid var(--oran);border-radius:0 6px 6px 0;padding:10px 14px;margin-bottom:12px;font:12px/1.6 var(--font-ui);color:var(--txt2);}
 .wiki-note b{color:var(--oran);}
 .wiki-ref-list{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;}
 .wiki-ref{
@@ -480,7 +495,82 @@ body.dropping #drop-overlay{display:flex;}
 .wiki-member-name{font:12px var(--font-code);color:var(--cyan);margin-bottom:2px;}
 .wiki-member-desc{font:11px var(--font-ui);color:var(--txt3);line-height:1.4;}
 .wiki-section-index{display:flex;flex-direction:column;gap:6px;}
+
+/* ── SETTINGS TAB ── */
+#settings-tab{background:var(--bg);}
+#set-scroll{flex:1;overflow-y:auto;min-width:0;padding:28px 36px 64px;scrollbar-width:thin;scrollbar-color:var(--bg4) transparent;}
+#set-page{max-width:1100px;margin:0 auto;}
+.set-head{display:flex;align-items:flex-end;gap:16px;margin-bottom:22px;flex-wrap:wrap;}
+.set-head-txt{flex:1;min-width:220px;}
+.set-title{font:700 26px var(--font-ui);color:var(--txt);line-height:1.25;}
+.set-sub{font:12px var(--font-ui);color:var(--txt3);margin-top:4px;}
+.set-cols{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:24px;align-items:start;}
+.set-side{position:sticky;top:0;min-width:0;}
+.set-card{background:var(--bg2);border:1px solid var(--bdr);border-radius:8px;margin-bottom:16px;overflow:hidden;}
+.set-card-h{display:flex;align-items:center;gap:10px;padding:10px 16px;font:600 11px var(--font-ui);letter-spacing:.08em;text-transform:uppercase;color:var(--txt2);border-bottom:1px solid var(--bdr2);}
+.set-card-h .set-grow{flex:1;}
+.set-row{display:flex;align-items:center;gap:16px;padding:12px 16px;border-bottom:1px solid var(--bdr2);}
+.set-row:last-child{border-bottom:none;}
+.set-row.off{opacity:.45;}
+.set-lab{flex:1;min-width:0;}
+.set-name{font:500 13px var(--font-ui);color:var(--txt);}
+.set-hint{font:11.5px/1.45 var(--font-ui);color:var(--txt2);margin-top:2px;}
+.set-ctl{flex-shrink:0;display:flex;align-items:center;gap:8px;}
+.set-val{min-width:44px;text-align:right;font:12px var(--font-code);color:var(--txt2);}
+.set-input{background:var(--bg);border:1px solid var(--bdr);border-radius:5px;color:var(--txt);font:12px var(--font-code);padding:5px 8px;outline:none;transition:border-color .12s;}
+.set-input:focus{border-color:var(--blue);}
+.set-input:disabled{cursor:not-allowed;}
+input.set-input[type=number]{width:64px;}
+select.set-input{max-width:200px;cursor:pointer;}
+input.set-input.wide{width:210px;}
+.set-ctl input[type=range]{width:150px;accent-color:var(--blue);cursor:pointer;}
+.set-switch{position:relative;display:inline-block;width:38px;height:22px;flex-shrink:0;cursor:pointer;}
+.set-switch input{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer;z-index:1;}
+.set-switch span{position:absolute;inset:0;border-radius:11px;background:var(--bg4);border:1px solid var(--bdr);transition:background .15s,border-color .15s;}
+.set-switch span::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--txt2);transition:transform .15s,background .15s;}
+.set-switch input:checked + span{background:var(--blue);border-color:var(--blue);}
+.set-switch input:checked + span::after{transform:translateX(16px);background:var(--bg);}
+.set-switch input:focus-visible + span{outline:2px solid var(--blue);outline-offset:2px;}
+.set-btn{background:var(--bg3);border:1px solid var(--bdr);border-radius:5px;color:var(--txt2);font:600 11px var(--font-ui);padding:5px 12px;cursor:pointer;transition:all .12s;white-space:nowrap;}
+.set-btn:hover{background:var(--bg4);color:var(--txt);border-color:var(--txt3);}
+.set-btn.armed{border-color:var(--red);color:var(--red);}
+.set-btn:disabled{opacity:.4;cursor:default;}
+.set-themes{display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:10px;padding:14px 16px;}
+.set-theme{border:1px solid var(--bdr);border-radius:8px;cursor:pointer;overflow:hidden;background:var(--bg3);transition:border-color .12s,transform .12s;text-align:left;padding:0;font:inherit;color:inherit;}
+.set-theme:hover{border-color:var(--txt3);}
+.set-theme.active{border-color:var(--blue);box-shadow:0 0 0 1px var(--blue);}
+.set-theme-sw{display:flex;height:46px;}
+.set-theme-sw i{flex:1;display:block;}
+.set-theme-sw .big{flex:3;}
+.set-theme-nm{padding:6px 10px;font:500 12px var(--font-ui);color:var(--txt);display:flex;justify-content:space-between;gap:6px;align-items:center;}
+.set-theme-nm small{font:10px var(--font-ui);color:var(--txt3);}
+.set-colors{padding:6px 16px 14px;}
+.set-cgroup{font:600 10px var(--font-ui);letter-spacing:.08em;text-transform:uppercase;color:var(--txt3);margin:14px 0 8px;}
+.set-cgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:6px 14px;}
+.set-color{display:flex;align-items:center;gap:9px;padding:3px 0;cursor:pointer;min-width:0;}
+.set-color input[type=color]{width:30px;height:24px;padding:0;border:1px solid var(--bdr);border-radius:4px;background:none;cursor:pointer;flex-shrink:0;}
+.set-color .nm{flex:1;min-width:0;font:12px var(--font-ui);color:var(--txt);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.set-color .hx{font:10.5px var(--font-code);color:var(--txt3);}
+.set-color.mod .nm::after{content:" \25CF";color:var(--blue);font-size:9px;}
+.set-prev-body{display:flex;background:var(--bg);overflow:hidden;}
+.set-prev-ln{flex-shrink:0;width:calc(var(--ed-fs)*3);background:var(--bg2);border-right:1px solid var(--bdr2);font:var(--ed-fs) var(--font-code);line-height:var(--ed-lh);color:var(--txt3);padding:12px 8px 12px 0;text-align:right;white-space:pre;user-select:none;}
+.set-prev-code{flex:1;min-width:0;margin:0;overflow-x:auto;font:var(--ed-fs) var(--font-code);line-height:var(--ed-lh);padding:12px 14px;tab-size:var(--tab-size);white-space:pre;color:var(--txt);scrollbar-width:thin;scrollbar-color:var(--bg4) transparent;}
+.set-prev-foot{padding:8px 14px;border-top:1px solid var(--bdr2);font:11px var(--font-ui);color:var(--txt3);}
+body.no-lnums #lnums{display:none;}
+body.no-lnums .set-prev-ln{display:none;}
+@media (max-width:900px){
+  #set-scroll{padding:18px 14px 48px;}
+  .set-cols{grid-template-columns:minmax(0,1fr);}
+  .set-side{position:static;order:-1;}
+  .set-row{flex-wrap:wrap;}
+  .set-ctl{width:100%;justify-content:flex-start;}
+}
+
+/* the keyboard hint in the header only shows when there is room for it on one line */
+#hint{white-space:nowrap;}
+@media (max-width:1560px){#hint{display:none !important;}}
 </style>
+<script>try{var _t=JSON.parse(localStorage.getItem('bowpy_theme_css')||'null');if(_t){var _s=document.documentElement.style;for(var _k in _t)_s.setProperty(_k,_t[_k]);}}catch(e){}</script>
 </head>
 <body>
 <div id="app">
@@ -492,6 +582,7 @@ body.dropping #drop-overlay{display:flex;}
       <button class="tab-btn"        id="tab-screen" onclick="switchTab('screen')">Screen</button>
       <button class="tab-btn"        id="tab-assets" onclick="switchTab('assets')">Assets</button>
       <button class="tab-btn"        id="tab-wiki"   onclick="switchTab('wiki')">Wiki</button>
+      <button class="tab-btn"        id="tab-settings" onclick="switchTab('settings')">Settings</button>
     </div>
     <div class="sep"></div>
     <div class="ctrl">
@@ -551,6 +642,10 @@ body.dropping #drop-overlay{display:flex;}
       <span id="asset-bar-hint">Drag &amp; drop images/audio anywhere — click an asset to copy its Python usage</span>
     </div>
     <div id="asset-grid"></div>
+  </div>
+
+  <div class="tab-view" id="settings-tab">
+    <div id="set-scroll"><div id="set-page"></div></div>
   </div>
 
   <div class="tab-view" id="wiki-tab">
@@ -2723,6 +2818,177 @@ const $hl     = document.getElementById('hl');
 const $lnums  = document.getElementById('lnums');
 const $conOut = document.getElementById('con-out');
 const $conIn  = document.getElementById('con-in');
+
+// ══════════════════════════════════════════════════════════════
+//  Settings: the data (defaults, fonts, colour themes) and the browser copy of the choices.
+//  The Settings tab (further down) edits _bpSet; _bpApplySettings() makes it visible.
+// ══════════════════════════════════════════════════════════════
+const _SET_KEY = 'bowpy_settings';          // the choices, as JSON
+const _SET_THEME_KEY = 'bowpy_theme_css';   // the CSS variables of the current look, applied before the page is drawn
+const _SET_DEFAULTS = Object.freeze({
+  theme: 'bowpy-dark', colors: {},
+  tabSize: 4, fontCode: 'plex', fontCodeCustom: '', fontSize: 13, lineHeight: 1.6, fontUi: 'plex',
+  lineNumbers: true, syntax: true,
+  autoBrackets: true, autoQuotes: true, autoIndent: true,
+  tooltips: true, tooltipDelay: 300,
+  conFontSize: 12, clearConsole: true,
+});
+const _SET_FONTS_CODE = {
+  plex:      { label: 'IBM Plex Mono (default)', css: "'IBM Plex Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace" },
+  fira:      { label: 'Fira Code', css: "'Fira Code', 'IBM Plex Mono', Consolas, monospace" },
+  jetbrains: { label: 'JetBrains Mono', css: "'JetBrains Mono', 'IBM Plex Mono', Consolas, monospace" },
+  source:    { label: 'Source Code Pro', css: "'Source Code Pro', 'IBM Plex Mono', Consolas, monospace" },
+  cascadia:  { label: 'Cascadia Code', css: "'Cascadia Code', 'Cascadia Mono', Consolas, monospace" },
+  consolas:  { label: 'Consolas', css: "Consolas, 'Courier New', monospace" },
+  system:    { label: 'System monospace', css: "ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" },
+  courier:   { label: 'Courier New', css: "'Courier New', Courier, monospace" },
+  custom:    { label: 'Other font…', css: '' },
+};
+const _SET_FONTS_UI = {
+  plex:      { label: 'IBM Plex Sans (default)', css: "'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif" },
+  system:    { label: 'System font', css: "system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" },
+  inter:     { label: 'Inter', css: "'Inter', 'IBM Plex Sans', system-ui, sans-serif" },
+  helvetica: { label: 'Helvetica / Arial', css: "'Helvetica Neue', Helvetica, Arial, sans-serif" },
+  serif:     { label: 'Serif', css: "Georgia, 'Times New Roman', serif" },
+  mono:      { label: 'Monospace', css: "'IBM Plex Mono', Consolas, monospace" },
+};
+
+// every colour a theme sets (name of the CSS variable without the --), in the order the colour pickers show them
+const _SET_COLOR_GROUPS = [
+  ['Backgrounds', [['bg', 'Editor and page'], ['bg2', 'Header and panels'], ['bg3', 'Raised surfaces'], ['bg4', 'Hover and scrollbars'], ['con-bg', 'Console']]],
+  ['Lines', [['bdr', 'Borders'], ['bdr2', 'Soft borders']]],
+  ['Text', [['txt', 'Text'], ['txt2', 'Secondary text'], ['txt3', 'Muted text and line numbers']]],
+  ['Accents', [['blue', 'Accent (active tab, links)'], ['green', 'Run and success'], ['red', 'Stop and errors'], ['oran', 'Warnings'], ['cyan', 'Cyan'], ['purp', 'Purple'], ['pink', 'Pink']]],
+  ['Code', [['sy-kw', 'Keywords'], ['sy-bi', 'Built-ins and types'], ['sy-fn', 'Functions'], ['sy-cls', 'Classes'], ['sy-self', 'self and parameters'], ['sy-num', 'Numbers'], ['sy-str', 'Strings'], ['sy-cmt', 'Comments'], ['sy-dec', 'Decorators'], ['sy-op', 'Operators'], ['sy-pun', 'Punctuation']]],
+];
+const _SET_COLOR_KEYS = new Set(_SET_COLOR_GROUPS.flatMap(g => g[1].map(c => c[0])));
+
+// a theme lists every colour; the run/stop/selection colours that are not listed are worked out from the others
+function _setTheme(id, name, light, v, extra) { return { id, name, light, v, extra: extra || null }; }
+const _SET_THEMES = [
+  _setTheme('bowpy-dark', 'BowPy Dark', false, {
+    bg: '#0b0d11', bg2: '#12151c', bg3: '#1a1e29', bg4: '#222636', bdr: '#252a38', bdr2: '#1e2230', txt: '#c8d0e8', txt2: '#6a738f', txt3: '#3c4255',
+    blue: '#5b9cf6', cyan: '#4ec9b0', green: '#3ec97e', red: '#f47067', oran: '#e5b567', purp: '#b48ef4', pink: '#f06baf',
+    'sy-kw': '#c586c0', 'sy-kw2': '#569cd6', 'sy-fn': '#dcdcaa', 'sy-cls': '#4ec9b0', 'sy-num': '#b5cea8', 'sy-str': '#ce9178', 'sy-cmt': '#6a737d',
+    'sy-dec': '#5b9cf6', 'sy-self': '#9cdcfe', 'sy-op': '#d4d4d4', 'sy-bi': '#4ec9b0', 'sy-pun': '#808080', 'con-bg': '#070910',
+  }, { 'con-out': '#9aafc4', bdr3: '#30374d', 'scroll-hover': '#2e3448', 'run-bg': '#0d2318', 'run-bdr': '#1d5c30', 'run-hover': '#12342a', 'run-glow': '#3ec97e30',
+       'stop-bg': '#220f0e', 'stop-bdr': '#5c1e1c', 'stop-hover': '#3d1a18', sel: '#5b9cf640' }),
+  _setTheme('bowpy-light', 'BowPy Light', true, {
+    bg: '#fbfbfd', bg2: '#f0f2f6', bg3: '#e6e9f0', bg4: '#d8dce6', bdr: '#cdd2de', bdr2: '#dde1ea', txt: '#1f2430', txt2: '#555f75', txt3: '#8a93a6',
+    blue: '#1f6feb', cyan: '#0e8a74', green: '#1a8a4a', red: '#d1392f', oran: '#a66300', purp: '#7c4dcc', pink: '#c2185b',
+    'sy-kw': '#af00db', 'sy-kw2': '#0000ff', 'sy-fn': '#795e26', 'sy-cls': '#267f99', 'sy-num': '#098658', 'sy-str': '#a31515', 'sy-cmt': '#6a737d',
+    'sy-dec': '#0070c1', 'sy-self': '#001080', 'sy-op': '#333b4d', 'sy-bi': '#267f99', 'sy-pun': '#6e7681', 'con-bg': '#eceff4',
+  }),
+  _setTheme('midnight', 'Midnight', false, {
+    bg: '#070b17', bg2: '#0c1226', bg3: '#131b36', bg4: '#1b2547', bdr: '#232e55', bdr2: '#1a2342', txt: '#d6e0ff', txt2: '#7a89b8', txt3: '#46537f',
+    blue: '#6aa8ff', cyan: '#4fe3d2', green: '#4ade80', red: '#ff6b81', oran: '#ffc16a', purp: '#b69cff', pink: '#ff7ac6',
+    'sy-kw': '#c792ea', 'sy-kw2': '#82aaff', 'sy-fn': '#ffcb6b', 'sy-cls': '#4fe3d2', 'sy-num': '#f78c6c', 'sy-str': '#c3e88d', 'sy-cmt': '#5c6a9c',
+    'sy-dec': '#6aa8ff', 'sy-self': '#89ddff', 'sy-op': '#d6e0ff', 'sy-bi': '#4fe3d2', 'sy-pun': '#7a89b8', 'con-bg': '#050813',
+  }),
+  _setTheme('monokai', 'Monokai', false, {
+    bg: '#1e1f1c', bg2: '#272822', bg3: '#2f302a', bg4: '#3a3b33', bdr: '#3e3d32', bdr2: '#33342b', txt: '#f8f8f2', txt2: '#a6a68f', txt3: '#75715e',
+    blue: '#66d9ef', cyan: '#a1efe4', green: '#a6e22e', red: '#f92672', oran: '#fd971f', purp: '#ae81ff', pink: '#fc5fa3',
+    'sy-kw': '#f92672', 'sy-kw2': '#66d9ef', 'sy-fn': '#a6e22e', 'sy-cls': '#a6e22e', 'sy-num': '#ae81ff', 'sy-str': '#e6db74', 'sy-cmt': '#75715e',
+    'sy-dec': '#a6e22e', 'sy-self': '#fd971f', 'sy-op': '#f8f8f2', 'sy-bi': '#66d9ef', 'sy-pun': '#b8b8a8', 'con-bg': '#171814',
+  }),
+  _setTheme('dracula', 'Dracula', false, {
+    bg: '#1e1f29', bg2: '#282a36', bg3: '#2f3241', bg4: '#3a3d50', bdr: '#44475a', bdr2: '#363948', txt: '#f8f8f2', txt2: '#a4a8c4', txt3: '#6272a4',
+    blue: '#bd93f9', cyan: '#8be9fd', green: '#50fa7b', red: '#ff5555', oran: '#ffb86c', purp: '#bd93f9', pink: '#ff79c6',
+    'sy-kw': '#ff79c6', 'sy-kw2': '#8be9fd', 'sy-fn': '#50fa7b', 'sy-cls': '#8be9fd', 'sy-num': '#bd93f9', 'sy-str': '#f1fa8c', 'sy-cmt': '#6272a4',
+    'sy-dec': '#50fa7b', 'sy-self': '#ffb86c', 'sy-op': '#f8f8f2', 'sy-bi': '#8be9fd', 'sy-pun': '#9aa0c0', 'con-bg': '#191a23',
+  }),
+  _setTheme('nord', 'Nord', false, {
+    bg: '#2b303b', bg2: '#323845', bg3: '#3b4252', bg4: '#434c5e', bdr: '#4c566a', bdr2: '#3b4252', txt: '#eceff4', txt2: '#aab3c5', txt3: '#6b7790',
+    blue: '#88c0d0', cyan: '#8fbcbb', green: '#a3be8c', red: '#bf616a', oran: '#d08770', purp: '#b48ead', pink: '#d58cc1',
+    'sy-kw': '#81a1c1', 'sy-kw2': '#5e81ac', 'sy-fn': '#88c0d0', 'sy-cls': '#8fbcbb', 'sy-num': '#b48ead', 'sy-str': '#a3be8c', 'sy-cmt': '#616e88',
+    'sy-dec': '#d08770', 'sy-self': '#d8dee9', 'sy-op': '#81a1c1', 'sy-bi': '#88c0d0', 'sy-pun': '#9aa5b8', 'con-bg': '#252a33',
+  }),
+  _setTheme('solarized-dark', 'Solarized Dark', false, {
+    bg: '#002b36', bg2: '#073642', bg3: '#0d3f4b', bg4: '#17505d', bdr: '#1f5663', bdr2: '#0f4350', txt: '#93a1a1', txt2: '#7a8f93', txt3: '#586e75',
+    blue: '#268bd2', cyan: '#2aa198', green: '#859900', red: '#dc322f', oran: '#b58900', purp: '#6c71c4', pink: '#d33682',
+    'sy-kw': '#859900', 'sy-kw2': '#cb4b16', 'sy-fn': '#268bd2', 'sy-cls': '#b58900', 'sy-num': '#d33682', 'sy-str': '#2aa198', 'sy-cmt': '#586e75',
+    'sy-dec': '#6c71c4', 'sy-self': '#839496', 'sy-op': '#93a1a1', 'sy-bi': '#2aa198', 'sy-pun': '#657b83', 'con-bg': '#00252f',
+  }),
+  _setTheme('solarized-light', 'Solarized Light', true, {
+    bg: '#fdf6e3', bg2: '#eee8d5', bg3: '#e5dfcb', bg4: '#d9d2bc', bdr: '#d3cbb4', bdr2: '#e0d9c3', txt: '#586e75', txt2: '#657b83', txt3: '#93a1a1',
+    blue: '#268bd2', cyan: '#2aa198', green: '#859900', red: '#dc322f', oran: '#b58900', purp: '#6c71c4', pink: '#d33682',
+    'sy-kw': '#859900', 'sy-kw2': '#cb4b16', 'sy-fn': '#268bd2', 'sy-cls': '#b58900', 'sy-num': '#d33682', 'sy-str': '#2aa198', 'sy-cmt': '#93a1a1',
+    'sy-dec': '#6c71c4', 'sy-self': '#657b83', 'sy-op': '#586e75', 'sy-bi': '#2aa198', 'sy-pun': '#839496', 'con-bg': '#f5eed9',
+  }),
+  _setTheme('high-contrast', 'High Contrast', false, {
+    bg: '#000000', bg2: '#0a0a0a', bg3: '#141414', bg4: '#222222', bdr: '#8a8a8a', bdr2: '#4a4a4a', txt: '#ffffff', txt2: '#d0d0d0', txt3: '#9a9a9a',
+    blue: '#4db2ff', cyan: '#00e5ff', green: '#00ff7f', red: '#ff5252', oran: '#ffd400', purp: '#d58cff', pink: '#ff6bd6',
+    'sy-kw': '#ff80ff', 'sy-kw2': '#4db2ff', 'sy-fn': '#ffe066', 'sy-cls': '#00e5ff', 'sy-num': '#9fff9f', 'sy-str': '#ffb27a', 'sy-cmt': '#a0a0a0',
+    'sy-dec': '#4db2ff', 'sy-self': '#7fdbff', 'sy-op': '#ffffff', 'sy-bi': '#00e5ff', 'sy-pun': '#cfcfcf', 'con-bg': '#000000',
+  }),
+];
+const _setThemeById = id => _SET_THEMES.find(t => t.id === id) || _SET_THEMES[0];
+
+function _setHexParse(h) {
+  h = String(h || '').trim().replace(/^#/, '');
+  if (h.length === 3) h = h.replace(/./g, c => c + c);
+  if (!/^[0-9a-fA-F]{6}$/.test(h)) return null;
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+}
+const _setHex = a => '#' + a.map(n => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, '0')).join('');
+function _setMix(a, b, t) {   // t = 0 gives a, t = 1 gives b
+  const x = _setHexParse(a), y = _setHexParse(b);
+  if (!x || !y) return a;
+  return _setHex(x.map((c, i) => c + (y[i] - c) * t));
+}
+
+// theme + the user's own colours -> { '--bg': '#0b0d11', ... , 'color-scheme': 'dark' }
+function _bpResolveTheme(set) {
+  const th = _setThemeById(set.theme);
+  const v = Object.assign({}, th.v);
+  let custom = false;
+  for (const k in set.colors) if (_SET_COLOR_KEYS.has(k) && _setHexParse(set.colors[k])) { v[k] = set.colors[k]; custom = true; }
+  const x = (th.extra && !custom) ? Object.assign({}, th.extra) : {
+    'con-out': _setMix(v.txt, v.blue, 0.1),
+    bdr3: _setMix(v.bdr, v.txt3, 0.5), 'scroll-hover': _setMix(v.bg4, v.txt3, 0.5),
+    'run-bg': _setMix(v.bg2, v.green, 0.12), 'run-bdr': _setMix(v.bg2, v.green, 0.4), 'run-hover': _setMix(v.bg2, v.green, 0.22), 'run-glow': v.green + '30',
+    'stop-bg': _setMix(v.bg2, v.red, 0.12), 'stop-bdr': _setMix(v.bg2, v.red, 0.4), 'stop-hover': _setMix(v.bg2, v.red, 0.22),
+    sel: v.blue + '40',
+  };
+  const out = {};
+  for (const k in v) out['--' + k] = v[k];
+  for (const k in x) out['--' + k] = x[k];
+  out['color-scheme'] = th.light ? 'light' : 'dark';
+  return out;
+}
+
+function _setClampNum(v, lo, hi, def, step) {
+  v = Number(v);
+  if (!isFinite(v)) return def;
+  v = Math.max(lo, Math.min(hi, v));
+  return step ? +(Math.round(v / step) * step).toFixed(4) : v;
+}
+function _bpValidateSettings(raw) {
+  const d = _SET_DEFAULTS, o = Object.assign({}, d, { colors: {} });
+  if (!raw || typeof raw !== 'object') return o;
+  const bool = k => { if (typeof raw[k] === 'boolean') o[k] = raw[k]; };
+  ['lineNumbers', 'syntax', 'autoBrackets', 'autoQuotes', 'autoIndent', 'tooltips', 'clearConsole'].forEach(bool);
+  if (typeof raw.theme === 'string' && _SET_THEMES.some(t => t.id === raw.theme)) o.theme = raw.theme;
+  if (raw.colors && typeof raw.colors === 'object') for (const k of Object.keys(raw.colors)) if (_SET_COLOR_KEYS.has(k) && _setHexParse(raw.colors[k])) o.colors[k] = _setHex(_setHexParse(raw.colors[k]));
+  o.tabSize = Math.round(_setClampNum(raw.tabSize, 1, 8, d.tabSize));
+  o.fontSize = Math.round(_setClampNum(raw.fontSize, 9, 32, d.fontSize));
+  o.lineHeight = _setClampNum(raw.lineHeight, 1.1, 2.4, d.lineHeight, 0.05);
+  o.tooltipDelay = Math.round(_setClampNum(raw.tooltipDelay, 0, 2000, d.tooltipDelay, 50));
+  o.conFontSize = Math.round(_setClampNum(raw.conFontSize, 9, 24, d.conFontSize));
+  if (typeof raw.fontCode === 'string' && _SET_FONTS_CODE[raw.fontCode]) o.fontCode = raw.fontCode;
+  if (typeof raw.fontCodeCustom === 'string') o.fontCodeCustom = raw.fontCodeCustom.slice(0, 120);
+  if (typeof raw.fontUi === 'string' && _SET_FONTS_UI[raw.fontUi]) o.fontUi = raw.fontUi;
+  return o;
+}
+function _bpLoadSettings() {
+  let raw = null;
+  try { raw = JSON.parse(localStorage.getItem(_SET_KEY) || 'null'); } catch (e) { raw = null; }
+  return _bpValidateSettings(raw);
+}
+function _bpSaveSettings() {
+  try { localStorage.setItem(_SET_KEY, JSON.stringify(_bpSet)); } catch (e) {}
+}
+const _bpSet = _bpLoadSettings();
 const $runBtn = document.getElementById('run-btn');
 const $stpBtn = document.getElementById('stop-btn');
 const $canvas = document.getElementById('screen');
@@ -2953,6 +3219,17 @@ function _addAsset(file) {
     if (isText) reader.readAsText(file);
     else reader.readAsDataURL(file);
   });
+}
+
+// remove every asset (the Assets tab and the copy kept in the browser)
+function _bpClearAssets() {
+  _bpAssets.clear();
+  try {
+    const dead = [];
+    for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && k.startsWith('bpa:')) dead.push(k); }
+    dead.forEach(k => localStorage.removeItem(k));
+  } catch (e) {}
+  _renderAssets();
 }
 
 function removeAsset(name) {
@@ -3262,7 +3539,7 @@ function syncEditor() {
   $lnums.textContent = ln;
 
   // highlight — add trailing space so last empty line has height
-  $hl.innerHTML = highlight(code + ' ').replace(/\n$/, '');
+  $hl.innerHTML = (_bpSet.syntax ? highlight(code + ' ') : esc(code + ' ')).replace(/\n$/, '');
 
   // sync scroll
   syncHLScroll();
@@ -3614,11 +3891,12 @@ $ed.addEventListener('keydown', e => {
     e.preventDefault(); stopCode(); return;
   }
 
-  // ── Tab key: indent 4 spaces
+  // ── Tab key: indent by the tab size
+  const TAB = ' '.repeat(_bpSet.tabSize);
   if (e.key === 'Tab') {
     e.preventDefault();
     if (!sel) {
-      insert('    ', ss, se);
+      insert(TAB, ss, se);
     } else {
       // extend start back to beginning of the first selected line
       const lineStart = val.lastIndexOf('\n', ss - 1) + 1;
@@ -3626,8 +3904,8 @@ $ed.addEventListener('keydown', e => {
       const after     = val.slice(se);
       const mid       = val.slice(lineStart, se);
       const indented  = e.shiftKey
-        ? mid.replace(/^ {1,4}/gm, '')
-        : mid.replace(/^/gm, '    ');
+        ? mid.replace(new RegExp('^ {1,' + _bpSet.tabSize + '}', 'gm'), '')
+        : mid.replace(/^/gm, TAB);
       $ed.value = before + indented + after;
       $ed.selectionStart = lineStart;
       $ed.selectionEnd   = lineStart + indented.length;
@@ -3637,7 +3915,7 @@ $ed.addEventListener('keydown', e => {
   }
 
   // ── Enter: smart auto-indent
-  if (e.key === 'Enter' && !e.ctrlKey) {
+  if (e.key === 'Enter' && !e.ctrlKey && _bpSet.autoIndent) {
     e.preventDefault();
 
     // find current line
@@ -3649,7 +3927,7 @@ $ed.addEventListener('keydown', e => {
 
     // increase indent if line ends with :
     const stripped = currentLine.trimEnd();
-    const extraIndent = stripped.endsWith(':') ? '    ' : '';
+    const extraIndent = stripped.endsWith(':') ? TAB : '';
 
     // if cursor is inside brackets/parens/braces, add extra indent
     // (simple heuristic: count unmatched opens)
@@ -3659,7 +3937,7 @@ $ed.addEventListener('keydown', e => {
       if ('([{'.includes(c)) brackets++;
       else if (')]}'.includes(c)) brackets--;
     }
-    const bracketIndent = brackets > 0 && !extraIndent ? '    ' : '';
+    const bracketIndent = brackets > 0 && !extraIndent ? TAB : '';
 
     const newIndent = baseIndent + extraIndent + bracketIndent;
     insert('\n' + newIndent, ss, se);
@@ -3667,18 +3945,21 @@ $ed.addEventListener('keydown', e => {
   }
 
   // ── Backspace: delete 4 spaces as one if only spaces before cursor on line
-  if (e.key === 'Backspace' && !sel) {
+  if (e.key === 'Backspace' && !sel && _bpSet.autoIndent) {
     const lineStart = val.lastIndexOf('\n', ss - 1) + 1;
     const beforeCursor = val.slice(lineStart, ss);
-    if (beforeCursor.length > 0 && beforeCursor.trimEnd() === '' && beforeCursor.length % 4 === 0) {
+    const tsz = _bpSet.tabSize;
+    if (beforeCursor.length > 0 && beforeCursor.trimEnd() === '' && beforeCursor.length % tsz === 0) {
       e.preventDefault();
-      insert('', ss - 4, ss);
+      insert('', ss - tsz, ss);
       return;
     }
   }
 
   // ── Auto-close pairs: () [] {} "" ''
-  const pairs = { '(':')', '[':']', '{':'}', '"':'"', "'":"'" };
+  const pairs = {};
+  if (_bpSet.autoBrackets) Object.assign(pairs, { '(':')', '[':']', '{':'}' });
+  if (_bpSet.autoQuotes) Object.assign(pairs, { '"':'"', "'":"'" });
   if (pairs[e.key]) {
     if (sel) {
       // surround selection with the pair — works for brackets AND quotes
@@ -3700,8 +3981,8 @@ $ed.addEventListener('keydown', e => {
   }
 
   // ── Skip closing char if already there
-  const closers = new Set([')', ']', '}']);
-  if ((closers.has(e.key) || e.key === '"' || e.key === "'") && !sel) {
+  const closers = new Set(_bpSet.autoBrackets ? [')', ']', '}'] : []);
+  if ((closers.has(e.key) || (_bpSet.autoQuotes && (e.key === '"' || e.key === "'"))) && !sel) {
     if (val[ss] === e.key) {
       e.preventDefault();
       $ed.selectionStart = $ed.selectionEnd = ss + 1;
@@ -3960,6 +4241,84 @@ function _bpIsMobile() {
   return false;
 }
 
+// Browser services for the game: the clipboard and colour names. Self-contained: it is also serialised into exported games.
+function _bpHostFactory() {
+  const clip = { text: '', pending: null, want: false, busy: false, fails: 0, last: 0, gen: 0 };
+  function legacyCopy(text) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.setAttribute('readonly', '');
+      ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+      document.body.appendChild(ta);
+      const prev = document.activeElement;
+      ta.select(); ta.setSelectionRange(0, text.length);
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      if (prev && prev.focus) prev.focus();
+      return !!ok;
+    } catch (e) { return false; }
+  }
+  // write the text that is waiting; inside a click or key press every browser allows it
+  function flush(inGesture) {
+    if (clip.pending === null) return;
+    const text = clip.pending;
+    if (inGesture && legacyCopy(text)) { if (clip.pending === text) clip.pending = null; return; }
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => { if (clip.pending === text) clip.pending = null; }, () => {});
+      }
+    } catch (e) {}
+  }
+  function refresh() {
+    try {
+      if (!navigator.clipboard || !navigator.clipboard.readText) return;
+      if (clip.busy || clip.fails >= 3) return;
+      const now = Date.now();
+      if (now - clip.last < 400) return;
+      clip.last = now; clip.busy = true;
+      const gen = clip.gen;
+      navigator.clipboard.readText().then(
+        t => { clip.busy = false; clip.fails = 0; if (clip.pending === null && gen === clip.gen) clip.text = String(t); },
+        () => { clip.busy = false; clip.fails++; });
+    } catch (e) { clip.busy = false; clip.fails++; }
+  }
+  function clipWrite(text) { clip.text = text; clip.gen++; clip.pending = text; flush(false); }
+  function clipRead() { clip.want = true; refresh(); return clip.text; }
+  function onGesture(e) {
+    flush(true);
+    if (clip.want && (e.type === 'pointerup' || e.type === 'touchend')) { clip.fails = 0; refresh(); }
+  }
+  ['pointerup', 'touchend', 'click', 'keydown'].forEach(ev => window.addEventListener(ev, onGesture, true));
+  window.addEventListener('focus', () => { clip.fails = 0; if (clip.want) refresh(); });
+  document.addEventListener('paste', e => {
+    try {
+      const t = e.clipboardData && e.clipboardData.getData('text/plain');
+      if (typeof t === 'string') { clip.text = t; clip.gen++; }
+    } catch (err) {}
+  }, true);
+
+  // a colour name or CSS colour as [r, g, b, a] (a from 0 to 255), or null when the browser does not know it
+  let pctx = null;
+  function parseColor(str) {
+    try {
+      if (!pctx) {
+        const c = document.createElement('canvas'); c.width = c.height = 1;
+        pctx = c.getContext('2d', { willReadFrequently: true });
+      }
+      pctx.fillStyle = '#010203'; pctx.fillStyle = str; const a = pctx.fillStyle;
+      pctx.fillStyle = '#fefdfc'; pctx.fillStyle = str; const b = pctx.fillStyle;
+      if (a !== b) return null;
+      pctx.globalCompositeOperation = 'copy';
+      pctx.fillRect(0, 0, 1, 1);
+      pctx.globalCompositeOperation = 'source-over';
+      const d = pctx.getImageData(0, 0, 1, 1).data;
+      return [d[0], d[1], d[2], d[3]];
+    } catch (e) { return null; }
+  }
+  return { clipWrite, clipRead, parseColor, _clip: clip };
+}
+
+const _bpHost = _bpHostFactory();
 window._py = {
   sw()  { return $canvas.width; },  sh()  { return $canvas.height; },
   fps() { return fpsSmooth; },      dt()  { return deltaTime; },
@@ -4249,6 +4608,9 @@ window._py = {
   surface_w(sfc) { return sfc ? sfc._canvas.width  : 0; },
   surface_h(sfc) { return sfc ? sfc._canvas.height : 0; },
   is_mobile() { return _bpIsMobile(); },
+  clip_write(t) { _bpHost.clipWrite(String(t)); },
+  clip_read() { return _bpHost.clipRead(); },
+  color_rgba(c) { return _bpHost.parseColor(String(c)); },
   // ── File I/O (IDE) ────────────────────────────────────────────
   file_write(name, content) {
     const n = String(name);
@@ -4284,8 +4646,29 @@ window._py = {
 //  Python prelude
 // ══════════════════════════════════════════════════════════════
 const PRELUDE = `
-import sys, js, math, random, time as _tm, json, re, colorsys, copy
+import sys, js, math, random as _rnd, time as _tm, json, re, colorsys, copy
 from math import *
+from random import *      # the whole random module: randint(1, 6), uniform(0, 1), choice(seq), shuffle(seq), seed(n) ...
+
+
+class _RandomFn:
+    """random() -> a random float from 0.0 up to (not including) 1.0.
+
+    random is also the whole random module, so random.randint(1, 6) and random.uniform(0, 1)
+    work too, and so do the same functions without the prefix: randint(1, 6), uniform(0, 1).
+    """
+    __slots__ = ()
+    def __call__(self):
+        return _rnd.random()
+    def __getattr__(self, name):
+        return getattr(_rnd, name)
+    def __dir__(self):
+        return dir(_rnd)
+    def __repr__(self):
+        return '<function random>'
+
+
+random = _RANDOM_FN = _RandomFn()
 
 class _Buf:
     def __init__(self, kind): self._k=kind; self._b=''
@@ -4356,11 +4739,42 @@ def hsv(h,s,v):
     r,g,b=colorsys.hsv_to_rgb(h/360,s/100,v/100); return(int(r*255),int(g*255),int(b*255))
 def hsl(h,s,l):
     r,g,b=colorsys.hls_to_rgb(h/360,l/100,s/100); return(int(r*255),int(g*255),int(b*255))
-def color_lerp(a,b,t):
-    t=clamp(t,0,1); la=list(a); lb=list(b)
-    while len(la)<4: la.append(255)
-    while len(lb)<4: lb.append(255)
-    return tuple(int(la[i]+(lb[i]-la[i])*t) for i in range(len(a)))
+_MIX_CACHE = {}
+def _mix_rgba(c):
+    """A colour (name, (r, g, b) or (r, g, b, a)) as a list of 3 or 4 numbers from 0 to 255."""
+    if isinstance(c, str):
+        v = _MIX_CACHE.get(c)
+        if v is None:
+            r = _py.color_rgba(c)
+            if r is None:
+                raise ValueError(f'mix(): {c!r} is not a colour')
+            r = [int(x) for x in r]
+            v = tuple(r) if r[3] != 255 else tuple(r[:3])
+            if len(_MIX_CACHE) > 512: _MIX_CACHE.clear()
+            _MIX_CACHE[c] = v
+        return list(v)
+    return list(c)
+
+def mix(a, b, t):
+    """Blend a and b by t (0 gives a, 1 gives b), like GLSL mix().
+
+    Numbers, Vec2, Vec3 and Vec4 are blended component by component; t is not clamped.
+    Colours (names such as "red", (r, g, b) or (r, g, b, a) tuples) are blended with t clamped to 0..1 and
+    come back as a tuple of whole numbers from 0 to 255 (with an alpha if either colour has one).
+
+    Example:
+        mix(0, 10, 0.25)             # 2.5
+        mix("blue", "red", 0.5)      # (127, 0, 127)
+    """
+    ta = type(a)
+    if (ta is tuple or ta is list or ta is str) and type(b) in (tuple, list, str):
+        t = clamp(t, 0, 1)
+        la = _mix_rgba(a); lb = _mix_rgba(b)
+        n = 4 if (len(la) == 4 or len(lb) == 4) else 3
+        while len(la) < 4: la.append(255)
+        while len(lb) < 4: lb.append(255)
+        return tuple(int(la[i] + (lb[i] - la[i]) * t) for i in range(n))
+    return a + (b - a) * t
 
 BLACK=(0,0,0);WHITE=(255,255,255);RED=(220,60,60);GREEN=(60,220,100);BLUE=(60,120,255)
 YELLOW=(255,220,50);CYAN=(50,220,230);MAGENTA=(220,60,220);ORANGE=(255,140,40)
@@ -4402,6 +4816,50 @@ def _to_pts(polygon):
         else:
             out.append((float(p[0]), float(p[1])))
     return out
+
+def _pos2(p, fname, what):
+    try:
+        return _pt2(p)
+    except (TypeError, IndexError, ValueError, AttributeError):
+        raise TypeError(f'{fname}(): {what} must be a Vec2 or an (x, y) tuple, got {p!r}') from None
+
+def offset_poly(pts, pos):
+    """Shift every point of a polygon by *pos* and return the new polygon as a tuple of (x, y) tuples.
+
+    *pts* is a sequence of (x, y) tuples or Vec2 values; *pos* is a Vec2 or an (dx, dy) tuple.
+    The original polygon is not changed.
+
+    Example:
+        hexagon = regular_poly(0, 0, 50, 6)
+        draw_poly(offset_poly(hexagon, mouse_pos()), CYAN)
+    """
+    dx, dy = _pos2(pos, 'offset_poly', 'pos')
+    return tuple((x + dx, y + dy) for x, y in _to_pts(pts))
+
+def rotate_poly(pts, angle, origin=(0, 0)):
+    """Rotate every point of a polygon by *angle* degrees around *origin* and return the new polygon as a tuple of (x, y) tuples.
+
+    Positive angles turn clockwise on the screen (the y axis points down), like Vec2.rotated().
+    *origin* is a Vec2 or an (x, y) tuple, (0, 0) by default. The original polygon is not changed.
+
+    Example:
+        square = [(300, 200), (400, 200), (400, 300), (300, 300)]
+        draw_poly(rotate_poly(square, 45, (350, 250)), ORANGE)
+    """
+    ox, oy = _pos2(origin, 'rotate_poly', 'origin')
+    k = float(angle) % 360.0
+    if k == 0.0:      c, sn = 1.0, 0.0
+    elif k == 90.0:   c, sn = 0.0, 1.0
+    elif k == 180.0:  c, sn = -1.0, 0.0
+    elif k == 270.0:  c, sn = 0.0, -1.0
+    else:
+        r = math.radians(k)
+        c, sn = math.cos(r), math.sin(r)
+    out = []
+    for x, y in _to_pts(pts):
+        x -= ox; y -= oy
+        out.append((ox + x * c - y * sn, oy + x * sn + y * c))
+    return tuple(out)
 
 def point_in_poly(point, polygon):
     """Return True if *point* (Vec2 or (x,y)) lies inside *polygon*.
@@ -5180,7 +5638,12 @@ class Matrix:
         return r
     def flip_vertical(s):   return s.mirror()
     def mirror_vertical(s): return s.mirror()
-    def __matmul__(s,o):
+    def __mul__(s,o):
+        """a * b multiplies two Matrix objects as matrices; a * 2 multiplies every cell by the number."""
+        if isinstance(o,(int,float)) and not isinstance(o,bool):
+            r=Matrix(s._w,s._h)
+            r._g=[v*o for v in s._g]
+            return r
         if not isinstance(o, Matrix): return NotImplemented
         if s._w != o._h: raise ValueError('matrix dimensions do not align for multiplication')
         r=Matrix(o._w, s._h, 0)
@@ -5191,6 +5654,12 @@ class Matrix:
                     total += s[k,y] * o[x,k]
                 r[x,y] = total
         return r
+    def __rmul__(s,o):
+        if isinstance(o,(int,float)) and not isinstance(o,bool): return s.__mul__(o)
+        return NotImplemented
+    def __matmul__(s,o):
+        raise TypeError('Matrix multiplication uses *, not @: write a * b')
+    __rmatmul__ = __matmul__
     def __repr__(s): return f'Matrix({s._w}, {s._h})'
 
 def _nhash(ix, iy=0, iz=0):
@@ -5566,236 +6035,45 @@ def include(name):
 
     exec(code_obj, globals())
 
-# ── Strict typing & constants ─────────────────────────────────
+# ── Run state ─────────────────────────────────────────────────
 
-# Keys that the controlled-globals dict never validates (internal BowPy state).
-_CG_SKIP = frozenset({'__STRICTS', '__CONSTS'})
-
-class _ControlledGlobals(dict):
-    """A globals() dict subclass that enforces strict types and constants.
-    __STRICTS maps var_name → info dict; __CONSTS is a set of frozen names.
-    """
-    def __setitem__(self, key, value):
-        if key in _CG_SKIP:
-            super().__setitem__(key, value)
-            return
-        try:
-            _stricts = dict.__getitem__(self, '__STRICTS') if '__STRICTS' in self.keys() else {}
-            _consts  = dict.__getitem__(self, '__CONSTS')  if '__CONSTS'  in self.keys() else set()
-        except Exception:
-            _stricts = {}; _consts = set()
-
-        # ── constant guard ─────────────────────────────────────
-        if key in _consts and key in self:
-            raise ValueError(
-                f"Cannot reassign constant '{key}'. "
-                f"Constants can never be unlocked.")
-
-        # ── strict type guard ──────────────────────────────────
-        if key in _stricts:
-            info     = _stricts[key]
-            btype    = info['type']
-            current  = self.get(key)
-
-            if btype is list:
-                if not isinstance(value, list):
-                    raise TypeError(
-                        f"Strict variable '{key}' must remain a list, "
-                        f"got {type(value).__name__}.")
-                if current is not None and len(value) != len(current):
-                    raise TypeError(
-                        f"Strict list '{key}' is locked to size {len(current)}, "
-                        f"got size {len(value)}.")
-
-            elif btype is set:
-                if not isinstance(value, set):
-                    raise TypeError(
-                        f"Strict variable '{key}' must remain a set, "
-                        f"got {type(value).__name__}.")
-                et = info.get('elem_type')
-                if et is not None and value:
-                    bad = [type(v).__name__ for v in value if not isinstance(v, et)]
-                    if bad:
-                        raise TypeError(
-                            f"Strict set '{key}' only allows {et.__name__} elements; "
-                            f"incompatible: {', '.join(bad[:3])}.")
-
-            elif btype is dict:
-                if not isinstance(value, dict):
-                    raise TypeError(
-                        f"Strict variable '{key}' must remain a dict, "
-                        f"got {type(value).__name__}.")
-                kt = info.get('key_types', {})
-                for k, expected in kt.items():
-                    if k not in value:
-                        raise TypeError(
-                            f"Strict dict '{key}' must keep all original keys; "
-                            f"missing '{k}'.")
-                    if not isinstance(value[k], expected):
-                        raise TypeError(
-                            f"Strict dict '{key}': value for '{k}' must be "
-                            f"{expected.__name__}, got {type(value[k]).__name__}.")
-
-            else:
-                if not isinstance(value, btype):
-                    raise TypeError(
-                        f"Strict variable '{key}' must be {btype.__name__}, "
-                        f"got {type(value).__name__}.")
-
-        super().__setitem__(key, value)
-
-
-def _install_controlled_globals():
-    """Replace __main__.__dict__ with _ControlledGlobals (idempotent)."""
-    import sys as _s
-    m  = _s.modules['__main__']
-    if isinstance(m.__dict__, _ControlledGlobals):
-        return m.__dict__
-    cg = _ControlledGlobals(m.__dict__)
-    m.__dict__ = cg
-    return cg
-
-
-def _reset_controlled():
-    """Clear __STRICTS, __CONSTS and the live Timer/KeyRecorder/Surface registries — called at every run start/stop."""
-    import sys as _s
-    cg = _s.modules['__main__'].__dict__
-    if isinstance(cg, _ControlledGlobals):
-        dict.__setitem__(cg, '__STRICTS', {})
-        dict.__setitem__(cg, '__CONSTS',  set())
-    else:
-        cg['__STRICTS'] = {}
-        cg['__CONSTS']  = set()
-    # Drop all Timer, KeyRecorder, Surface, and asset instances from the previous run
+def _reset_runtime():
+    """Drop what the previous run left behind: timers, key recorders, surfaces, assets, the draw target and the
+    screen shader. Called at every run start and stop."""
     _BP_TIMERS.clear()
     _BP_KEY_RECORDERS.clear()
     _BP_SURFACES.clear()
     _asset_registry.clear()
-    # Reset the draw target to the main screen canvas
     _py.surface_reset_target()
     _bp_frag_reset()
+    globals()['random'] = _RANDOM_FN      # a program that did \`import random\` must not keep the module in place of random()
 
 
-__STRICTS = {}   # {var_name: {type, ...}}  – readable, but managed by strict()
-__CONSTS  = set()  # set of constant var names – readable, but managed by const()
+# ── Clipboard ──────────────────────────────────────────────────
+def write_clipboard(val):
+    """Set the player's clipboard to *val* (anything that is not text is converted with str()).
 
-
-_STRICT_SENTINEL = object()   # unique sentinel — never equals any user value
-
-def strict(var_name, value=_STRICT_SENTINEL):
-    """Lock a variable to its current type until dynamic() is called.
-
-    If *value* is supplied the variable is set to that value first, so you
-    can write strict('x', 5) instead of x = 5; strict('x').
-
-    Rules by type:
-      list  – size is locked (length must stay the same on reassignment;
-               in-place mutations such as .append() are NOT checked).
-      set   – all elements must share the one datatype present when
-               strict() was called (in-place .add() is NOT checked).
-      dict  – each key's value type is locked; all original keys must be
-               present on reassignment (in-place d[k]=v is NOT checked).
-      other – the type itself is locked.
+    A browser only lets a page copy while the player is interacting with it. If a call from update() is refused,
+    the text is copied on the player's next click, tap or key press.
 
     Example:
-        strict('x', 42)   # assign 42 and lock as int
-        x = 10            # OK — still int
-        x = 3.14          # TypeError!
-
-    See also: dynamic(), const()
+        if key_pressed("c"):
+            write_clipboard("Score: " + str(score))
     """
-    import sys as _s
-    g = _s.modules['__main__'].__dict__
+    _py.clip_write(str(val))
 
-    # Assign the value first if one was supplied
-    if value is not _STRICT_SENTINEL:
-        # Bypass the ControlledGlobals guard (we're setting the initial value)
-        if isinstance(g, _ControlledGlobals):
-            dict.__setitem__(g, var_name, value)
-        else:
-            g[var_name] = value
+def read_clipboard():
+    """Return the text on the player's clipboard as a string ('' when it is empty or the browser has not allowed reading it yet).
 
-    if var_name not in g:
-        raise NameError(
-            f"'{var_name}' is not defined. Assign a value first, then call strict().")
-    _install_controlled_globals()
-    cg = _s.modules['__main__'].__dict__
-    if '__STRICTS' not in cg:
-        dict.__setitem__(cg, '__STRICTS', {})
-    stricts = dict.__getitem__(cg, '__STRICTS')
-
-    val   = cg[var_name]
-    btype = type(val)
-    info  = {'type': btype}
-
-    if btype is list:
-        info['len'] = len(val)
-    elif btype is set:
-        if val:
-            types_found = set(type(e) for e in val)
-            if len(types_found) > 1:
-                raise TypeError(
-                    f"Cannot make '{var_name}' strict: set contains mixed types "
-                    f"({', '.join(t.__name__ for t in types_found)}). "
-                    f"A strict set must have a single element type.")
-            info['elem_type'] = next(iter(types_found))
-        else:
-            info['elem_type'] = None
-    elif btype is dict:
-        info['key_types'] = {k: type(v) for k, v in val.items()}
-
-    stricts[var_name] = info
-    dict.__setitem__(cg, '__STRICTS', stricts)
-
-
-def dynamic(var_name):
-    """Unlock a variable previously locked with strict(), allowing its type to change.
+    The browser may ask the player for permission the first time. This function never waits: it returns the latest text it
+    knows (what was pasted into the game, what write_clipboard() set, or what the clipboard held when the game last looked),
+    and refreshes it in the background.
 
     Example:
-        x = 42; strict('x')
-        dynamic('x')
-        x = 'now a string'   # OK again
+        if key_down("control") and key_pressed("v"):
+            text = read_clipboard()
     """
-    import sys as _s
-    cg = _s.modules['__main__'].__dict__
-    if '__STRICTS' in cg:
-        dict.__getitem__(cg, '__STRICTS').pop(var_name, None)
-
-
-def const(var_name, value=_STRICT_SENTINEL):
-    """Permanently lock a variable — reassigning it raises ValueError forever.
-
-    If *value* is supplied the variable is set to that value first, so you
-    can write const('GRAVITY', 9.8) instead of GRAVITY = 9.8; const('GRAVITY').
-
-    Unlike strict(), const() cannot be undone; there is no dynamic() for constants.
-
-    Example:
-        const('GRAVITY', 9.8)
-        GRAVITY = 5.0   # ValueError!
-    """
-    import sys as _s
-    g = _s.modules['__main__'].__dict__
-
-    # Assign the value first if one was supplied, bypassing any existing guard
-    if value is not _STRICT_SENTINEL:
-        if isinstance(g, _ControlledGlobals):
-            # Temporarily remove from __CONSTS (in case of re-definition) then set
-            consts = dict.get(g, '__CONSTS') or set()
-            consts.discard(var_name)
-            dict.__setitem__(g, '__CONSTS', consts)
-            dict.__setitem__(g, var_name, value)
-        else:
-            g[var_name] = value
-
-    if var_name not in g:
-        raise NameError(
-            f"'{var_name}' is not defined. Assign a value first, then call const().")
-    _install_controlled_globals()
-    cg = _s.modules['__main__'].__dict__
-    if '__CONSTS' not in cg:
-        dict.__setitem__(cg, '__CONSTS', set())
-    dict.__getitem__(cg, '__CONSTS').add(var_name)
+    return str(_py.clip_read())
 
 
 # ── Misc ───────────────────────────────────────────────────────
@@ -6529,7 +6807,7 @@ class _ShFunc:
 class _ShCompiler:
     def __init__(self, api, runtime=None):
         self.api = api                              # BowPy API objects by name (identity decides what is built in)
-        self.rt = runtime or {}                     # callbacks: source_of(fn), is_mobile(), consts(globals)
+        self.rt = runtime or {}                     # callbacks: source_of(fn), is_mobile()
         self.funcs = {}                             # key -> _ShFunc
         self.order = []                             # finished functions, callees first
         self.stack = []
@@ -6544,7 +6822,7 @@ class _ShCompiler:
     # ── what counts as built in ──
     _FUNC_NAMES = ('sin cos tan asin acos atan atan2 sinh cosh tanh sqrt exp exp2 log log2 log10 floor ceil trunc round '
                    'abs fabs min max pow hypot degrees radians fmod copysign int float bool len range '
-                   'clamp lerp map_range smooth_step smoothstep step fract sign normalize distance dot cross length '
+                   'clamp lerp mix map_range smooth_step smoothstep step fract sign normalize distance dot cross length '
                    'noise noise1 noise2 noise3 get_pixel W H dt delta_time fps get_time mouse_x mouse_y mouse_pos '
                    'mouse_down is_mobile screen_width screen_height').split()
 
@@ -6643,7 +6921,7 @@ class _ShCompiler:
         ctx = {'fn': fn, 'g': fn.__globals__, 'file': info, 'node': fnode, 'name': fn.__name__,
                'params': names, 'ptypes': dict(zip(names, f.ptypes)), 'vars': dict(zip(names, f.ptypes)),
                'assigned': self.assigned_names(fnode),
-               'entry': is_entry, 'ret': None, 'changed': False, 'skipped': False, 'tmp': 0, 'consts': self.rt.get('consts', lambda g: set())(fn.__globals__)}
+               'entry': is_entry, 'ret': None, 'changed': False, 'skipped': False, 'tmp': 0}
         self.fn_ctx = ctx
         self.stack.append(f.key)
         try:
@@ -7295,9 +7573,8 @@ class _ShCompiler:
         obj = g[name]
         if name in self.math_consts and obj is self.math_consts[name]:
             return _sh_float(obj), 'float'
-        # numeric values that BowPy itself defines (pi ...) and constants made with const() are baked into the shader
-        consts = self.fn_ctx['consts']
-        baked = (name in consts) or (self.api.get(name) is obj and isinstance(obj, (int, float)) and not isinstance(obj, bool))
+        # numeric values that BowPy itself defines (pi ...) are baked into the shader
+        baked = self.api.get(name) is obj and isinstance(obj, (int, float)) and not isinstance(obj, bool)
         if isinstance(obj, bool):
             return self.scalar_global(node, name, g, obj, 'bool', baked)
         if isinstance(obj, (int, float)):
@@ -7722,13 +7999,16 @@ class _ShCompiler:
         if _sh_is_vec(ta) or _sh_is_vec(tb):
             vt = ta if _sh_is_vec(ta) else tb
             if (_sh_is_vec(ta) and ta != vt) or (_sh_is_vec(tb) and tb != vt):
-                self.fail(n, 'lerp() cannot mix vectors of different sizes')
+                self.fail(n, '%s() cannot mix vectors of different sizes' % (n.func.id if isinstance(n.func, _sh_ast.Name) else 'lerp'))
             a2 = a if ta == vt else self.cv(a, ta, vt)
             b2 = b if tb == vt else self.cv(b, tb, vt)
             if tt == vt:
                 return 'mix(%s, %s, %s)' % (a2, b2, t), vt
             return 'mix(%s, %s, %s)' % (a2, b2, self.fl(n, t, tt)), vt
         return 'mix(%s, %s, %s)' % (self.fl(n, a, ta), self.fl(n, b, tb), self.fl(n, t, tt)), 'float'
+
+    def bi_mix(self, n):
+        return self.bi_lerp(n)
 
     def bi_map_range(self, n):
         (v, tv), (a1, t1), (a2, t2), (b1, t3), (b2, t4) = self.args(n, 5, 5)
@@ -7997,11 +8277,6 @@ def _sh_source_of(fn):
     return idx.get((fn.__name__, code.co_firstlineno)), shown
 
 
-def _sh_consts(g):
-    c = g.get('__CONSTS')
-    return c if c else ()
-
-
 def _sh_comps(v):
     t = type(v)
     if t is Vec2:
@@ -8056,7 +8331,7 @@ def _sh_make_packer(comp):
     return pack
 
 
-_SH_RUNTIME = {'source_of': _sh_source_of, 'is_mobile': is_mobile, 'consts': _sh_consts}
+_SH_RUNTIME = {'source_of': _sh_source_of, 'is_mobile': is_mobile}
 
 
 def _bp_shader_glsl(fn):
@@ -8345,12 +8620,13 @@ def _frame():
 //  Everything written in the tabs is read from the source itself; BowPy's API and Python's built-ins are looked
 //  up in the Python runtime (_hv, defined by _HV_PY) and completed with the wiki pages.
 // ══════════════════════════════════════════════════════════════
-const _HV_PY = "import inspect as _hv_inspect, builtins as _hv_builtins, importlib as _hv_importlib, json as _hv_json, re as _hv_re\n\n# What the editor may show tooltips for: everything the BowPy prelude put in the program's namespace (captured now,\n# before any user code runs, so a program that re-defines a name cannot change the documentation of the original),\n# plus Python's built-ins.\n_HV_OBJS = {_k: _v for _k, _v in list(globals().items()) if not _k.startswith('_')}\n_HV_TYPES = ['str', 'list', 'dict', 'set', 'tuple', 'int', 'float', 'bool', 'bytes', 'frozenset', 'bytearray', 'complex', 'range']\n_HV_BLOCK = {'this', 'antigravity', 'turtle', 'tkinter', 'idlelib', 'webbrowser', 'pydoc', 'pdb', 'code', 'curses', 'readline', 'site', 'sitecustomize', 'usercustomize'}\n_HV_CACHE = {}\n\n\ndef _hv_clean_default(text):\n    text = _hv_re.sub(r\"<function (\\w+) at 0x[0-9a-fA-F]+>\", r\"\\1\", text)\n    text = _hv_re.sub(r\"<built-in function (\\w+)>\", r\"\\1\", text)\n    text = _hv_re.sub(r\"<class '([\\w.]+)'>\", r\"\\1\", text)\n    text = _hv_re.sub(r\"<([\\w.]+) object at 0x[0-9a-fA-F]+>\", r\"\\1(...)\", text)\n    return text\n\n\ndef _hv_root(root, imports):\n    \"\"\"The object a dotted name starts from: an import of the program, a BowPy name or a built-in.\"\"\"\n    spec = imports.get(root)\n    if spec:\n        modname, _, attr = spec.partition(':')\n        if modname.split('.')[0] in _HV_BLOCK:\n            return None\n        mod = _hv_importlib.import_module(modname)\n        return getattr(mod, attr) if attr else mod\n    if root in _HV_OBJS:\n        return _HV_OBJS[root]\n    if hasattr(_hv_builtins, root):\n        return getattr(_hv_builtins, root)\n    return None\n\n\ndef _hv_member(obj, name):\n    \"\"\"(raw attribute, owner class or None) without running descriptors.\"\"\"\n    if _hv_inspect.isclass(obj):\n        for k in obj.__mro__:\n            if name in k.__dict__:\n                return k.__dict__[name], k\n        return None, None\n    try:\n        return _hv_inspect.getattr_static(obj, name), None\n    except AttributeError:\n        return None, None\n\n\ndef _hv_lead_sigs(doc, names):\n    \"\"\"Overloads that built-ins write as the first lines of their docstring, e.g. 'max(iterable, *[, key=func]) -> value'\n    or 'D.update([E, ]**F) -> None.  Update D from ...' (the receiver prefix is dropped).\"\"\"\n    lines = doc.split('\\n')\n    sigs = []\n    i = 0\n    while i < len(lines):\n        ln = lines[i].strip()\n        m = None\n        for n in names:\n            m = _hv_re.match(r'^(?:\\w+\\.)?' + _hv_re.escape(n) + r'(\\([^)]*\\)(?:\\s*->\\s*[^.\\s]+(?: object)?)?)\\.?\\s*(.*)$', ln)\n            if m:\n                sigs.append(n + m[1])\n                if m[2]:                     # a description that starts on the same line stays in the doc\n                    lines[i] = m[2]\n                    i -= 1\n                break\n        if not m:\n            break\n        i += 1\n    rest = '\\n'.join(lines[i:]).strip('\\n')\n    return sigs, rest\n\n\ndef _hv_describe(raw, name, owner):\n    kind = None\n    deco = None\n    obj = raw\n    if isinstance(raw, staticmethod):\n        deco, obj = 'static', raw.__func__\n    elif isinstance(raw, classmethod):\n        deco, obj = 'class', raw.__func__\n    elif isinstance(raw, property):\n        kind, obj = 'property', raw.fget\n    if kind is None:\n        if _hv_inspect.ismodule(raw):\n            kind = 'module'\n        elif _hv_inspect.isclass(raw):\n            kind = 'class'\n        elif callable(obj):\n            kind = 'method' if owner is not None else 'function'\n        else:\n            return None\n    if kind == 'module':\n        name = getattr(raw, '__name__', name)\n    out = {'kind': kind, 'name': name, 'owner': owner.__name__ if owner is not None else None, 'deco': deco,\n           'sig': None, 'sigs': None, 'doc': None, 'origin': None}\n\n    # documentation (not inherited for classes)\n    if kind == 'class' or kind == 'module':\n        rawdoc = getattr(raw, '__doc__', None)\n    else:\n        rawdoc = getattr(obj, '__doc__', None)\n    doc = _hv_inspect.cleandoc(rawdoc) if isinstance(rawdoc, str) and rawdoc.strip() else None\n\n    # signature\n    if kind in ('function', 'method', 'class'):\n        target = obj\n        sig = None\n        try:\n            sig = _hv_inspect.signature(target)\n        except (ValueError, TypeError):\n            sig = None\n        if sig is not None:\n            params = list(sig.parameters.values())\n            if kind == 'method' and deco != 'static' and params:\n                params = params[1:]\n            try:\n                text = str(sig.replace(parameters=params))\n            except Exception:\n                text = str(sig)\n            out['sig'] = _hv_clean_default(text)\n        elif doc:\n            sigs, rest = _hv_lead_sigs(doc, [name, owner.__name__ if owner is not None else name])\n            if sigs:\n                out['sigs'] = sigs\n                doc = rest or None\n        if out['sig'] is None and not out['sigs']:\n            out['sig'] = '(...)'\n        elif doc and kind == 'class' and out['sig'] is not None:\n            # drop a leading 'Name(...)' line that only repeats the signature\n            first = doc.split('\\n', 1)[0].strip()\n            if first.startswith(name + '(') and '\\n' in doc:\n                doc = doc.split('\\n', 1)[1].strip('\\n') or None\n    out['doc'] = doc\n\n    # where it comes from\n    modname = getattr(obj if kind != 'module' else raw, '__module__', None)\n    if kind == 'module':\n        modname = getattr(raw, '__name__', name)\n        out['origin'] = modname\n    else:\n        if modname is None and owner is not None:\n            modname = getattr(owner, '__module__', None)\n        if modname == '__main__':\n            out['origin'] = 'BowPy'\n        elif modname == 'builtins':\n            out['origin'] = 'built-in'\n        else:\n            out['origin'] = modname\n    return out\n\n\ndef _hv_lookup(req):\n    imports = req.get('imports') or {}\n    obj = _hv_root(req['root'], imports)\n    if obj is None:\n        return None\n    name = req['root']\n    owner = None\n    for step in req.get('chain') or []:\n        raw, own = _hv_member(obj, step)\n        if raw is None:\n            return None\n        obj, name, owner = raw, step, own\n    member = req.get('name')\n    if member:\n        raw, own = _hv_member(obj, member)\n        if raw is None:\n            return None\n        return _hv_describe(raw, member, own)          # found on a class: a method; found on a module: a function\n    return _hv_describe(obj, name, owner)\n\n\ndef _hv_candidates(member):\n    \"\"\"Names of the known classes (BowPy, then built-in types) that have an attribute called `member`.\"\"\"\n    names = []\n    for k, v in _HV_OBJS.items():\n        if _hv_inspect.isclass(v) and getattr(v, '__module__', '') == '__main__' and hasattr(v, member):\n            names.append(k)\n    for t in _HV_TYPES:\n        if hasattr(getattr(_hv_builtins, t), member):\n            names.append(t)\n    return names\n\n\ndef _hv(req_json):\n    \"\"\"Entry point from the editor: a JSON request in, a JSON answer ('' when there is nothing to show) out.\"\"\"\n    hit = _HV_CACHE.get(req_json)\n    if hit is not None:\n        return hit\n    try:\n        req = _hv_json.loads(req_json)\n        if 'cand' in req:\n            out = _hv_candidates(req['cand'])\n        else:\n            out = _hv_lookup(req)\n        res = _hv_json.dumps(out) if out else ''\n    except Exception:\n        res = ''\n    if len(_HV_CACHE) > 4000:\n        _HV_CACHE.clear()\n    _HV_CACHE[req_json] = res\n    return res\n";
+const _HV_PY = "import inspect as _hv_inspect, builtins as _hv_builtins, importlib as _hv_importlib, json as _hv_json, re as _hv_re\n\n# What the editor may show tooltips for: everything the BowPy prelude put in the program's namespace (captured now,\n# before any user code runs, so a program that re-defines a name cannot change the documentation of the original),\n# plus Python's built-ins.\n_HV_OBJS = {_k: _v for _k, _v in list(globals().items()) if not _k.startswith('_')}\n_HV_TYPES = ['str', 'list', 'dict', 'set', 'tuple', 'int', 'float', 'bool', 'bytes', 'frozenset', 'bytearray', 'complex', 'range']\n_HV_BLOCK = {'this', 'antigravity', 'turtle', 'tkinter', 'idlelib', 'webbrowser', 'pydoc', 'pdb', 'code', 'curses', 'readline', 'site', 'sitecustomize', 'usercustomize'}\n_HV_CACHE = {}\n\n\ndef _hv_clean_default(text):\n    text = _hv_re.sub(r\"<function (\\w+) at 0x[0-9a-fA-F]+>\", r\"\\1\", text)\n    text = _hv_re.sub(r\"<built-in function (\\w+)>\", r\"\\1\", text)\n    text = _hv_re.sub(r\"<class '([\\w.]+)'>\", r\"\\1\", text)\n    text = _hv_re.sub(r\"<([\\w.]+) object at 0x[0-9a-fA-F]+>\", r\"\\1(...)\", text)\n    return text\n\n\ndef _hv_root(root, imports):\n    \"\"\"The object a dotted name starts from: an import of the program, a BowPy name or a built-in.\"\"\"\n    spec = imports.get(root)\n    if spec:\n        modname, _, attr = spec.partition(':')\n        if modname.split('.')[0] in _HV_BLOCK:\n            return None\n        mod = _hv_importlib.import_module(modname)\n        return getattr(mod, attr) if attr else mod\n    if root in _HV_OBJS:\n        return _HV_OBJS[root]\n    if hasattr(_hv_builtins, root):\n        return getattr(_hv_builtins, root)\n    return None\n\n\ndef _hv_member(obj, name):\n    \"\"\"(raw attribute, owner class or None) without running descriptors.\"\"\"\n    if _hv_inspect.isclass(obj):\n        for k in obj.__mro__:\n            if name in k.__dict__:\n                return k.__dict__[name], k\n        return None, None\n    try:\n        return _hv_inspect.getattr_static(obj, name), None\n    except AttributeError:\n        return None, None\n\n\ndef _hv_lead_sigs(doc, names):\n    \"\"\"Overloads that built-ins write as the first lines of their docstring, e.g. 'max(iterable, *[, key=func]) -> value'\n    or 'D.update([E, ]**F) -> None.  Update D from ...' (the receiver prefix is dropped).\"\"\"\n    lines = doc.split('\\n')\n    sigs = []\n    i = 0\n    while i < len(lines):\n        ln = lines[i].strip()\n        m = None\n        for n in names:\n            m = _hv_re.match(r'^(?:\\w+\\.)?' + _hv_re.escape(n) + r'(\\([^)]*\\)(?:\\s*->\\s*[^.\\s]+(?: object)?)?)\\.?\\s*(.*)$', ln)\n            if m:\n                sigs.append(n + m[1])\n                if m[2]:                     # a description that starts on the same line stays in the doc\n                    lines[i] = m[2]\n                    i -= 1\n                break\n        if not m:\n            break\n        i += 1\n    rest = '\\n'.join(lines[i:]).strip('\\n')\n    return sigs, rest\n\n\ndef _hv_describe(raw, name, owner):\n    kind = None\n    deco = None\n    obj = raw\n    if isinstance(raw, staticmethod):\n        deco, obj = 'static', raw.__func__\n    elif isinstance(raw, classmethod):\n        deco, obj = 'class', raw.__func__\n    elif isinstance(raw, property):\n        kind, obj = 'property', raw.fget\n    if kind is None:\n        if _hv_inspect.ismodule(raw):\n            kind = 'module'\n        elif _hv_inspect.isclass(raw):\n            kind = 'class'\n        elif callable(obj):\n            kind = 'method' if owner is not None else 'function'\n        else:\n            return None\n    if kind == 'module':\n        name = getattr(raw, '__name__', name)\n    out = {'kind': kind, 'name': name, 'owner': owner.__name__ if owner is not None else None, 'deco': deco,\n           'sig': None, 'sigs': None, 'doc': None, 'origin': None}\n\n    # documentation (not inherited for classes)\n    if kind == 'class' or kind == 'module':\n        rawdoc = getattr(raw, '__doc__', None)\n    else:\n        rawdoc = getattr(obj, '__doc__', None)\n    doc = _hv_inspect.cleandoc(rawdoc) if isinstance(rawdoc, str) and rawdoc.strip() else None\n\n    # signature\n    if kind in ('function', 'method', 'class'):\n        target = obj\n        sig = None\n        try:\n            sig = _hv_inspect.signature(target)\n        except (ValueError, TypeError):\n            sig = None\n        if sig is not None:\n            params = list(sig.parameters.values())\n            if kind == 'method' and deco != 'static' and params:\n                params = params[1:]\n            try:\n                text = str(sig.replace(parameters=params))\n            except Exception:\n                text = str(sig)\n            out['sig'] = _hv_clean_default(text)\n        elif doc:\n            sigs, rest = _hv_lead_sigs(doc, [name, owner.__name__ if owner is not None else name])\n            if sigs:\n                out['sigs'] = sigs\n                doc = rest or None\n        if out['sig'] is None and not out['sigs']:\n            out['sig'] = '(...)'\n        elif doc and kind == 'class' and out['sig'] is not None:\n            # drop a leading 'Name(...)' line that only repeats the signature\n            first = doc.split('\\n', 1)[0].strip()\n            if first.startswith(name + '(') and '\\n' in doc:\n                doc = doc.split('\\n', 1)[1].strip('\\n') or None\n    out['doc'] = doc\n\n    # where it comes from\n    modname = getattr(obj if kind != 'module' else raw, '__module__', None)\n    if kind == 'module':\n        modname = getattr(raw, '__name__', name)\n        out['origin'] = modname\n    else:\n        if modname is None and owner is not None:\n            modname = getattr(owner, '__module__', None)\n        if modname == '__main__':\n            out['origin'] = 'BowPy'\n        elif modname == 'builtins':\n            out['origin'] = 'built-in'\n        else:\n            out['origin'] = modname\n    return out\n\n\ndef _hv_lookup(req):\n    imports = req.get('imports') or {}\n    obj = _hv_root(req['root'], imports)\n    if obj is None:\n        return None\n    name = req['root']\n    owner = None\n    if (req.get('chain') or req.get('name')) and type(obj).__name__ == '_RandomFn':\n        obj = globals().get('_rnd', obj)\n    for step in req.get('chain') or []:\n        raw, own = _hv_member(obj, step)\n        if raw is None:\n            return None\n        obj, name, owner = raw, step, own\n    member = req.get('name')\n    if member:\n        raw, own = _hv_member(obj, member)\n        if raw is None:\n            return None\n        return _hv_describe(raw, member, own)          # found on a class: a method; found on a module: a function\n    return _hv_describe(obj, name, owner)\n\n\ndef _hv_candidates(member):\n    \"\"\"Names of the known classes (BowPy, then built-in types) that have an attribute called `member`.\"\"\"\n    names = []\n    for k, v in _HV_OBJS.items():\n        if _hv_inspect.isclass(v) and getattr(v, '__module__', '') == '__main__' and hasattr(v, member):\n            names.append(k)\n    for t in _HV_TYPES:\n        if hasattr(getattr(_hv_builtins, t), member):\n            names.append(t)\n    return names\n\n\ndef _hv(req_json):\n    \"\"\"Entry point from the editor: a JSON request in, a JSON answer ('' when there is nothing to show) out.\"\"\"\n    hit = _HV_CACHE.get(req_json)\n    if hit is not None:\n        return hit\n    try:\n        req = _hv_json.loads(req_json)\n        if 'cand' in req:\n            out = _hv_candidates(req['cand'])\n        else:\n            out = _hv_lookup(req)\n        res = _hv_json.dumps(out) if out else ''\n    except Exception:\n        res = ''\n    if len(_HV_CACHE) > 4000:\n        _HV_CACHE.clear()\n    _HV_CACHE[req_json] = res\n    return res\n";
 let _hvReady = false;
 
 const _HV = (() => {
   'use strict';
-  const DELAY = 300, GRACE = 240;
+  let DELAY = 300, enabled = true;
+  const GRACE = 240;
 
   // ───────────────────────── source scanning ─────────────────────────
   let scanCache = null;
@@ -8991,7 +9267,7 @@ const _HV = (() => {
     return [];
   }
   function addWiki(info) {
-    if (!info || info.user || info.origin !== 'BowPy') return info;
+    if (!info || info.user || (info.origin !== 'BowPy' && info.origin !== 'random')) return info;
     try {
       if (!wikiIdx) wikiIdx = buildWikiIndex();
       let id = null;
@@ -9374,7 +9650,7 @@ const _HV = (() => {
     } catch (err) { hide(); if (window.console) console.warn('[hover]', err); }
   }
   function onMove(e) {
-    if (e.pointerType === 'touch') return;
+    if (e.pointerType === 'touch' || !enabled) return;
     if (e.buttons) { hide(); return; }
     const hit = hitTest(e);
     const w = hit && wordAtPos(hit.li, hit.idx);
@@ -9400,7 +9676,8 @@ const _HV = (() => {
   }
   init();
 
-  return { py, resolve, scan, parse, hide, show, run, hitTest, wordAtPos, metrics, render, info: (li, col) => { const w = wordAtPos(li, col); return w ? resolve(w.li, w.s, w.e) : null; } };
+  return { setEnabled(v) { enabled = !!v; if (!enabled) hide(); }, setDelay(ms) { DELAY = Math.max(0, +ms || 0); }, resetMetrics() { met = null; },
+    py, resolve, scan, parse, hide, show, run, hitTest, wordAtPos, metrics, render, info: (li, col) => { const w = wordAtPos(li, col); return w ? resolve(w.li, w.s, w.e) : null; } };
 })();
 
 // ══════════════════════════════════════════════════════════════
@@ -9466,7 +9743,7 @@ function frame(ts) {
 // ══════════════════════════════════════════════════════════════
 async function runCode() {
   if (running) stopCode();
-  clearCon();
+  if (_bpSet.clearConsole) clearCon();
   _saveNow();
   $runBtn.disabled = true; $stpBtn.disabled = false;
   switchTab('screen'); fitCanvas();
@@ -9477,7 +9754,7 @@ async function runCode() {
     const prog = _bpGetProgram();
     window._bpLastProgram = prog;
     window._bpLastUserCode = prog.main;
-    pyodide.runPython('_reset_controlled()');
+    pyodide.runPython('_reset_runtime()');
     _bpInstallTabs(prog);   // every extra tab becomes a module (utils.bpy -> utils)
     _bpSetMainSrc(prog.main);
     await pyodide.runPythonAsync(prog.main);
@@ -9513,8 +9790,8 @@ function stopCode(msg = true) {
   // Reset draw target to main canvas (safety – in case a Surface target was active)
   ctx = _mainCtx;
   _bpTargetCanvas = $canvas;
-  // Clear strict/const locks so the next run starts clean
-  try { if (window.pyodide) pyodide.runPython('_reset_controlled()'); } catch(e) {}
+  // Clear timers, surfaces and the other state of the run so the next run starts clean
+  try { if (window.pyodide) pyodide.runPython('_reset_runtime()'); } catch(e) {}
   // Stop all playing sounds
   if (window._bpActiveNodes) {
     for (const n of window._bpActiveNodes) {
@@ -9554,7 +9831,7 @@ for _k in list(globals().keys()):
         del globals()[_k]
 `);
   if (window._bpLastUserCode !== undefined) {
-    pyodide.runPython('_reset_controlled()');
+    pyodide.runPython('_reset_runtime()');
     if (window._bpLastProgram) _bpInstallTabs(window._bpLastProgram);
     _bpRunT0 = performance.now();
     _bpSetMainSrc(window._bpLastUserCode);
@@ -9694,12 +9971,17 @@ function importFile() {
       parsed.errors.forEach(m => window.appendConsole(m, 'err'));
       if (parsed.assets && typeof parsed.assets === 'object') {
         try {
-          const assetObj = parsed.assets;
-          for (const [name, raw] of Object.entries(assetObj)) {
+          const recs = [];
+          for (const [name, raw] of Object.entries(parsed.assets)) {
             const rec = _normalizeAssetRecord(name, raw);
-            if (rec) { _bpAssets.set(name, rec); try { localStorage.setItem('bpa:' + name, JSON.stringify(rec)); } catch(e) {} }
+            if (rec) recs.push([name, rec]);
           }
-          window.appendConsole('Loaded ' + Object.keys(assetObj).length + ' embedded asset(s).', 'ok');
+          if (recs.length) {
+            _bpClearAssets();   // the file brings its own assets: the ones in the Assets tab are replaced
+            for (const [name, rec] of recs) { _bpAssets.set(name, rec); try { localStorage.setItem('bpa:' + name, JSON.stringify(rec)); } catch(e) {} }
+            _renderAssets();
+            window.appendConsole('Replaced the assets with the ' + recs.length + ' embedded asset(s) of this file.', 'ok');
+          }
         } catch(e) { window.appendConsole('Asset parse error: ' + e.message, 'err'); }
       }
       _setProject(parsed.code, parsed.tabs, MAIN_TAB);
@@ -9745,6 +10027,7 @@ function buildFile() {
 
   const _bowglSrc = _bowglFactory.toString().replace(/<\/(script)/gi, '<\\/$1');
   const _bpInputSrc = _bpInputFactory.toString().replace(/<\/(script)/gi, '<\\/$1');
+  const _bpHostSrc = _bpHostFactory.toString().replace(/<\/(script)/gi, '<\\/$1');
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -9772,6 +10055,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#000;overscroll-beha
 'use strict';
 ${_bowglSrc}
 ${_bpInputSrc}
+${_bpHostSrc}
 const $canvas=document.getElementById('screen');
 const BE=_bowglFactory().create($canvas);
 let ctx=BE.ctx;
@@ -9813,9 +10097,10 @@ function _bpPoint2D(p){if(!p)return[0,0];if(p.toJs)p=p.toJs();if(Array.isArray(p
 function _bpColorToRGB(color){if(color===undefined||color===null||color===''||color==='none')return null;const key=typeof color==='string'?color:JSON.stringify(color);if(_bpTintCache.has(key))return _bpTintCache.get(key);let css=color;if(Array.isArray(color)&&color.length>=3)css=color.length>=4?('rgba('+color[0]+','+color[1]+','+color[2]+','+(Number(color[3])/255)+')'):('rgb('+color[0]+','+color[1]+','+color[2]+')');if(typeof css!=='string')return null;_bpTintProbeCtx.setTransform(1,0,0,1,0,0);_bpTintProbeCtx.clearRect(0,0,1,1);_bpTintProbeCtx.fillStyle=css;_bpTintProbeCtx.fillRect(0,0,1,1);const d=_bpTintProbeCtx.getImageData(0,0,1,1).data;const out=[d[0],d[1],d[2]];_bpTintCache.set(key,out);return out;}
 function _bpSourcePixels(img){let cached=_bpImgDataCache.get(img);if(cached&&cached.w===img.naturalWidth&&cached.h===img.naturalHeight)return cached;const c=document.createElement('canvas');c.width=img.naturalWidth;c.height=img.naturalHeight;const g=c.getContext('2d');g.drawImage(img,0,0);cached={w:c.width,h:c.height,data:g.getImageData(0,0,c.width,c.height).data};_bpImgDataCache.set(img,cached);return cached;}
 function _bpSolveHomography(srcPts,dstPts){const A=[];const B=[];for(let i=0;i<4;i++){const sx=srcPts[i][0],sy=srcPts[i][1],dx=dstPts[i][0],dy=dstPts[i][1];A.push([dx,dy,1,0,0,0,-sx*dx,-sx*dy]);B.push(sx);A.push([0,0,0,dx,dy,1,-sy*dx,-sy*dy]);B.push(sy);}for(let i=0;i<8;i++){let piv=i;for(let r=i+1;r<8;r++)if(Math.abs(A[r][i])>Math.abs(A[piv][i]))piv=r;if(Math.abs(A[piv][i])<1e-12)return null;if(piv!==i){const tr=A[i];A[i]=A[piv];A[piv]=tr;const tb=B[i];B[i]=B[piv];B[piv]=tb;}const div=A[i][i];for(let j=i;j<8;j++)A[i][j]/=div;B[i]/=div;for(let r=0;r<8;r++){if(r===i)continue;const f=A[r][i];if(!f)continue;for(let j=i;j<8;j++)A[r][j]-=f*A[i][j];B[r]-=f*B[i];}}return B;}
+const _bpHost=_bpHostFactory();
 window._py={
   sw(){return $canvas.width;},sh(){return $canvas.height;},
-  is_mobile(){return _bpIsMobile();},
+  is_mobile(){return _bpIsMobile();},clip_write(t){_bpHost.clipWrite(String(t));},clip_read(){return _bpHost.clipRead();},color_rgba(c){return _bpHost.parseColor(String(c));},
   fps(){return fpsSmooth;},dt(){return deltaTime;},limit_fps(fps){fpsLimit=Number(fps)||0;return fpsLimit;},
   mx(){return mx;},my(){return my;},
   kd(k){return keysHeld.has(k);},kp(k){return keysPress.has(k);},kr(k){return keysRel.has(k);},
@@ -9901,7 +10186,7 @@ async function main(){
   await pyodide.runPythonAsync(PRELUDE);
   running=true;
   _bpRunT0=performance.now();
-  pyodide.runPython('_reset_controlled()');
+  pyodide.runPython('_reset_runtime()');
   _bpInstallTabs();
   _bpSetMainSrc(USER_CODE);
   await pyodide.runPythonAsync(USER_CODE);
@@ -9974,15 +10259,19 @@ const WIKI_DOCS = {
         </div>
         <div class="wiki-member" onclick="openWikiPage('utils_overview')">
           <div class="wiki-member-name">🛠 Utils</div>
-          <div class="wiki-member-desc">Screen size, timing, FPS, reset and type-locking helpers.</div>
+          <div class="wiki-member-desc">Screen size, timing, FPS, reset and clipboard helpers.</div>
         </div>
         <div class="wiki-member" onclick="openWikiPage('math_overview')">
           <div class="wiki-member-name">π Math</div>
-          <div class="wiki-member-desc">Lerp, clamp, easing, noise, color math and more.</div>
+          <div class="wiki-member-desc">Lerp, mix, clamp, easing, noise, color math and more.</div>
+        </div>
+        <div class="wiki-member" onclick="openWikiPage('random_overview')">
+          <div class="wiki-member-name">⚄ Random</div>
+          <div class="wiki-member-desc">Random numbers, choices, shuffling and seeds.</div>
         </div>
         <div class="wiki-member" onclick="openWikiPage('geometry_overview')">
           <div class="wiki-member-name">▲ Geometry</div>
-          <div class="wiki-member-desc">Polygons, point-in-area and shape intersection tests.</div>
+          <div class="wiki-member-desc">Polygons, moving and rotating them, and shape overlap tests.</div>
         </div>
         <div class="wiki-member" onclick="openWikiPage('graphics_overview')">
           <div class="wiki-member-name">✎ Graphics</div>
@@ -10093,7 +10382,7 @@ def update():
     title: "Utils Overview",
     category: "Utils",
     type: "guide",
-    desc: "Screen dimensions, timing helpers, FPS limiting, reset and strict-typing utilities.",
+    desc: "Screen dimensions, timing helpers, FPS limiting, reset and clipboard utilities.",
     body: `
       <div class="wiki-members">
         <div class="wiki-member" onclick="openWikiPage('W')"><div class="wiki-member-name">W()</div><div class="wiki-member-desc">Screen width in pixels.</div></div>
@@ -10109,9 +10398,8 @@ def update():
         <div class="wiki-member" onclick="openWikiPage('screen_pos_fn')"><div class="wiki-member-name">screen_pos()</div><div class="wiki-member-desc">Get or set the canvas offset position.</div></div>
         <div class="wiki-member" onclick="openWikiPage('screen_rot_fn')"><div class="wiki-member-name">screen_rot()</div><div class="wiki-member-desc">Get or set the canvas rotation.</div></div>
         <div class="wiki-member" onclick="openWikiPage('in_bounds_fn')"><div class="wiki-member-name">in_bounds()</div><div class="wiki-member-desc">Test whether a value is within a range.</div></div>
-        <div class="wiki-member" onclick="openWikiPage('strict_fn')"><div class="wiki-member-name">strict()</div><div class="wiki-member-desc">Lock a variable to its current type.</div></div>
-        <div class="wiki-member" onclick="openWikiPage('dynamic_fn')"><div class="wiki-member-name">dynamic()</div><div class="wiki-member-desc">Unlock a previously locked variable.</div></div>
-        <div class="wiki-member" onclick="openWikiPage('const_fn')"><div class="wiki-member-name">const()</div><div class="wiki-member-desc">Permanently freeze a variable.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('write_clipboard_fn')"><div class="wiki-member-name">write_clipboard()</div><div class="wiki-member-desc">Copy text to the player's clipboard.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('read_clipboard_fn')"><div class="wiki-member-name">read_clipboard()</div><div class="wiki-member-desc">Read the text on the player's clipboard.</div></div>
       </div>
     `
   },
@@ -10377,12 +10665,10 @@ def update():
       <div class="wiki-example">
         <div class="wiki-example-title">Shake the screen</div>
 <pre>
-import random
-
 def update():
     clear("black")
-    dx = random.uniform(-4, 4)
-    dy = random.uniform(-4, 4)
+    dx = uniform(-4, 4)
+    dy = uniform(-4, 4)
     screen_pos(dx, dy)
     draw_rect(60, 60, 120, 80, "red")
 </pre>
@@ -10453,86 +10739,63 @@ def update():
     `
   },
 
-  "strict_fn": {
-    title: "strict()",
+  "write_clipboard_fn": {
+    title: "write_clipboard()",
     category: "Utils",
     type: "function",
-    desc: "Locks a global variable to its current type so any type mismatch raises a TypeError.",
-    signature: `<span class="ws-fn">strict</span><span class="ws-pun">(</span><span class="ws-param">var_name</span><span class="ws-pun">: </span><span class="ws-cls">str</span><span class="ws-pun">, </span><span class="ws-param">value</span><span class="ws-pun">=...</span><span class="ws-pun">)</span>`,
+    desc: "Puts text on the player's clipboard.",
+    signature: `<span class="ws-fn">write_clipboard</span><span class="ws-pun">(</span><span class="ws-param">val</span><span class="ws-pun">) →</span> <span class="ws-cls">None</span>`,
     body: `
-      <p class="wiki-p">Pass the variable name as a string. Optionally pass a value to assign before locking. Rules by type:</p>
-
+      <p class="wiki-p">Sets the clipboard of the player to <code>val</code>. Anything that is not text is turned into text with <code>str()</code>, so <code>write_clipboard(42)</code> copies <code>42</code>.</p>
       <table class="wiki-param-table">
-        <tr><th>Type</th><th>What is locked</th></tr>
-        <tr><td>int / float / str / ...</td><td>The type itself — any other type raises TypeError.</td></tr>
-        <tr><td>list</td><td>The length — all elements must keep the same count.</td></tr>
-        <tr><td>set</td><td>The element type — all elements must share one type.</td></tr>
-        <tr><td>dict</td><td>All existing keys and their value types.</td></tr>
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>val</td><td>any</td><td>The value to copy. It is converted with <code>str()</code>.</td></tr>
       </table>
-
+      <div class="wiki-note"><b>Note:</b> Browsers only allow a page to change the clipboard while the player is interacting with it. If the browser refuses a call that was made from <code>update()</code>, BowPy keeps the text and copies it on the player's next click, tap or key press. <code>read_clipboard()</code> already returns the new text right away.</div>
       <div class="wiki-example">
-        <div class="wiki-example-title">Enforce integer health</div>
+        <div class="wiki-example-title">Copy the score when the player presses C</div>
 <pre>
-strict("health", 100)   # assign 100, lock as int
-health = 80             # OK
-health = 3.5            # TypeError!
+score = 120
+
+def update():
+    clear("black")
+    draw_text(20, 20, "Score: " + str(score), "white", 24)
+    draw_text(20, 60, "Press C to copy your score", "gray", 16)
+    if key_pressed("c"):
+        write_clipboard("I scored " + str(score) + " points!")
 </pre>
       </div>
-
-      <div class="wiki-note"><b>Note:</b> In-place mutations like <code>list.append()</code> are not intercepted — only full reassignment is checked.</div>
-
       <div class="wiki-ref-list">
-        <div class="wiki-ref" onclick="openWikiPage('dynamic_fn')">dynamic()</div>
-        <div class="wiki-ref" onclick="openWikiPage('const_fn')">const()</div>
+        <div class="wiki-ref" onclick="openWikiPage('read_clipboard_fn')">read_clipboard()</div>
       </div>
     `
   },
 
-  "dynamic_fn": {
-    title: "dynamic()",
+  "read_clipboard_fn": {
+    title: "read_clipboard()",
     category: "Utils",
     type: "function",
-    desc: "Unlocks a variable that was previously locked with strict(), allowing its type to change freely.",
-    signature: `<span class="ws-fn">dynamic</span><span class="ws-pun">(</span><span class="ws-param">var_name</span><span class="ws-pun">: </span><span class="ws-cls">str</span><span class="ws-pun">)</span>`,
+    desc: "Returns the text on the player's clipboard.",
+    signature: `<span class="ws-fn">read_clipboard</span><span class="ws-pun">(</span><span class="ws-pun">) →</span> <span class="ws-cls">str</span>`,
     body: `
+      <p class="wiki-p">Returns the clipboard of the player as a string. The result is an empty string when the clipboard is empty, holds something that is not text, or the browser has not allowed the game to read it yet.</p>
+      <div class="wiki-note"><b>Note:</b> A browser may ask the player for permission the first time a game reads the clipboard, and it never lets a page wait for the answer. That is why <code>read_clipboard()</code> returns at once with the latest text it knows, and refreshes that text in the background (when the game window gets focus, after a click or key press, and whenever the player pastes with Ctrl+V). Text that was pasted into the game, or put there with <code>write_clipboard()</code>, is always available immediately.</div>
       <div class="wiki-example">
-        <div class="wiki-example-title">Unlock a variable</div>
+        <div class="wiki-example-title">Paste text into the game with Ctrl+V</div>
 <pre>
-x = 42
-strict("x")
-x = 10        # OK — still int
-dynamic("x")
-x = "hello"   # OK again — type-free
+text = ""
+
+def update():
+    global text
+    clear("black")
+    if key_down("control") and key_pressed("v"):
+        text = read_clipboard()
+    draw_text(20, 20, "Press Ctrl+V to paste", "gray", 16)
+    draw_text(20, 60, text, "yellow", 24)
 </pre>
       </div>
-
       <div class="wiki-ref-list">
-        <div class="wiki-ref" onclick="openWikiPage('strict_fn')">strict()</div>
-        <div class="wiki-ref" onclick="openWikiPage('const_fn')">const()</div>
-      </div>
-    `
-  },
-
-  "const_fn": {
-    title: "const()",
-    category: "Utils",
-    type: "function",
-    desc: "Permanently freezes a global variable. Any reassignment raises a ValueError — even after reset.",
-    signature: `<span class="ws-fn">const</span><span class="ws-pun">(</span><span class="ws-param">var_name</span><span class="ws-pun">: </span><span class="ws-cls">str</span><span class="ws-pun">, </span><span class="ws-param">value</span><span class="ws-pun">=...</span><span class="ws-pun">)</span>`,
-    body: `
-      <p class="wiki-p">Unlike <code>strict()</code>, a constant cannot be unlocked. Use it for values that should truly never change, such as physics constants or tile sizes.</p>
-
-      <div class="wiki-example">
-        <div class="wiki-example-title">Declare a physics constant</div>
-<pre>
-const("GRAVITY", 980)   # pixels/s²
-GRAVITY = 5             # ValueError — cannot reassign!
-</pre>
-      </div>
-
-      <div class="wiki-ref-list">
-        <div class="wiki-ref" onclick="openWikiPage('strict_fn')">strict()</div>
-        <div class="wiki-ref" onclick="openWikiPage('dynamic_fn')">dynamic()</div>
+        <div class="wiki-ref" onclick="openWikiPage('write_clipboard_fn')">write_clipboard()</div>
       </div>
     `
   },
@@ -10567,7 +10830,7 @@ GRAVITY = 5             # ValueError — cannot reassign!
         <div class="wiki-member" onclick="openWikiPage('rgb_fn')"><div class="wiki-member-name">rgb() / rgba()</div><div class="wiki-member-desc">Create color tuples from components.</div></div>
         <div class="wiki-member" onclick="openWikiPage('gray_fn')"><div class="wiki-member-name">gray()</div><div class="wiki-member-desc">Grayscale color from a single value.</div></div>
         <div class="wiki-member" onclick="openWikiPage('hsv_fn')"><div class="wiki-member-name">hsv() / hsl()</div><div class="wiki-member-desc">Color from hue, saturation, value/lightness.</div></div>
-        <div class="wiki-member" onclick="openWikiPage('color_lerp')"><div class="wiki-member-name">color_lerp()</div><div class="wiki-member-desc">Interpolate between two colors.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('mix_fn')"><div class="wiki-member-name">mix()</div><div class="wiki-member-desc">Blend two numbers, vectors or colors (like GLSL mix).</div></div>
       </div>
     `
   },
@@ -10598,7 +10861,7 @@ def update():
       <div class="wiki-ref-list">
         <div class="wiki-ref" onclick="openWikiPage('clamp')">clamp()</div>
         <div class="wiki-ref" onclick="openWikiPage('smooth_step')">smooth_step()</div>
-        <div class="wiki-ref" onclick="openWikiPage('color_lerp')">color_lerp()</div>
+        <div class="wiki-ref" onclick="openWikiPage('mix_fn')">mix()</div>
       </div>
     `
   },
@@ -11171,7 +11434,7 @@ def update():
       <div class="wiki-ref-list">
         <div class="wiki-ref" onclick="openWikiPage('gray_fn')">gray()</div>
         <div class="wiki-ref" onclick="openWikiPage('hsv_fn')">hsv()</div>
-        <div class="wiki-ref" onclick="openWikiPage('color_lerp')">color_lerp()</div>
+        <div class="wiki-ref" onclick="openWikiPage('mix_fn')">mix()</div>
       </div>
     `
   },
@@ -11226,35 +11489,476 @@ def update():
 
       <div class="wiki-ref-list">
         <div class="wiki-ref" onclick="openWikiPage('rgb_fn')">rgb()</div>
-        <div class="wiki-ref" onclick="openWikiPage('color_lerp')">color_lerp()</div>
+        <div class="wiki-ref" onclick="openWikiPage('mix_fn')">mix()</div>
       </div>
     `
   },
 
-  "color_lerp": {
-    title: "color_lerp()",
+  "mix_fn": {
+    title: "mix()",
     category: "Math",
     type: "function",
-    desc: "Linearly interpolates between two colors a and b by factor t.",
-    signature: `<span class="ws-fn">color_lerp</span><span class="ws-pun">(</span><span class="ws-param">a</span><span class="ws-pun">, </span><span class="ws-param">b</span><span class="ws-pun">, </span><span class="ws-param">t</span><span class="ws-pun">) →</span> <span class="ws-cls">tuple</span>`,
+    desc: "Blends two numbers, vectors or colors by a factor t, like GLSL mix().",
+    signature: `<span class="ws-fn">mix</span><span class="ws-pun">(</span><span class="ws-param">a</span><span class="ws-pun">, </span><span class="ws-param">b</span><span class="ws-pun">, </span><span class="ws-param">t</span><span class="ws-pun">) →</span> <span class="ws-cls">number | Vec | tuple</span>`,
     body: `
-      <p class="wiki-p">Both <code>a</code> and <code>b</code> can be any BowPy color (string or tuple). The result is an <code>(r, g, b)</code> tuple. Alpha is interpolated if both inputs carry one.</p>
-
+      <p class="wiki-p"><code>mix(a, b, t)</code> returns <code>a</code> when <code>t</code> is 0, <code>b</code> when <code>t</code> is 1, and a blend in between. It is the same function GLSL uses, so it also works the same inside a <code>fragment()</code> shader.</p>
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>a, b</td><td>number, Vec2, Vec3, Vec4, color</td><td>The two values. Both must be of the same kind.</td></tr>
+        <tr><td>t</td><td>number</td><td>How far to go from <code>a</code> to <code>b</code>.</td></tr>
+      </table>
+      <p class="wiki-p"><b>Numbers and vectors</b> are blended component by component. <code>t</code> is not clamped, so values outside 0 to 1 go beyond the range (use <code>clamp(t, 0, 1)</code> first if you do not want that).</p>
+      <p class="wiki-p"><b>Colors</b> can be color names (<code>"red"</code>, <code>"#3366ff"</code>), <code>(r, g, b)</code> tuples or <code>(r, g, b, a)</code> tuples. <code>t</code> is clamped to 0 to 1 and the result is a tuple of whole numbers from 0 to 255. If either color has an alpha, the result has one too (a missing alpha counts as 255).</p>
       <div class="wiki-example">
         <div class="wiki-example-title">Heat-map bar</div>
 <pre>
 def update():
     clear("black")
     for x in range(W()):
-        t = x / W()
-        c = color_lerp("blue", "red", t)
-        draw_line(x, H()/2 - 20, x, H()/2 + 20, c)
+        c = mix("blue", "red", x / W())
+        draw_line(x, H() / 2 - 20, x, H() / 2 + 20, c)
 </pre>
       </div>
-
+      <div class="wiki-example">
+        <div class="wiki-example-title">Numbers and vectors</div>
+<pre>
+a = Vec2(0, 0)
+b = Vec2(100, 40)
+print(mix(0, 10, 0.25))     # 2.5
+print(mix(a, b, 0.5))       # Vec2(50.0, 20.0)
+</pre>
+      </div>
       <div class="wiki-ref-list">
         <div class="wiki-ref" onclick="openWikiPage('lerp')">lerp()</div>
         <div class="wiki-ref" onclick="openWikiPage('rgb_fn')">rgb()</div>
+        <div class="wiki-ref" onclick="openWikiPage('clamp')">clamp()</div>
+      </div>
+    `
+  },
+
+  "random_overview": {
+    title: "Random Overview",
+    category: "Random",
+    type: "guide",
+    desc: "Random numbers and choices. Every function of Python's random module is ready to use without writing random. in front of it.",
+    body: `
+      <p class="wiki-p">BowPy loads the whole <code>random</code> module for you, so you can write <code>randint(1, 6)</code> or <code>choice(colors)</code> directly. Writing the module name first still works: <code>random.randint(1, 6)</code> gives the same result, and so does <code>import random</code> at the top of a program.</p>
+      <div class="wiki-members">
+        <div class="wiki-member" onclick="openWikiPage('random_fn')"><div class="wiki-member-name">random()</div><div class="wiki-member-desc">A random float from 0 up to (not including) 1.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('randint_fn')"><div class="wiki-member-name">randint(a, b)</div><div class="wiki-member-desc">A random whole number from a to b, both included.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('randrange_fn')"><div class="wiki-member-name">randrange()</div><div class="wiki-member-desc">A random whole number from a range, like range().</div></div>
+        <div class="wiki-member" onclick="openWikiPage('uniform_fn')"><div class="wiki-member-name">uniform(a, b)</div><div class="wiki-member-desc">A random float between a and b.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('choice_fn')"><div class="wiki-member-name">choice(seq)</div><div class="wiki-member-desc">One random element of a sequence.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('choices_fn')"><div class="wiki-member-name">choices(seq, weights, k)</div><div class="wiki-member-desc">k random elements, with repeats and optional weights.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('sample_fn')"><div class="wiki-member-name">sample(seq, k)</div><div class="wiki-member-desc">k different random elements.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('shuffle_fn')"><div class="wiki-member-name">shuffle(list)</div><div class="wiki-member-desc">Put a list in random order.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('seed_fn')"><div class="wiki-member-name">seed(n)</div><div class="wiki-member-desc">Make the random numbers repeatable.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('gauss_fn')"><div class="wiki-member-name">gauss() / normalvariate()</div><div class="wiki-member-desc">Bell-curve distributed numbers.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('triangular_fn')"><div class="wiki-member-name">triangular()</div><div class="wiki-member-desc">A float between two values, leaning toward a mode.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('distributions_fn')"><div class="wiki-member-name">Other distributions</div><div class="wiki-member-desc">beta, exponential, gamma, log-normal, Pareto, von Mises, Weibull.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('random_bits_fn')"><div class="wiki-member-name">Bits, bytes and state</div><div class="wiki-member-desc">getrandbits(), randbytes(), getstate(), setstate(), binomialvariate().</div></div>
+      </div>
+      <div class="wiki-example">
+        <div class="wiki-example-title">Random starfield</div>
+<pre>
+stars = [(random() * 800, random() * 500, choice(["white", "yellow", "cyan"])) for _ in range(120)]
+
+def update():
+    clear("black")
+    for x, y, color in stars:
+        draw_circle(x, y, uniform(0.5, 1.5), color)
+</pre>
+      </div>
+      <div class="wiki-note"><b>Note:</b> Random numbers are not available inside a <code>fragment()</code> shader. Use <code>noise2(x, y)</code> there, or hash the position yourself, so every pixel gets the same value on every frame.</div>
+      <div class="wiki-note"><b>Tip:</b> <code>random</code> is a function <i>and</i> the module: <code>random()</code> gives a number from 0 to 1, while <code>random.uniform(0, 5)</code> reaches the rest of the module.</div>
+    `
+  },
+
+  "random_fn": {
+    title: "random()",
+    category: "Random",
+    type: "function",
+    desc: "Returns a random float from 0.0 up to, but not including, 1.0.",
+    signature: `<span class="ws-fn">random</span><span class="ws-pun">(</span><span class="ws-pun">) →</span> <span class="ws-cls">float</span>`,
+    body: `
+      <p class="wiki-p">Multiply the result to get any range: <code>random() * 100</code> is a float from 0 to 100. Use <code>uniform(a, b)</code> when you want the range spelled out.</p>
+      <div class="wiki-example">
+        <div class="wiki-example-title">Spawn a coin at a random place</div>
+<pre>
+x = random() * 700
+y = random() * 500
+
+def update():
+    global x, y
+    clear("black")
+    draw_circle(x, y, 12, "gold")
+    if mouse_pressed():
+        x = random() * 700
+        y = random() * 500
+</pre>
+      </div>
+      <div class="wiki-note"><b>Note:</b> Also available as <code>random.random()</code>.</div>
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('uniform_fn')">uniform()</div>
+        <div class="wiki-ref" onclick="openWikiPage('randint_fn')">randint()</div>
+        <div class="wiki-ref" onclick="openWikiPage('seed_fn')">seed()</div>
+      </div>
+    `
+  },
+
+  "randint_fn": {
+    title: "randint()",
+    category: "Random",
+    type: "function",
+    desc: "Returns a random whole number from a to b. Both ends are included.",
+    signature: `<span class="ws-fn">randint</span><span class="ws-pun">(</span><span class="ws-param">a</span><span class="ws-pun">, </span><span class="ws-param">b</span><span class="ws-pun">) →</span> <span class="ws-cls">int</span>`,
+    body: `
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>a</td><td>int</td><td>The lowest number that can come out.</td></tr>
+        <tr><td>b</td><td>int</td><td>The highest number that can come out.</td></tr>
+      </table>
+      <div class="wiki-example">
+        <div class="wiki-example-title">Roll a die</div>
+<pre>
+roll = randint(1, 6)
+
+def update():
+    global roll
+    clear("black")
+    draw_text(40, 40, "Rolled: " + str(roll), "yellow", 32)
+    draw_text(40, 90, "Press space to roll again", "gray", 16)
+    if key_pressed("space"):
+        roll = randint(1, 6)
+</pre>
+      </div>
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('randrange_fn')">randrange()</div>
+        <div class="wiki-ref" onclick="openWikiPage('choice_fn')">choice()</div>
+      </div>
+    `
+  },
+
+  "randrange_fn": {
+    title: "randrange()",
+    category: "Random",
+    type: "function",
+    desc: "Returns a random whole number from range(start, stop, step). The stop value is not included.",
+    signature: `<span class="ws-fn">randrange</span><span class="ws-pun">(</span><span class="ws-param">start</span><span class="ws-pun">, </span><span class="ws-param">stop</span><span class="ws-pun">=</span><span class="ws-kw">None</span><span class="ws-pun">, </span><span class="ws-param">step</span><span class="ws-pun">=</span><span class="ws-lit">1</span><span class="ws-pun">) →</span> <span class="ws-cls">int</span>`,
+    body: `
+      <p class="wiki-p">Like <code>range()</code>: <code>randrange(10)</code> is 0 to 9, <code>randrange(5, 10)</code> is 5 to 9 and <code>randrange(0, 100, 5)</code> is one of 0, 5, 10 ... 95.</p>
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>start</td><td>int</td><td>First value of the range (or the stop value when it is the only argument).</td></tr>
+        <tr><td>stop</td><td>int</td><td>End of the range, not included.</td></tr>
+        <tr><td>step</td><td>int</td><td>Distance between the possible values. Default 1.</td></tr>
+      </table>
+      <div class="wiki-example">
+        <div class="wiki-example-title">Snap to a grid</div>
+<pre>
+col = randrange(0, 800, 40)
+row = randrange(0, 600, 40)
+
+def update():
+    clear("black")
+    draw_rect(col, row, 40, 40, "lime")
+</pre>
+      </div>
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('randint_fn')">randint()</div>
+      </div>
+    `
+  },
+
+  "uniform_fn": {
+    title: "uniform()",
+    category: "Random",
+    type: "function",
+    desc: "Returns a random float between a and b.",
+    signature: `<span class="ws-fn">uniform</span><span class="ws-pun">(</span><span class="ws-param">a</span><span class="ws-pun">, </span><span class="ws-param">b</span><span class="ws-pun">) →</span> <span class="ws-cls">float</span>`,
+    body: `
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>a</td><td>number</td><td>One end of the range.</td></tr>
+        <tr><td>b</td><td>number</td><td>The other end. It can be lower than a.</td></tr>
+      </table>
+      <div class="wiki-example">
+        <div class="wiki-example-title">Shake the screen</div>
+<pre>
+def update():
+    clear("black")
+    screen_pos(uniform(-4, 4), uniform(-4, 4))
+    draw_rect(60, 60, 120, 80, "red")
+</pre>
+      </div>
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('random_fn')">random()</div>
+        <div class="wiki-ref" onclick="openWikiPage('gauss_fn')">gauss()</div>
+      </div>
+    `
+  },
+
+  "choice_fn": {
+    title: "choice()",
+    category: "Random",
+    type: "function",
+    desc: "Returns one random element of a sequence.",
+    signature: `<span class="ws-fn">choice</span><span class="ws-pun">(</span><span class="ws-param">seq</span><span class="ws-pun">) →</span> <span class="ws-cls">any</span>`,
+    body: `
+      <p class="wiki-p">Works on lists, tuples, strings and anything else that has a length and an index. An empty sequence raises an <code>IndexError</code>.</p>
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>seq</td><td>sequence</td><td>The things to pick from.</td></tr>
+      </table>
+      <div class="wiki-example">
+        <div class="wiki-example-title">Click to pick a new color</div>
+<pre>
+colors = ["red", "orange", "yellow", "lime", "cyan", "magenta"]
+color = choice(colors)
+
+def update():
+    global color
+    clear("black")
+    draw_circle(W() / 2, H() / 2, 60, color)
+    if mouse_pressed():
+        color = choice(colors)
+</pre>
+      </div>
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('choices_fn')">choices()</div>
+        <div class="wiki-ref" onclick="openWikiPage('sample_fn')">sample()</div>
+      </div>
+    `
+  },
+
+  "choices_fn": {
+    title: "choices()",
+    category: "Random",
+    type: "function",
+    desc: "Returns a list of k random elements. The same element can come up more than once, and weights make some likelier.",
+    signature: `<span class="ws-fn">choices</span><span class="ws-pun">(</span><span class="ws-param">seq</span><span class="ws-pun">, </span><span class="ws-param">weights</span><span class="ws-pun">=</span><span class="ws-kw">None</span><span class="ws-pun">, </span><span class="ws-param">cum_weights</span><span class="ws-pun">=</span><span class="ws-kw">None</span><span class="ws-pun">, </span><span class="ws-param">k</span><span class="ws-pun">=</span><span class="ws-lit">1</span><span class="ws-pun">) →</span> <span class="ws-cls">list</span>`,
+    body: `
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>seq</td><td>sequence</td><td>The things to pick from.</td></tr>
+        <tr><td>weights</td><td>list</td><td>How likely each element is, in the same order. Needs no particular total.</td></tr>
+        <tr><td>cum_weights</td><td>list</td><td>The same as running totals, for speed. Use weights or cum_weights, not both.</td></tr>
+        <tr><td>k</td><td>int</td><td>How many elements to return. Default 1, as a list.</td></tr>
+      </table>
+      <div class="wiki-note"><b>Note:</b> Give <code>k</code> by name: <code>choices(items, k=5)</code>.</div>
+      <div class="wiki-example">
+        <div class="wiki-example-title">A loot table</div>
+<pre>
+loot = choices(["common", "rare", "legendary"], weights=[70, 25, 5], k=10)
+print(loot)
+</pre>
+      </div>
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('choice_fn')">choice()</div>
+        <div class="wiki-ref" onclick="openWikiPage('sample_fn')">sample()</div>
+      </div>
+    `
+  },
+
+  "sample_fn": {
+    title: "sample()",
+    category: "Random",
+    type: "function",
+    desc: "Returns a list of k different random elements.",
+    signature: `<span class="ws-fn">sample</span><span class="ws-pun">(</span><span class="ws-param">seq</span><span class="ws-pun">, </span><span class="ws-param">k</span><span class="ws-pun">, </span><span class="ws-param">counts</span><span class="ws-pun">=</span><span class="ws-kw">None</span><span class="ws-pun">) →</span> <span class="ws-cls">list</span>`,
+    body: `
+      <p class="wiki-p">Unlike <code>choices()</code>, an element is never picked twice (unless it is in the sequence twice). <code>k</code> cannot be larger than the length of the sequence.</p>
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>seq</td><td>sequence</td><td>The things to pick from. A <code>range()</code> works too.</td></tr>
+        <tr><td>k</td><td>int</td><td>How many elements to pick.</td></tr>
+        <tr><td>counts</td><td>list</td><td>Optional repeat counts, one per element.</td></tr>
+      </table>
+      <div class="wiki-example">
+        <div class="wiki-example-title">Lottery numbers</div>
+<pre>
+numbers = sorted(sample(range(1, 50), 6))
+print(numbers)
+</pre>
+      </div>
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('choices_fn')">choices()</div>
+        <div class="wiki-ref" onclick="openWikiPage('shuffle_fn')">shuffle()</div>
+      </div>
+    `
+  },
+
+  "shuffle_fn": {
+    title: "shuffle()",
+    category: "Random",
+    type: "function",
+    desc: "Puts the elements of a list in a random order, in place.",
+    signature: `<span class="ws-fn">shuffle</span><span class="ws-pun">(</span><span class="ws-param">lst</span><span class="ws-pun">) →</span> <span class="ws-cls">None</span>`,
+    body: `
+      <p class="wiki-p">The list itself is changed and nothing is returned. To keep the original order, shuffle a copy: <code>mixed = list(items); shuffle(mixed)</code>. Tuples and strings cannot be shuffled.</p>
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>lst</td><td>list</td><td>The list to shuffle.</td></tr>
+      </table>
+      <div class="wiki-example">
+        <div class="wiki-example-title">Shuffle a deck</div>
+<pre>
+deck = list(range(52))
+shuffle(deck)
+print(deck[:5])
+</pre>
+      </div>
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('sample_fn')">sample()</div>
+      </div>
+    `
+  },
+
+  "seed_fn": {
+    title: "seed()",
+    category: "Random",
+    type: "function",
+    desc: "Starts the random numbers from a fixed point, so a program gives the same numbers every time.",
+    signature: `<span class="ws-fn">seed</span><span class="ws-pun">(</span><span class="ws-param">a</span><span class="ws-pun">=</span><span class="ws-kw">None</span><span class="ws-pun">) →</span> <span class="ws-cls">None</span>`,
+    body: `
+      <p class="wiki-p">After <code>seed(42)</code> the same calls always return the same numbers. Handy for levels that must look the same every time, or to reproduce a bug. <code>seed()</code> with no value starts from the clock again.</p>
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>a</td><td>int | str | float | None</td><td>The starting value. <code>None</code> uses the current time.</td></tr>
+      </table>
+      <div class="wiki-example">
+        <div class="wiki-example-title">The same dice every time</div>
+<pre>
+seed(7)
+print(randint(1, 100), randint(1, 100), randint(1, 100))   # the same three numbers on every run
+</pre>
+      </div>
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('random_fn')">random()</div>
+        <div class="wiki-ref" onclick="openWikiPage('random_bits_fn')">getstate()</div>
+      </div>
+    `
+  },
+
+  "gauss_fn": {
+    title: "gauss() / normalvariate()",
+    category: "Random",
+    type: "function",
+    desc: "Return random numbers that follow a bell curve around a mean.",
+    signature: `<span class="ws-fn">gauss</span><span class="ws-pun">(</span><span class="ws-param">mu</span><span class="ws-pun">=</span><span class="ws-lit">0.0</span><span class="ws-pun">, </span><span class="ws-param">sigma</span><span class="ws-pun">=</span><span class="ws-lit">1.0</span><span class="ws-pun">) →</span> <span class="ws-cls">float</span>`,
+    body: `
+      <p class="wiki-p">Most results land near <code>mu</code> (the mean) and about two thirds of them within <code>sigma</code> (the standard deviation) of it. <code>normalvariate(mu, sigma)</code> is the same distribution, a little slower and safe to use from several threads.</p>
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>mu</td><td>number</td><td>The middle of the curve. Default 0.</td></tr>
+        <tr><td>sigma</td><td>number</td><td>How spread out the numbers are. Default 1.</td></tr>
+      </table>
+      <div class="wiki-example">
+        <div class="wiki-example-title">A cloud of dots</div>
+<pre>
+dots = [(gauss(400, 60), gauss(300, 60)) for _ in range(400)]
+
+def update():
+    clear("black")
+    for x, y in dots:
+        draw_circle(x, y, 2, "cyan")
+</pre>
+      </div>
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('uniform_fn')">uniform()</div>
+        <div class="wiki-ref" onclick="openWikiPage('triangular_fn')">triangular()</div>
+        <div class="wiki-ref" onclick="openWikiPage('distributions_fn')">Other distributions</div>
+      </div>
+    `
+  },
+
+  "triangular_fn": {
+    title: "triangular()",
+    category: "Random",
+    type: "function",
+    desc: "Returns a random float between low and high that leans toward mode.",
+    signature: `<span class="ws-fn">triangular</span><span class="ws-pun">(</span><span class="ws-param">low</span><span class="ws-pun">=</span><span class="ws-lit">0.0</span><span class="ws-pun">, </span><span class="ws-param">high</span><span class="ws-pun">=</span><span class="ws-lit">1.0</span><span class="ws-pun">, </span><span class="ws-param">mode</span><span class="ws-pun">=</span><span class="ws-kw">None</span><span class="ws-pun">) →</span> <span class="ws-cls">float</span>`,
+    body: `
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>low</td><td>number</td><td>Lowest possible value. Default 0.</td></tr>
+        <tr><td>high</td><td>number</td><td>Highest possible value. Default 1.</td></tr>
+        <tr><td>mode</td><td>number</td><td>The most likely value. Default: halfway between low and high.</td></tr>
+      </table>
+      <div class="wiki-example">
+        <div class="wiki-example-title">Mostly small, sometimes big</div>
+<pre>
+sizes = [triangular(4, 40, 8) for _ in range(60)]
+print(max(sizes))
+</pre>
+      </div>
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('uniform_fn')">uniform()</div>
+        <div class="wiki-ref" onclick="openWikiPage('gauss_fn')">gauss()</div>
+      </div>
+    `
+  },
+
+  "distributions_fn": {
+    title: "betavariate() / expovariate() / gammavariate()",
+    category: "Random",
+    type: "function",
+    desc: "Other probability distributions for simulations and procedural effects.",
+    signature: `<span class="ws-fn">expovariate</span><span class="ws-pun">(</span><span class="ws-param">lambd</span><span class="ws-pun">=</span><span class="ws-lit">1.0</span><span class="ws-pun">) →</span> <span class="ws-cls">float</span>`,
+    body: `
+      <p class="wiki-p">Each function returns one random float. They are rarely needed in games, but are there when you want them:</p>
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>betavariate(alpha, beta)</td><td>float</td><td>A number from 0 to 1, shaped by two positive values.</td></tr>
+        <tr><td>expovariate(lambd)</td><td>float</td><td>Waiting times: the lower <code>lambd</code> is, the longer. Mean is 1 / lambd.</td></tr>
+        <tr><td>gammavariate(alpha, beta)</td><td>float</td><td>Gamma distribution (both values above 0).</td></tr>
+        <tr><td>lognormvariate(mu, sigma)</td><td>float</td><td>The logarithm of the result follows <code>gauss(mu, sigma)</code>.</td></tr>
+        <tr><td>paretovariate(alpha)</td><td>float</td><td>Pareto distribution: many small numbers and a few huge ones.</td></tr>
+        <tr><td>vonmisesvariate(mu, kappa)</td><td>float</td><td>An angle in radians around <code>mu</code>; high <code>kappa</code> keeps it close.</td></tr>
+        <tr><td>weibullvariate(alpha, beta)</td><td>float</td><td>Weibull distribution with scale <code>alpha</code> and shape <code>beta</code>.</td></tr>
+      </table>
+      <div class="wiki-example">
+        <div class="wiki-example-title">Random time between two spawns</div>
+<pre>
+delay = expovariate(1 / 2.0)     # about 2 seconds on average
+print(round(delay, 2))
+</pre>
+      </div>
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('gauss_fn')">gauss()</div>
+        <div class="wiki-ref" onclick="openWikiPage('triangular_fn')">triangular()</div>
+      </div>
+    `
+  },
+
+  "random_bits_fn": {
+    title: "getrandbits() / randbytes() / getstate()",
+    category: "Random",
+    type: "function",
+    desc: "Low-level helpers: random bits and bytes, saving and restoring the generator, and a binomial draw.",
+    signature: `<span class="ws-fn">getrandbits</span><span class="ws-pun">(</span><span class="ws-param">k</span><span class="ws-pun">) →</span> <span class="ws-cls">int</span>`,
+    body: `
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>getrandbits(k)</td><td>int</td><td>A whole number made of <code>k</code> random bits (0 up to 2**k - 1).</td></tr>
+        <tr><td>randbytes(n)</td><td>bytes</td><td>n random bytes.</td></tr>
+        <tr><td>getstate()</td><td>tuple</td><td>Snapshot of the generator. Pass it to <code>setstate()</code> later to replay the same numbers.</td></tr>
+        <tr><td>setstate(state)</td><td>None</td><td>Restore a snapshot from <code>getstate()</code>.</td></tr>
+        <tr><td>binomialvariate(n, p)</td><td>int</td><td>How many of <code>n</code> tries succeed when each has probability <code>p</code>.</td></tr>
+      </table>
+      <div class="wiki-example">
+        <div class="wiki-example-title">Replay the same numbers</div>
+<pre>
+state = getstate()
+first = [randint(1, 6) for _ in range(5)]
+setstate(state)
+again = [randint(1, 6) for _ in range(5)]
+print(first == again)     # True
+</pre>
+      </div>
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('seed_fn')">seed()</div>
+        <div class="wiki-ref" onclick="openWikiPage('randint_fn')">randint()</div>
       </div>
     `
   },
@@ -11264,12 +11968,14 @@ def update():
     title: "Geometry Overview",
     category: "Geometry",
     type: "guide",
-    desc: "Functions for creating polygons and testing whether points, rectangles, circles and polygons overlap.",
+    desc: "Functions for creating, moving and rotating polygons and testing whether points, rectangles, circles and polygons overlap.",
     body: `
       <p class="wiki-p">The <code>*_in_*</code> functions return <code>True</code> when the first shape is inside or overlaps the second one. Touching counts as overlapping, and polygons can be convex or concave.</p>
 
       <div class="wiki-members">
         <div class="wiki-member" onclick="openWikiPage('regular_poly')"><div class="wiki-member-name">regular_poly()</div><div class="wiki-member-desc">Generate a regular n-sided polygon as a point list.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('offset_poly')"><div class="wiki-member-name">offset_poly()</div><div class="wiki-member-desc">Move every point of a polygon by an offset.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('rotate_poly')"><div class="wiki-member-name">rotate_poly()</div><div class="wiki-member-desc">Rotate a polygon around a point.</div></div>
         <div class="wiki-member" onclick="openWikiPage('point_in_poly')"><div class="wiki-member-name">point_in_poly()</div><div class="wiki-member-desc">Test if a point lies inside a polygon.</div></div>
         <div class="wiki-member" onclick="openWikiPage('poly_in_poly')"><div class="wiki-member-name">poly_in_poly()</div><div class="wiki-member-desc">Test if one polygon intersects or is inside another.</div></div>
         <div class="wiki-member" onclick="openWikiPage('point_in_rect')"><div class="wiki-member-name">point_in_rect()</div><div class="wiki-member-desc">Test if a point lies inside a rectangle.</div></div>
@@ -11309,6 +12015,85 @@ def update():
       <div class="wiki-ref-list">
         <div class="wiki-ref" onclick="openWikiPage('draw_poly')">draw_poly()</div>
         <div class="wiki-ref" onclick="openWikiPage('point_in_poly')">point_in_poly()</div>
+      </div>
+    `
+  },
+
+  "offset_poly": {
+    title: "offset_poly()",
+    category: "Geometry",
+    type: "function",
+    desc: "Shifts all the points of a polygon by pos and returns the new polygon.",
+    signature: `<span class="ws-fn">offset_poly</span><span class="ws-pun">(</span><span class="ws-param">pts</span><span class="ws-pun">, </span><span class="ws-param">pos</span><span class="ws-pun">) →</span> <span class="ws-cls">tuple</span>`,
+    body: `
+      <p class="wiki-p">Adds <code>pos</code> to every point of <code>pts</code> and returns a new tuple of <code>(x, y)</code> tuples. The original polygon is not changed. The result can go straight into <code>draw_poly()</code>, <code>point_in_poly()</code> or <code>poly_in_poly()</code>.</p>
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>pts</td><td>sequence</td><td>The points of the polygon: <code>(x, y)</code> tuples or <code>Vec2</code> values.</td></tr>
+        <tr><td>pos</td><td>Vec2 | tuple</td><td>How far to move the polygon: <code>(dx, dy)</code> or a <code>Vec2</code>.</td></tr>
+      </table>
+      <div class="wiki-example">
+        <div class="wiki-example-title">A hexagon that follows the mouse</div>
+<pre>
+shape = regular_poly(0, 0, 50, 6)      # centred on (0, 0)
+
+def update():
+    clear("black")
+    moved = offset_poly(shape, mouse_pos())
+    draw_poly(moved, "cyan")
+</pre>
+      </div>
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('rotate_poly')">rotate_poly()</div>
+        <div class="wiki-ref" onclick="openWikiPage('regular_poly')">regular_poly()</div>
+        <div class="wiki-ref" onclick="openWikiPage('draw_poly')">draw_poly()</div>
+      </div>
+    `
+  },
+
+  "rotate_poly": {
+    title: "rotate_poly()",
+    category: "Geometry",
+    type: "function",
+    desc: "Rotates all the points of a polygon by an angle in degrees around a point.",
+    signature: `<span class="ws-fn">rotate_poly</span><span class="ws-pun">(</span><span class="ws-param">pts</span><span class="ws-pun">, </span><span class="ws-param">angle</span><span class="ws-pun">, </span><span class="ws-param">origin</span><span class="ws-pun">=</span><span class="ws-lit">(0, 0)</span><span class="ws-pun">) →</span> <span class="ws-cls">tuple</span>`,
+    body: `
+      <p class="wiki-p">Turns every point of <code>pts</code> by <code>angle</code> degrees around <code>origin</code> and returns a new tuple of <code>(x, y)</code> tuples. The original polygon is not changed. Positive angles turn clockwise on the screen, like <code>Vec2.rotated()</code> (the y axis points down). Multiples of 90 degrees give exact results.</p>
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>pts</td><td>sequence</td><td>The points of the polygon: <code>(x, y)</code> tuples or <code>Vec2</code> values.</td></tr>
+        <tr><td>angle</td><td>number</td><td>Rotation in degrees.</td></tr>
+        <tr><td>origin</td><td>Vec2 | tuple</td><td>The point to rotate around. Default <code>(0, 0)</code>.</td></tr>
+      </table>
+      <div class="wiki-example">
+        <div class="wiki-example-title">A square that spins around its own centre</div>
+<pre>
+angle = 0
+square = [(300, 200), (400, 200), (400, 300), (300, 300)]
+
+def update():
+    global angle
+    clear("black")
+    angle += 90 * dt()
+    spun = rotate_poly(square, angle, (350, 250))
+    draw_poly(spun, "orange")
+</pre>
+      </div>
+      <div class="wiki-example">
+        <div class="wiki-example-title">Rotate, then move</div>
+<pre>
+ship = [(0, -20), (14, 14), (0, 8), (-14, 14)]
+
+def update():
+    clear("black")
+    pts = rotate_poly(ship, mouse_x() / 2)
+    draw_poly(offset_poly(pts, (W() / 2, H() / 2)), "lime")
+</pre>
+      </div>
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('offset_poly')">offset_poly()</div>
+        <div class="wiki-ref" onclick="openWikiPage('regular_poly')">regular_poly()</div>
+        <div class="wiki-ref" onclick="openWikiPage('draw_poly')">draw_poly()</div>
       </div>
     `
   },
@@ -12404,7 +13189,7 @@ def fragment(pos):
         <li>Your own functions, also from other tabs (<code>utils.warp(pos)</code>). They can be called with different kinds of values; recursion is not possible.</li>
         <li>Math: <code>sin cos tan asin acos atan atan2 sqrt exp log pow abs min max floor ceil round fract sign hypot radians degrees</code>, <code>lerp clamp map_range smoothstep step smooth_step</code>, <code>dot cross length distance normalize</code> and <code>noise()</code>, <code>noise1/2/3()</code>, the Vec methods (<code>.length()</code>, <code>.normalized()</code>, <code>.rotated()</code>, <code>Vec2.distance()</code> ...).</li>
         <li><code>get_pixel(pos)</code>, <code>get_time()</code> (seconds since the program started), <code>dt()</code>, <code>fps()</code>, <code>W()</code>, <code>H()</code>, <code>mouse_x()</code>, <code>mouse_y()</code>, <code>mouse_pos()</code>, <code>mouse_down()</code> (the button has to be written as 0, 1 or 2) and <code>is_mobile()</code>.</li>
-        <li>Global variables: numbers, booleans, Vec2/Vec3/Vec4, tuples and lists of those (up to 192 values together). They are sent to the GPU every frame as they are at the end of <code>update()</code>. On the GPU numbers have about 7 digits of precision: pass big values such as <code>time.time()</code> as a difference or use <code>get_time()</code> inside the shader. Variables that are made with <code>const()</code> are built into the shader.</li>
+        <li>Global variables: numbers, booleans, Vec2/Vec3/Vec4, tuples and lists of those (up to 192 values together). They are sent to the GPU every frame as they are at the end of <code>update()</code>. On the GPU numbers have about 7 digits of precision: pass big values such as <code>time.time()</code> as a difference or use <code>get_time()</code> inside the shader.</li>
       </ul>
       <div class="wiki-note"><b>Not possible in a shader:</b> <code>random</code>, text, dictionaries, classes, <code>lambda</code>, <code>print</code>, imports, comparing whole vectors or lists, and assigning several components at once (<code>v.xy = ...</code>; write <code>v.x = ...</code> and <code>v.y = ...</code>).</div>
 
@@ -13355,7 +14140,7 @@ print(len(m))    # 100
         <div class="wiki-member" onclick="openWikiPage('matrix_map')"><div class="wiki-member-name">.map(f) / .apply(f)</div><div class="wiki-member-desc">Transform all cells by a function.</div></div>
         <div class="wiki-member" onclick="openWikiPage('matrix_in_bounds')"><div class="wiki-member-name">.in_bounds(x, y)</div><div class="wiki-member-desc">Check if coordinates are within the grid.</div></div>
         <div class="wiki-member" onclick="openWikiPage('matrix_transpose')"><div class="wiki-member-name">.transpose() / .flip() / .mirror()</div><div class="wiki-member-desc">Geometric transforms on the grid.</div></div>
-        <div class="wiki-member" onclick="openWikiPage('matrix_matmul')"><div class="wiki-member-name">m @ n</div><div class="wiki-member-desc">Matrix multiplication (numeric grids).</div></div>
+        <div class="wiki-member" onclick="openWikiPage('matrix_mul')"><div class="wiki-member-name">m * n</div><div class="wiki-member-desc">Matrix multiplication (numeric grids), or scaling by a number.</div></div>
       </div>
     `
   },
@@ -13522,12 +14307,13 @@ mirrored = m.flip()
     `
   },
 
-  "matrix_matmul": {
-    title: "Matrix — @ (matmul)",
+  "matrix_mul": {
+    title: "Matrix — * (multiply)",
     category: "Matrix",
     type: "method",
-    desc: "The @ operator performs standard matrix multiplication on two numeric Matrix objects.",
+    desc: "The * operator multiplies two numeric Matrix objects as matrices, or scales a Matrix by a number.",
     body: `
+      <p class="wiki-p"><code>A * B</code> is standard matrix multiplication. The width of <code>A</code> must equal the height of <code>B</code>; the result has the width of <code>B</code> and the height of <code>A</code>. <code>A * 2</code> and <code>2 * A</code> multiply every cell by the number.</p>
       <div class="wiki-example">
         <div class="wiki-example-title">Multiply two matrices</div>
 <pre>
@@ -13537,11 +14323,12 @@ A[0,0]=1; A[1,0]=2; A[0,1]=3; A[1,1]=4
 B = Matrix(2, 2)
 B[0,0]=5; B[1,0]=6; B[0,1]=7; B[1,1]=8
 
-C = A @ B
+C = A * B
 print(C[0,0], C[1,0])  # 19 22
 print(C[0,1], C[1,1])  # 43 50
 </pre>
       </div>
+      <div class="wiki-note"><b>Changed:</b> The <code>@</code> operator is no longer used for matrices. Writing <code>A @ B</code> raises an error that points to <code>*</code>.</div>
     `
   },
 
@@ -14139,7 +14926,7 @@ def update():
 
       <div class="wiki-ref-list">
         <div class="wiki-ref" onclick="openWikiPage('surface_screen')">Surface.screen()</div>
-        <div class="wiki-ref" onclick="openWikiPage('Image_class')">Image</div>
+        <div class="wiki-ref" onclick="openWikiPage('Image')">Image</div>
       </div>
     `
   },
@@ -14986,6 +15773,281 @@ function wikiSearch(query) {
 
 buildWikiNav();
 openWikiPage('home');
+
+// ══════════════════════════════════════════════════════════════
+//  Settings tab
+// ══════════════════════════════════════════════════════════════
+const _SET_PREVIEW = [
+  '# A little game',
+  'import random',
+  '',
+  'class Ball:',
+  '\tdef __init__(self, x, y):',
+  '\t\tself.pos = Vec2(x, y)',
+  '\t\tself.speed = 120.5   # pixels per second',
+  '',
+  'balls = [Ball(60 + i * 50, 40) for i in range(5)]',
+  '',
+  'def update():',
+  '\tclear("#10131a")',
+  '\tfor b in balls:',
+  '\t\tb.pos.y += b.speed * dt()',
+  '\t\tif b.pos.y > H():',
+  '\t\t\tb.pos.y = 0',
+  '\t\tdraw_circle(b.pos.x, b.pos.y, 12, mix("cyan", "red", b.pos.y / H()))',
+  '\tdraw_text(10, 10, f"{fps():.0f} fps", WHITE)',
+].join('\n');
+
+// the CSS variables that depend on the choices (theme and the user's own colours, fonts, sizes)
+function _bpSettingsVars() {
+  const vars = _bpResolveTheme(_bpSet);
+  const fc = _bpSet.fontCode === 'custom'
+    ? (_bpSet.fontCodeCustom.trim() ? _bpSet.fontCodeCustom.trim().replace(/[;{}<>]/g, '') + ', monospace' : _SET_FONTS_CODE.plex.css)
+    : _SET_FONTS_CODE[_bpSet.fontCode].css;
+  vars['--font-code'] = fc;
+  vars['--font-ui'] = _SET_FONTS_UI[_bpSet.fontUi].css;
+  vars['--ed-fs'] = _bpSet.fontSize + 'px';
+  vars['--ed-lh'] = Math.round(_bpSet.fontSize * _bpSet.lineHeight) + 'px';
+  vars['--tab-size'] = String(_bpSet.tabSize);
+  vars['--con-fs'] = _bpSet.conFontSize + 'px';
+  return vars;
+}
+function _bpApplyVars() {
+  const root = document.documentElement.style, vars = _bpSettingsVars();
+  for (const k in vars) root.setProperty(k, vars[k]);
+  try { localStorage.setItem(_SET_THEME_KEY, JSON.stringify(vars)); } catch (e) {}
+}
+function _bpApplySettings() {
+  _bpApplyVars();
+  document.body.classList.toggle('no-lnums', !_bpSet.lineNumbers);
+  syncEditor();                                   // syntax colouring, tab width and line height of the code
+  _HV.setEnabled(_bpSet.tooltips);
+  _HV.setDelay(_bpSet.tooltipDelay);
+  _HV.resetMetrics();
+  _setRenderPreview();
+}
+
+function _setRenderPreview() {
+  const ln = document.getElementById('set-prev-ln'), code = document.getElementById('set-prev-code');
+  if (!ln || !code) return;
+  const n = _SET_PREVIEW.split('\n').length;
+  let t = '';
+  for (let i = 1; i <= n; i++) t += i + '\n';
+  ln.textContent = t;
+  code.innerHTML = _bpSet.syntax ? highlight(_SET_PREVIEW + ' ').replace(/\n$/, '') : esc(_SET_PREVIEW);
+}
+
+const _setUI = { rows: {}, themeBtns: {}, pickers: {}, ctl: {} };
+function _setEl(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+
+// every change of a choice goes through here: remember it, show it, keep the controls in step
+function _setChange(key, value) {
+  _bpSet[key] = value;
+  _bpSaveSettings();
+  _bpApplySettings();
+  _setRefresh();
+}
+function _setResetAll() {
+  for (const k of Object.keys(_bpSet)) delete _bpSet[k];
+  Object.assign(_bpSet, JSON.parse(JSON.stringify(_SET_DEFAULTS)));
+  _bpSaveSettings();
+  _bpApplySettings();
+  _setRefresh();
+}
+
+function _setRow(card, key, name, hint, ctl) {
+  const row = _setEl('div', 'set-row');
+  const lab = _setEl('div', 'set-lab');
+  lab.appendChild(_setEl('div', 'set-name', name));
+  if (hint) lab.appendChild(_setEl('div', 'set-hint', hint));
+  const c = _setEl('div', 'set-ctl');
+  (Array.isArray(ctl) ? ctl : [ctl]).forEach(x => c.appendChild(x));
+  row.appendChild(lab); row.appendChild(c);
+  row.dataset.key = key;
+  card.appendChild(row);
+  _setUI.rows[key] = row;
+  return row;
+}
+function _setToggle(key) {
+  const w = _setEl('label', 'set-switch'), i = _setEl('input'), s = _setEl('span');
+  i.type = 'checkbox'; i.id = 'set-' + key;
+  i.onchange = () => _setChange(key, i.checked);
+  w.appendChild(i); w.appendChild(s);
+  _setUI.ctl[key] = i;
+  return w;
+}
+function _setRange(key, min, max, step, fmt) {
+  const i = _setEl('input'), v = _setEl('span', 'set-val');
+  i.type = 'range'; i.min = min; i.max = max; i.step = step; i.id = 'set-' + key;
+  i.oninput = () => { v.textContent = fmt(Number(i.value)); _setChange(key, Number(i.value)); };
+  _setUI.ctl[key] = i; i._val = v; i._fmt = fmt;
+  return [i, v];
+}
+function _setNumber(key, min, max) {
+  const i = _setEl('input', 'set-input');
+  i.type = 'number'; i.min = min; i.max = max; i.step = 1; i.id = 'set-' + key;
+  i.onchange = () => { const n = Math.round(_setClampNum(i.value, min, max, _SET_DEFAULTS[key])); i.value = n; _setChange(key, n); };
+  _setUI.ctl[key] = i;
+  return i;
+}
+function _setSelect(key, opts) {
+  const s = _setEl('select', 'set-input');
+  s.id = 'set-' + key;
+  for (const [v, label] of opts) { const o = _setEl('option', null, label); o.value = v; s.appendChild(o); }
+  s.onchange = () => _setChange(key, s.value);
+  _setUI.ctl[key] = s;
+  return s;
+}
+
+function _setBuildUI() {
+  const page = document.getElementById('set-page');
+  if (!page || page.dataset.built) return;
+  page.dataset.built = '1';
+
+  const head = _setEl('div', 'set-head');
+  const ht = _setEl('div', 'set-head-txt');
+  ht.appendChild(_setEl('div', 'set-title', 'Settings'));
+  ht.appendChild(_setEl('div', 'set-sub', 'Changes apply at once and are saved in this browser.'));
+  const reset = _setEl('button', 'set-btn', 'Reset all settings');
+  reset.id = 'set-reset-all';
+  let armTimer = 0;
+  reset.onclick = () => {
+    if (!reset.classList.contains('armed')) {
+      reset.classList.add('armed'); reset.textContent = 'Click again to reset everything';
+      armTimer = setTimeout(() => { reset.classList.remove('armed'); reset.textContent = 'Reset all settings'; }, 3500);
+      return;
+    }
+    clearTimeout(armTimer); reset.classList.remove('armed'); reset.textContent = 'Reset all settings';
+    _setResetAll();
+  };
+  head.appendChild(ht); head.appendChild(reset);
+  page.appendChild(head);
+
+  const cols = _setEl('div', 'set-cols'), main = _setEl('div', 'set-main'), side = _setEl('div', 'set-side');
+  cols.appendChild(main); cols.appendChild(side); page.appendChild(cols);
+
+  const card = (title, extra) => {
+    const c = _setEl('div', 'set-card'), h = _setEl('div', 'set-card-h');
+    h.appendChild(_setEl('span', 'set-grow', title));
+    if (extra) h.appendChild(extra);
+    c.appendChild(h); main.appendChild(c);
+    return c;
+  };
+
+  // ── editor ──
+  let c = card('Editor');
+  _setRow(c, 'tabSize', 'Tab size', 'Spaces the Tab key inserts, and the width of tab characters.', _setNumber('tabSize', 1, 8));
+  _setRow(c, 'fontCode', 'Code font', 'Used by the editor, the console and the wiki examples. Some fonts load when you are online; the others must be installed on your device.',
+    _setSelect('fontCode', Object.entries(_SET_FONTS_CODE).map(([k, f]) => [k, f.label])));
+  const cf = _setEl('input', 'set-input wide');
+  cf.type = 'text'; cf.id = 'set-fontCodeCustom'; cf.placeholder = 'e.g. Iosevka, Hack'; cf.spellcheck = false;
+  cf.oninput = () => _setChange('fontCodeCustom', cf.value);
+  _setUI.ctl.fontCodeCustom = cf;
+  _setRow(c, 'fontCodeCustom', 'Font name', 'One or more font family names, separated by commas.', cf);
+  _setRow(c, 'fontSize', 'Font size', 'Size of the code in the editor.', _setRange('fontSize', 9, 32, 1, v => v + ' px'));
+  _setRow(c, 'lineHeight', 'Line spacing', 'Height of a line, as a multiple of the font size.', _setRange('lineHeight', 1.1, 2.4, 0.05, v => v.toFixed(2) + '×'));
+  _setRow(c, 'lineNumbers', 'Line numbers', 'Show the line numbers next to the code.', _setToggle('lineNumbers'));
+  _setRow(c, 'syntax', 'Syntax coloring', 'Color keywords, strings, numbers, comments and so on. Off shows plain text.', _setToggle('syntax'));
+
+  // ── typing help ──
+  c = card('Typing help');
+  _setRow(c, 'autoBrackets', 'Auto-close brackets', 'Typing ( [ or { adds the closing one too, typing the closing one skips over it, and selected text is wrapped.', _setToggle('autoBrackets'));
+  _setRow(c, 'autoQuotes', 'Auto-close quotes', 'Typing " or \' adds the closing quote too, and selected text is wrapped.', _setToggle('autoQuotes'));
+  _setRow(c, 'autoIndent', 'Smart indentation', 'Enter keeps the indentation and adds a level after a colon or an open bracket. Backspace removes a whole indent.', _setToggle('autoIndent'));
+  _setRow(c, 'tooltips', 'Hover tooltips', 'Hover a function, method or class in the editor to see its signature and documentation.', _setToggle('tooltips'));
+  _setRow(c, 'tooltipDelay', 'Tooltip delay', 'How long the pointer has to rest on a word before the tooltip appears.', _setRange('tooltipDelay', 0, 1500, 50, v => v + ' ms'));
+
+  // ── appearance ──
+  c = card('Appearance');
+  const grid = _setEl('div', 'set-themes');
+  for (const th of _SET_THEMES) {
+    const b = _setEl('button', 'set-theme'); b.type = 'button'; b.dataset.theme = th.id; b.title = th.name;
+    const sw = _setEl('div', 'set-theme-sw');
+    [['bg', 'big'], ['bg2', ''], ['bg4', ''], ['blue', ''], ['sy-kw', ''], ['sy-fn', ''], ['sy-str', '']].forEach(([k, cls]) => { const i = _setEl('i', cls); i.style.background = th.v[k]; sw.appendChild(i); });
+    const nm = _setEl('div', 'set-theme-nm'); nm.appendChild(_setEl('span', null, th.name)); nm.appendChild(_setEl('small', null, th.light ? 'light' : 'dark'));
+    b.appendChild(sw); b.appendChild(nm);
+    b.onclick = () => { _bpSet.theme = th.id; _bpSet.colors = {}; _bpSaveSettings(); _bpApplySettings(); _setRefresh(); };
+    grid.appendChild(b); _setUI.themeBtns[th.id] = b;
+  }
+  c.appendChild(grid);
+  _setRow(c, 'fontUi', 'Interface font', 'The font of the menus, tabs and wiki text.', _setSelect('fontUi', Object.entries(_SET_FONTS_UI).map(([k, f]) => [k, f.label])));
+
+  // ── your own colours ──
+  const resetColors = _setEl('button', 'set-btn', 'Reset colors'); resetColors.id = 'set-reset-colors';
+  resetColors.onclick = () => { _bpSet.colors = {}; _bpSaveSettings(); _bpApplySettings(); _setRefresh(); };
+  c = card('Colors', resetColors);
+  const colors = _setEl('div', 'set-colors');
+  for (const [gname, items] of _SET_COLOR_GROUPS) {
+    colors.appendChild(_setEl('div', 'set-cgroup', gname));
+    const g = _setEl('div', 'set-cgrid');
+    for (const [k, label] of items) {
+      const l = _setEl('label', 'set-color'), i = _setEl('input'), nm = _setEl('span', 'nm', label), hx = _setEl('span', 'hx');
+      i.type = 'color'; i.id = 'set-color-' + k; i.dataset.key = k;
+      i.oninput = () => { _setColorInput(k, i.value, false); hx.textContent = i.value; };
+      i.onchange = () => { _setColorInput(k, i.value, true); };
+      l.appendChild(i); l.appendChild(nm); l.appendChild(hx);
+      g.appendChild(l); _setUI.pickers[k] = { label: l, input: i, hx };
+    }
+    colors.appendChild(g);
+  }
+  c.appendChild(colors);
+
+  // ── console and running ──
+  c = card('Console and running');
+  _setRow(c, 'conFontSize', 'Console font size', null, _setRange('conFontSize', 9, 24, 1, v => v + ' px'));
+  _setRow(c, 'clearConsole', 'Clear the console on Run', 'Start every run with an empty console.', _setToggle('clearConsole'));
+
+  // ── preview ──
+  const pv = _setEl('div', 'set-card'), ph = _setEl('div', 'set-card-h');
+  ph.appendChild(_setEl('span', 'set-grow', 'Preview'));
+  pv.appendChild(ph);
+  const body = _setEl('div', 'set-prev-body');
+  const ln = _setEl('div', 'set-prev-ln'); ln.id = 'set-prev-ln';
+  const code = _setEl('pre', 'set-prev-code'); code.id = 'set-prev-code';
+  body.appendChild(ln); body.appendChild(code); pv.appendChild(body);
+  pv.appendChild(_setEl('div', 'set-prev-foot', 'This is how your code looks in the editor.'));
+  side.appendChild(pv);
+
+  _setRefresh();
+}
+
+function _setColorInput(k, value, commit) {
+  const th = _setThemeById(_bpSet.theme);
+  if (value.toLowerCase() === th.v[k].toLowerCase()) delete _bpSet.colors[k]; else _bpSet.colors[k] = value.toLowerCase();
+  if (commit) { _bpSaveSettings(); _bpApplySettings(); _setRefresh(); }
+  else { _bpApplyVars(); _setRenderPreview(); const p = _setUI.pickers[k]; if (p) p.label.classList.toggle('mod', k in _bpSet.colors); }
+}
+
+// controls show what _bpSet says
+function _setRefresh() {
+  for (const k of ['lineNumbers', 'syntax', 'autoBrackets', 'autoQuotes', 'autoIndent', 'tooltips', 'clearConsole']) { const i = _setUI.ctl[k]; if (i) i.checked = !!_bpSet[k]; }
+  for (const k of ['fontSize', 'lineHeight', 'tooltipDelay', 'conFontSize']) {
+    const i = _setUI.ctl[k]; if (i) { i.value = _bpSet[k]; i._val.textContent = i._fmt(_bpSet[k]); }
+  }
+  const tn = _setUI.ctl.tabSize; if (tn) tn.value = _bpSet.tabSize;
+  const f1 = _setUI.ctl.fontCode; if (f1) f1.value = _bpSet.fontCode;
+  const f2 = _setUI.ctl.fontUi; if (f2) f2.value = _bpSet.fontUi;
+  const f3 = _setUI.ctl.fontCodeCustom; if (f3 && f3 !== document.activeElement) f3.value = _bpSet.fontCodeCustom;
+  if (_setUI.rows.fontCodeCustom) _setUI.rows.fontCodeCustom.style.display = _bpSet.fontCode === 'custom' ? '' : 'none';
+  if (_setUI.rows.tooltipDelay) _setUI.rows.tooltipDelay.classList.toggle('off', !_bpSet.tooltips);
+  if (_setUI.ctl.tooltipDelay) _setUI.ctl.tooltipDelay.disabled = !_bpSet.tooltips;
+  for (const id in _setUI.themeBtns) _setUI.themeBtns[id].classList.toggle('active', id === _bpSet.theme && true);
+  const res = _bpResolveTheme(_bpSet);
+  for (const k in _setUI.pickers) {
+    const p = _setUI.pickers[k], v = res['--' + k];
+    if (document.activeElement !== p.input) p.input.value = v;
+    p.hx.textContent = v;
+    p.label.classList.toggle('mod', k in _bpSet.colors);
+  }
+  const rc = document.getElementById('set-reset-colors'); if (rc) rc.disabled = !Object.keys(_bpSet.colors).length;
+}
+
+function _bpInitSettings() {
+  _setBuildUI();
+  _bpApplySettings();
+}
+window._bpSettings = { state: _bpSet, change: _setChange, resetAll: _setResetAll, apply: _bpApplySettings, vars: _bpSettingsVars };
+_bpInitSettings();
 
 // ══════════════════════════════════════════════════════════════
 //  Boot
