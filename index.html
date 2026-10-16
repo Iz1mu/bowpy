@@ -435,6 +435,7 @@ body.dropping #drop-overlay{display:flex;}
 .wiki-bc-seg{cursor:pointer;color:var(--txt3);transition:color .1s;}
 .wiki-bc-seg:hover{color:var(--blue);}
 .wiki-bc-sep{color:var(--txt3);}
+.wiki-bc-cur{color:var(--txt);font-weight:600;}
 #wiki-body{max-width:860px;}
 .wiki-p{font:400 15px var(--font-ui);color:var(--txt);margin:18px 0 6px;line-height: 22px;}
 .wiki-p code{font:400 12px monospace;vertical-align: 2px;color:var(--txt);margin:18px 0 6px;background-color: var(--bg2);border: 1px solid var(--bdr);border-radius: 6px;padding: 2px 4px 2px 4px;}
@@ -1091,7 +1092,8 @@ class Renderer {
     this._progCur = null;
     this.msaaFbo = null; this.msaaW = 0; this.msaaH = 0; this.samples = 0;
     this.layerT = null;
-    this.post = null;                  // the screen shader (see setPost)
+    this.posts = new Map();            // compiled shaders by number (see compilePost / applyPost)
+    this.postNext = 1;
     this.postProgs = new Map();
     this._initGL();
     canvas.addEventListener('webglcontextlost', e => { e.preventDefault(); this.lost = true; }, false);
@@ -1101,7 +1103,7 @@ class Renderer {
       this.imgTex = new WeakMap(); this.msaaFbo = null; this.msaaW = this.msaaH = 0;
       this.active = null; this.layerT = null; this._blendKey = null; this._progCur = null; this.vbN = 0;
       this.postProgs = new Map();
-      if (this.post) { this.post.prog = null; this.post.epoch = -1; this.post.dirty = true; }
+      for (const P of this.posts.values()) { P.prog = null; P.epoch = -1; }
       this._initGL();
       if (this.screen) { this._allocRes(this.screen); this.screen.presentedGen = -1; }
     }, false);
@@ -1578,10 +1580,8 @@ class Renderer {
     const c = this.canvas;
     if (Math.max(1, c.width) !== S.w || Math.max(1, c.height) !== S.h) this._resizeScreen(c.width, c.height);
     this.flush();
-    const P = this.post;
-    if (!force && S.gen === S.presentedGen && !(P && P.dirty)) return;
+    if (!force && S.gen === S.presentedGen) return;
     this.commit(S);
-    if (P && this._presentPost(P, S)) { S.presentedGen = S.gen; P.dirty = false; return; }
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, S.res.fbo);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
     gl.disable(gl.SCISSOR_TEST);
@@ -1590,41 +1590,19 @@ class Renderer {
     S.presentedGen = S.gen;
   }
 
-  // ── the screen shader: fragment(pos) is translated to GLSL and runs for every pixel while the screen is presented ──
-  setPost(src, nslots, usesLive) {
+  // ── shaders: fragment(shader) is translated to GLSL; every call runs the program over a whole target, in place ──
+  compilePost(src, nslots, usesLive) {
     if (this.lost) return 'the WebGL context is lost';
-    const P = { src, nslots, usesLive: !!usesLive, prog: null, loc: null, epoch: -1,
-                u: new Float32Array(4 * Math.max(1, nslots | 0)), live: new Float32Array(8), dirty: true };
+    const P = { src, nslots: nslots | 0, usesLive: !!usesLive, prog: null, loc: null, epoch: -1,
+                u: new Float32Array(4 * Math.max(1, nslots | 0)) };
     const err = this._buildPost(P);
     if (err) return err;
-    this.post = P;
-    if (this.screen) this.screen.presentedGen = -1;
-    return '';
+    if (this.posts.size >= 64) this.posts.delete(this.posts.keys().next().value);
+    const id = this.postNext++;
+    this.posts.set(id, P);
+    return id;
   }
-  clearPost() {
-    if (!this.post) return;
-    this.post = null;
-    if (this.screen) this.screen.presentedGen = -1;
-  }
-  // the values of the global variables the shader reads (a flat list of floats, four per variable)
-  setPostUniforms(u) {
-    const P = this.post;
-    if (!P) return;
-    const a = (u && typeof u.toJs === 'function') ? u.toJs() : u;
-    const d = P.u, n = Math.min(d.length, a.length);
-    let ch = false;
-    for (let i = 0; i < n; i++) { const v = Math.fround(a[i]); if (d[i] !== v) { d[i] = v; ch = true; } }
-    if (ch) P.dirty = true;
-  }
-  // time (seconds since the program started), frame time, fps, mouse position and buttons
-  tickLive(t, dt, fps, mx, my, m0, m1, m2) {
-    const P = this.post;
-    if (!P) return;
-    const L = P.live;
-    if (P.usesLive && (L[0] !== Math.fround(t) || L[3] !== Math.fround(mx) || L[4] !== Math.fround(my) || L[5] !== m0 || L[6] !== m1 || L[7] !== m2 ||
-                       L[1] !== Math.fround(dt) || L[2] !== Math.fround(fps))) P.dirty = true;
-    L[0] = t; L[1] = dt; L[2] = fps; L[3] = mx; L[4] = my; L[5] = m0; L[6] = m1; L[7] = m2;
-  }
+  dropPosts() { this.posts.clear(); }
   _buildPost(P) {
     const gl = this.gl;
     const cache = this.postProgs || (this.postProgs = new Map());
@@ -1642,35 +1620,52 @@ class Renderer {
       if (!ok) { gl.deleteProgram(prog); return 'the GPU could not compile the shader (' + log + ')'; }
       hit = { prog, loc: { uScene: gl.getUniformLocation(prog, 'uScene'), uRes: gl.getUniformLocation(prog, 'uRes'),
                            uT: gl.getUniformLocation(prog, 'uT'), uM: gl.getUniformLocation(prog, 'uM'), uU: gl.getUniformLocation(prog, 'uU') } };
-      if (cache.size >= 8) { const k = cache.keys().next().value; try { gl.deleteProgram(cache.get(k).prog); } catch (e) {} cache.delete(k); }
+      if (cache.size >= 64) {
+        // forget the oldest program; the shaders that use it are built again when they run next
+        const k = cache.keys().next().value;
+        try { gl.deleteProgram(cache.get(k).prog); } catch (e) {}
+        cache.delete(k);
+        for (const Q of this.posts.values()) if (Q.src === k) { Q.prog = null; Q.epoch = -1; }
+      }
       cache.set(P.src, hit);
     }
     P.prog = hit.prog; P.loc = hit.loc; P.epoch = this.epoch;
     return '';
   }
-  // draw the screen target onto the canvas through the shader (a full-screen triangle)
-  _presentPost(P, S) {
+  // run shader `id` over the whole of target T: the picture drawn so far goes in (as uScene) and the result replaces it.
+  // `u` holds the values of the global variables the shader reads (four floats each); `live` is time, frame time, fps,
+  // mouse position and buttons.
+  applyPost(T, id, u, live) {
+    const P = this.posts.get(id);
+    if (!P || this.lost || !T) return false;
+    if (P.epoch !== this.epoch && this._buildPost(P)) { this.posts.delete(id); return false; }
     const gl = this.gl;
-    if (P.epoch !== this.epoch && this._buildPost(P)) { this.post = null; return false; }
-    const L = P.loc, v = P.live;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.viewport(0, 0, S.w, S.h);
-    gl.disable(gl.SCISSOR_TEST); gl.disable(gl.BLEND); this._blendKey = null;
+    this.use(T);                      // T becomes the active target (anything still waiting to be drawn goes first)
+    this.flush();
+    this.commit(T);                   // T.res.tex holds the picture as drawn so far
+    const L = P.loc, v = live || [0, 0, 0, 0, 0, 0, 0, 0];
+    const a = (u && typeof u.toJs === 'function') ? u.toJs() : (u || []);
+    const d = P.u; d.fill(0);
+    const n = Math.min(d.length, a.length);
+    for (let i = 0; i < n; i++) d[i] = a[i];
+    // the result is drawn into the multisampled buffer that every drawing call uses, with blending off, so it replaces the picture
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.msaaFbo);
+    gl.viewport(0, 0, T.w, T.h);
+    gl.disable(gl.SCISSOR_TEST); gl.disable(gl.STENCIL_TEST); gl.disable(gl.BLEND); this._blendKey = null;
+    gl.colorMask(true, true, true, true);
     gl.useProgram(P.prog); this._progCur = null;
     gl.activeTexture(gl.TEXTURE7);
-    gl.bindTexture(gl.TEXTURE_2D, S.res.tex);
+    gl.bindTexture(gl.TEXTURE_2D, T.res.tex);
     gl.bindSampler(7, this.samplers[0]);
     gl.uniform1i(L.uScene, 7);
-    gl.uniform2f(L.uRes, S.w, S.h);
+    gl.uniform2f(L.uRes, T.w, T.h);
     gl.uniform4f(L.uT, v[0], v[1], v[2], v[7]);
     gl.uniform4f(L.uM, v[3], v[4], v[5], v[6]);
-    if (L.uU) gl.uniform4fv(L.uU, P.u);
+    if (L.uU) gl.uniform4fv(L.uU, d);
     gl.bindVertexArray(this.pvao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.bindVertexArray(this.vao);
-    const A = this.active || S;
-    gl.viewport(0, 0, A.w, A.h);
-    this._rebindRender();
+    T.msaaDirty = true; T.blank = false; T.gen++;
     return true;
   }
 
@@ -2591,6 +2586,8 @@ class Ctx2D {
   }
   // r<<24|g<<16|b<<8|a of one pixel (straight alpha), without making an ImageData
   bpPixel(x, y) { return this.R.pixelPacked(this.T, Math.floor(x), Math.floor(y)); }
+  // fragment(shader): run a compiled shader over the whole target
+  bpPost(id, u, live) { return this.R.applyPost(this.T, id, u, live); }
   putImageData(img, dx, dy, rx, ry, rw, rh) {
     dx = Math.floor(+dx); dy = Math.floor(+dy);
     if (!(fin(dx) && fin(dy))) return;
@@ -2690,9 +2687,7 @@ function tryWebGL2(canvas, opts) {
     },
     captureRegion(x, y, w, h) { R.syncScreen(); return R.targetToCanvas(R.screen, x, y, w, h); },
     present() { R.present(false); },
-    setPost: (src, n, live) => R.setPost(src, n, live), clearPost: () => R.clearPost(),
-    setPostUniforms: (u) => R.setPostUniforms(u),
-    tickLive: (t, dt, fps, mx, my, m0, m1, m2) => R.tickLive(t, dt, fps, mx, my, m0, m1, m2)
+    compilePost: (src, n, live) => R.compilePost(src, n, live), dropPosts: () => R.dropPosts()
   };
 }
 
@@ -3014,10 +3009,10 @@ function _applyScreenTransform() {
 //  Runtime state
 // ══════════════════════════════════════════════════════════════
 let pyodide = null, running = false, rafId = null;
-// the screen shader is fed the time since the program started and the live mouse every frame
+// a shader is given the time since the program started and the live mouse every time it runs
 let _bpRunT0 = performance.now();
-function _bpTickShader() {
-  if (BE.tickLive) BE.tickLive((performance.now() - _bpRunT0) / 1000, deltaTime, fpsSmooth, mx, my, btnsHeld.has(0) ? 1 : 0, btnsHeld.has(1) ? 1 : 0, btnsHeld.has(2) ? 1 : 0);
+function _bpLiveVals() {
+  return [(performance.now() - _bpRunT0) / 1000, deltaTime, fpsSmooth, mx, my, btnsHeld.has(0) ? 1 : 0, btnsHeld.has(1) ? 1 : 0, btnsHeld.has(2) ? 1 : 0];
 }
 function _bpSetMainSrc(code) { try { pyodide.globals.set('_BP_MAIN_SRC', String(code)); } catch (e) {} }
 let lastTs = 0, deltaTime = 0.016, fpsSmooth = 60, fpsLimit = 0;
@@ -4290,6 +4285,7 @@ function _bpHostFactory() {
   function clipRead() { clip.want = true; refresh(); return clip.text; }
   function onGesture(e) {
     flush(true);
+    if (fsx.want && !fsx.busy && !fsEl()) fsEnter();
     if (clip.want && (e.type === 'pointerup' || e.type === 'touchend')) { clip.fails = 0; refresh(); }
   }
   ['pointerup', 'touchend', 'click', 'keydown'].forEach(ev => window.addEventListener(ev, onGesture, true));
@@ -4319,10 +4315,96 @@ function _bpHostFactory() {
       return [d[0], d[1], d[2], d[3]];
     } catch (e) { return null; }
   }
-  return { clipWrite, clipRead, parseColor, _clip: clip };
+  // ── fullscreen(): the screen element of the game fills the display ──
+  // fsx.want: asked for, but the browser has not allowed it yet (no click or key press lately): tried again on the next one.
+  // fsx.owner: who started the fullscreen that is on now: 'game' (this function) or 'settings' (the editor's Settings tab).
+  const fsx = { want: false, busy: false, cancel: false, owner: null, warned: false };
+  const fsHooks = { target: null, change: null, warn: null };
+  const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement || null;
+  function fsWarn(msg) {
+    try { if (fsHooks.warn) fsHooks.warn(msg); else if (typeof console !== 'undefined') console.warn(msg); } catch (e) {}
+  }
+  // exitFullscreen() leaves one level at a time when fullscreen was asked for on two elements (the game's screen, then the
+  // whole page from the Settings tab): carry on until the window is back
+  function fsExit() {
+    try {
+      const fn = document.exitFullscreen || document.webkitExitFullscreen;
+      if (!fn || !fsEl()) return;
+      let guard = 0;
+      const step = () => {
+        if (!fsEl() || guard++ > 4) return;
+        const p = fn.call(document);
+        if (p && p.then) p.then(step, () => {});
+      };
+      step();
+    } catch (e) {}
+  }
+  function fsEnter() {
+    if (fsx.busy || fsEl()) return;
+    let el = null;
+    try { el = fsHooks.target ? fsHooks.target() : null; } catch (e) {}
+    el = el || document.documentElement;
+    const fn = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (!fn || !(document.fullscreenEnabled || document.webkitFullscreenEnabled)) {
+      fsx.want = false;
+      fsWarn('fullscreen() is not available in this browser or window.');
+      return;
+    }
+    fsx.busy = true; fsx.cancel = false;
+    const fail = err => {
+      fsx.busy = false; fsx.cancel = false;
+      // refused (usually: no click, tap or key press in the last few seconds): it stays wanted and is tried again on the next one
+      if (!fsx.warned) { fsx.warned = true; fsWarn('fullscreen(): the browser did not allow it yet' + (err && err.message ? ' (' + err.message + ')' : '') + '. It will be tried again on the next click, tap or key press.'); }
+    };
+    try {
+      const p = fn.call(el, { navigationUI: 'hide' });
+      if (p && p.then) p.then(() => { fsx.busy = false; if (fsx.cancel && fsEl()) fsExit(); fsx.cancel = false; }, fail);
+      else fsx.busy = false;
+    } catch (e) { fail(e); }
+  }
+  // fullscreen(), fullscreen(True), fullscreen(False): returns the state that was asked for
+  function fullscreen(toggle) {
+    const active = !!fsEl();
+    const cur = active || fsx.want;
+    const on = (toggle === undefined || toggle === null) ? !cur : !!toggle;
+    if (on) {
+      fsx.cancel = false;
+      if (!active) { fsx.want = true; fsEnter(); }
+      return true;
+    }
+    fsx.want = false;
+    if (fsx.busy) fsx.cancel = true;
+    if (active) fsExit();
+    return false;
+  }
+  // the program stopped: leave the fullscreen that the game started (one from the Settings tab stays)
+  function fsStop() {
+    fsx.want = false;
+    if (fsx.busy) fsx.cancel = true;
+    if (fsx.owner === 'game' && fsEl()) fsExit();
+  }
+  function fsChanged() {
+    if (fsEl()) {
+      if (fsx.cancel) { fsExit(); return; }
+      if (fsx.want) { fsx.want = false; fsx.owner = 'game'; }
+    } else {
+      fsx.owner = null;
+    }
+    try { if (fsHooks.change) fsHooks.change(); } catch (e) {}
+  }
+  ['fullscreenchange', 'webkitfullscreenchange'].forEach(ev => document.addEventListener(ev, fsChanged));
+  ['fullscreenerror', 'webkitfullscreenerror'].forEach(ev => document.addEventListener(ev, () => {
+    if (!fsx.busy) return;
+    fsx.busy = false; fsx.cancel = false;
+    if (!fsx.warned) { fsx.warned = true; fsWarn('fullscreen(): the browser did not allow it yet. It will be tried again on the next click, tap or key press.'); }
+  }));
+  return { clipWrite, clipRead, parseColor, fullscreen, fsStop, fsExit, fsHooks, _clip: clip, _fs: fsx };
 }
 
 const _bpHost = _bpHostFactory();
+_bpHost.fsHooks.target = () => { try { switchTab('screen'); } catch (e) {} return $scTab; };   // in the editor the game's screen fills the display
+_bpHost.fsHooks.change = () => { fitCanvas(); requestAnimationFrame(fitCanvas); };
+_bpHost.fsHooks.warn = m => { try { window.appendConsole(m, 'warn'); } catch (e) {} };
 window._py = {
   sw()  { return $canvas.width; },  sh()  { return $canvas.height; },
   fps() { return fpsSmooth; },      dt()  { return deltaTime; },
@@ -4415,10 +4497,11 @@ window._py = {
     const d = c.getImageData(x, y, 1, 1).data;
     return ((d[0] << 24) | (d[1] << 16) | (d[2] << 8) | d[3]) >>> 0;
   },
-  // screen shader (fragment)
-  frag_compile(glsl, nslots, live) { return BE.setPost ? BE.setPost(String(glsl), nslots | 0, !!live) : 'the GPU renderer (WebGL2) is not in use'; },
-  frag_set(u) { if (BE.setPostUniforms) BE.setPostUniforms(u); },
-  frag_off() { if (BE.clearPost) BE.clearPost(); },
+  // shaders (fragment)
+  frag_compile(glsl, nslots, live) { return BE.compilePost ? BE.compilePost(String(glsl), nslots | 0, !!live) : 'the GPU renderer (WebGL2) is not in use'; },
+  frag_apply(id, u) { const c = ctx; return !!(c && c.bpPost && c.bpPost(id | 0, u, _bpLiveVals())); },
+  frag_reset() { if (BE.dropPosts) BE.dropPosts(); },
+  fullscreen(t) { return _bpHost.fullscreen(t); },
   // key/btn set accessors
   keys_held()    { return Array.from(keysHeld); },
   keys_pressed() { return Array.from(keysPress); },
@@ -4541,8 +4624,9 @@ window._py = {
   },
   // Fragment shader support – batch pixel I/O
   get_canvas_data() {
-    return Array.from(_mainCtx.getImageData(0, 0, $canvas.width, $canvas.height).data);
+    return Array.from(ctx.getImageData(0, 0, _bpTargetCanvas.width, _bpTargetCanvas.height).data);   // the current draw target
   },
+  canvas_size() { return [_bpTargetCanvas.width, _bpTargetCanvas.height]; },
   put_canvas_data(dp) {
     // Accept list, Uint8Array, bytes (from numpy), or any pyodide proxy
     let u8;
@@ -4558,7 +4642,7 @@ window._py = {
     } catch(_) {
       u8 = new Uint8ClampedArray(Array.from(dp));
     }
-    _mainCtx.putImageData(new ImageData(u8, $canvas.width, $canvas.height), 0, 0);
+    ctx.putImageData(new ImageData(u8, _bpTargetCanvas.width, _bpTargetCanvas.height), 0, 0);
   },
   // Mouse wheel
   wu() { return wheelUp; },
@@ -5230,7 +5314,7 @@ def get_pixel(x, y=None):
                                          bottom-right), each value from 0 to 1. Between two pixels it blends them, like a
                                          GPU texture read.
 
-    Inside fragment(pos) only the Vec2 form is used: get_pixel(pos) is the colour that was drawn at pos.
+    Inside a shader function (see fragment()) only the Vec2 form is used: get_pixel(pos) is the colour that is on the screen at pos.
     """
     if y is None:
         return _sh_sample(x)
@@ -6080,6 +6164,55 @@ def read_clipboard():
     return str(_py.clip_read())
 
 
+
+# ── Text helpers ───────────────────────────────────────────────
+def querty():
+    """Return the letter keys of a QWERTY keyboard as text, one row per line: three rows, joined by line breaks.
+
+    Split it at the line breaks to get the rows. (qwerty() is the same function with the usual spelling.)
+
+    Example:
+        for row, letters in enumerate(querty().split("\\\\n")):
+            draw_text(20, 20 + row * 30, letters, "white", 24)
+    """
+    return 'qwertyuiop\\nasdfghjkl\\nzxcvbnm'
+
+qwerty = querty
+
+def abc():
+    """Return the lowercase alphabet as text: the 26 letters from a to z.
+
+    Example:
+        for i, letter in enumerate(abc()):
+            draw_text(20 + i * 26, 20, letter, "white", 22)
+    """
+    return 'abcdefghijklmnopqrstuvwxyz'
+
+
+# ── Fullscreen ─────────────────────────────────────────────────
+def fullscreen(toggle=None):
+    """Turn fullscreen on or off, or switch it when no value is given.
+
+    fullscreen()        switches: on if it is off, off if it is on
+    fullscreen(True)    on, whatever it was before
+    fullscreen(False)   off, whatever it was before
+
+    Returns the state that was asked for (True for fullscreen).
+
+    A browser only allows fullscreen while the player is interacting with the page. A call right after a key press
+    or a click works at once. If a call is refused (for example one made when the game starts), the game goes
+    fullscreen on the player's next click, tap or key press. Esc always leaves fullscreen.
+
+    In the editor, stopping the program leaves the fullscreen that this function turned on. Fullscreen that was
+    turned on in the Settings tab stays on.
+
+    Example:
+        if key_pressed("f"):
+            fullscreen()
+    """
+    return bool(_py.fullscreen(None if toggle is None else bool(toggle)))
+
+
 # ── Misc ───────────────────────────────────────────────────────
 def in_bounds(value, minimum, maximum):
     """Return True if minimum <= value <= maximum."""
@@ -6728,6 +6861,10 @@ def _sh_ident(name):
     s = _sh_re.sub(r'[^A-Za-z0-9_]', lambda m: '_x%X_' % ord(m.group(0)), name)
     while '__' in s:
         s = s.replace('__', '_u_')
+    if s.startswith('_'):                  # 'v_' + '_tmp' would hold two underscores in a row, which GLSL reserves
+        s = 'u' + s
+    if s.endswith('_'):
+        s = s + 'u'
     return s
 
 
@@ -6864,14 +7001,14 @@ class _ShCompiler:
     # ═════════════════════ entry ═════════════════════
     def compile_entry(self, fn):
         if not isinstance(fn, _sh_types.FunctionType):
-            raise _ShaderError('fragment must be a function defined with def')
+            raise _ShaderError('the shader must be a function defined with def')
         node, info = self.source_of(fn)
         if node is None:
             raise _ShaderError('fragment(): the source code of the function is not available')
         self.fn_ctx = {'file': info}
         a = node.args
         if a.vararg or a.kwarg or a.kwonlyargs or len(a.args) != 1 or a.defaults:
-            self.fail(node, 'fragment must take exactly one argument: def fragment(pos)')
+            self.fail(node, 'a shader function must take exactly one argument: def my_shader(pos)')
         f = self.instance(fn, ['vec2'], node=node, is_entry=True)
         # the shader's colour: a Vec3 (or a plain number, a grey) is opaque, a Vec4 sets its own alpha
         rt = f.ret
@@ -7053,6 +7190,8 @@ class _ShCompiler:
             self.emit('return;')
             return
         code, t = self.ex(n.value)
+        if ctx.get('entry') and isinstance(n.value, (_sh_ast.Tuple, _sh_ast.List)) and t in ('vec3', 'vec4') and self.all_int(n.value):
+            code = '(%s / 255.0)' % code            # (255, 128, 0): whole numbers are a colour from 0 to 255, like everywhere in BowPy
         if _sh_is_arr(t):
             self.fail(n, 'a list cannot be returned from a shader function')
         cur = ctx['ret']
@@ -7076,6 +7215,12 @@ class _ShCompiler:
                 self.fail(n, 'fragment() must return a colour: Vec3, Vec4, (r, g, b) or a grey level from 0 to 1 (this returns %s)' % _sh_tname(t))
             return
         self.emit('return %s;' % self.conv(n, code, t, want))
+
+    def all_int(self, node):
+        for e in node.elts:
+            if self.ex(e)[1] != 'int':
+                return False
+        return True
 
     def st_If(self, n):
         c, t = self.ex(n.test)
@@ -7573,6 +7718,9 @@ class _ShCompiler:
         g = self.fn_ctx['g'] if g is None else g
         if name not in g:
             hint = ' (it is not available in shaders)' if hasattr(_sh_builtins, name) else ''
+            _f = self.fn_ctx.get('fn')
+            if _f is not None and name in getattr(getattr(_f, '__code__', None), 'co_freevars', ()):
+                hint = ' (it belongs to the function around the shader; a shader can only read global variables)'
             self.fail(node, "the name '%s' is not defined%s" % (qual and '%s.%s' % (qual, name) or name, hint))
         obj = g[name]
         if name in self.math_consts and obj is self.math_consts[name]:
@@ -8228,7 +8376,7 @@ class _ShCompiler:
         for g in self.order:
             parts.append(g.code)
         body = ('void main() {\\n'
-                '  vec2 pos = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y) / uRes;\\n'
+                '  vec2 pos = gl_FragCoord.xy / uRes;\\n'
                 '  %s R = %s(pos);\\n'
                 '  vec4 c = clamp(%s, 0.0, 1.0);\\n'
                 '  outColor = vec4(c.rgb * c.a, c.a);\\n}') % (
@@ -8241,7 +8389,7 @@ class _ShCompiler:
 # ── Running the shader: where the source comes from, the per-frame uniforms, the CPU fallback ───────────
 _BP_MAIN_SRC = ''          # source code of main.bpy (the host sets it before every run)
 _BP_SRC_FILES = {}         # file name -> source code of include()d files
-_FRAG = {'fn': None, 'mode': 'off', 'pack': None, 'scene': None, 'src': None, 'warned': False}
+_FRAG = {'progs': {}, 'src': None, 'warned': False, 'hinted': False}
 _SH_TREES = {}
 
 
@@ -8353,30 +8501,28 @@ def _sh_warn(msg):
 
 
 def _bp_frag_reset():
-    """Forget the shader (a new run starts, or the program stopped): the next run starts with the default fragment()."""
-    _FRAG.update(fn=None, mode='off', pack=None, scene=None, src=None, warned=False)
+    """Forget the compiled shaders (a new run starts, or the program stopped)."""
+    st = _FRAG
+    st['progs'].clear()
+    st['src'] = None
+    st['warned'] = False
+    st['hinted'] = False
     g = globals()
-    if g.get('fragment') is not _bp_default_fragment:
+    if g.get('fragment') is not _bp_fragment_api:
         try:
-            g['fragment'] = _bp_default_fragment
+            g['fragment'] = _bp_fragment_api
         except Exception:
             pass
     try:
-        _py.frag_off()
+        _py.frag_reset()
     except Exception:
         pass
 
 
-def _bp_frag_select(fn):
+def _bp_frag_build(fn):
+    """Translate a shader function to GLSL and compile it on the GPU: {'mode': 'gpu', 'id': n, 'pack': f} or {'mode': 'cpu'}."""
     st = _FRAG
-    st.update(fn=fn, mode='off', pack=None, scene=None, src=None)
-    _py.frag_off()
-    if fn is None or fn is _bp_default_fragment or not callable(fn):
-        return
-    code = getattr(fn, '__code__', None)
-    if code is not None and (code.co_argcount != 1 or code.co_flags & 0x0C or code.co_kwonlyargcount):
-        raise TypeError('fragment() must take exactly one argument: def fragment(pos): ...  pos is a Vec2 from 0 to 1 and '
-                        'get_pixel(pos) is the colour that was drawn there (the old fragment(r, g, b, pos) form is gone)')
+    ent = {'mode': 'cpu', 'id': 0, 'pack': None}
     reason = None
     try:
         comp, glsl = _bp_shader_glsl(fn)
@@ -8385,42 +8531,16 @@ def _bp_frag_select(fn):
     except Exception as e:                         # a bug in the translator must never stop the program
         reason = 'internal error while translating the shader (%s: %s)' % (type(e).__name__, e)
     else:
-        err = 'forced onto the CPU' if st.get('no_gpu') else _py.frag_compile(glsl, comp.nslots, bool(comp.uses_live))
-        if not err:
-            st['mode'] = 'gpu'
-            st['pack'] = _sh_make_packer(comp) if comp.nslots else None
-            st['glsl'] = glsl
-            return
-        reason = str(err)
-    st['mode'] = 'cpu'
+        res = 'forced onto the CPU' if st.get('no_gpu') else _py.frag_compile(glsl, comp.nslots, bool(comp.uses_live))
+        if res is None or isinstance(res, str):
+            reason = res or 'the GPU could not compile the shader'
+        else:
+            ent.update(mode='gpu', id=int(res), pack=_sh_make_packer(comp) if comp.nslots else None, glsl=glsl)
+            return ent
     if not st['warned']:
         st['warned'] = True
         _sh_warn('fragment() cannot run on the GPU, so it runs on the CPU, which is very slow: %s' % reason)
-
-
-def _bp_frag_tick():
-    """Once per frame, after update(): send the shader's variables to the GPU (or run it on the CPU)."""
-    fn = globals().get('fragment')
-    st = _FRAG
-    if fn is not st['fn']:
-        _bp_frag_select(fn)
-    m = st['mode']
-    if m == 'gpu':
-        pk = st['pack']
-        if pk is not None:
-            _py.frag_set(pk())
-    elif m == 'cpu':
-        _bp_frag_cpu(fn)
-
-
-def _bp_frag_restore():
-    """CPU shader: bring back the picture as it was drawn, so only the display is shaded (like the GPU path)."""
-    st = _FRAG
-    scene = st['scene']
-    if scene is not None:
-        st['scene'] = None
-        if len(scene) == W() * H() * 4:
-            _py.put_canvas_data(scene)
+    return ent
 
 
 def _sh_rgba(res):
@@ -8428,7 +8548,14 @@ def _sh_rgba(res):
         r = g = b = float(res)
         a = 1.0
     else:
-        t = res.to_tuple() if hasattr(res, 'to_tuple') else tuple(res)
+        try:
+            t = res.to_tuple() if hasattr(res, 'to_tuple') else tuple(res)
+            if not all(isinstance(c, (int, float)) for c in t):
+                raise TypeError('not numbers')
+        except TypeError:
+            raise TypeError('fragment() must return a colour: Vec3(r, g, b), Vec4(r, g, b, a), a tuple or a grey level, each from 0 to 1 (this returned %s)' % type(res).__name__) from None
+        if not hasattr(res, 'to_tuple') and all(type(c) is int for c in t):
+            t = tuple(c * _SH_K255 for c in t)      # whole numbers: a colour from 0 to 255, like everywhere in BowPy
         if len(t) == 3:
             r, g, b = t
             a = 1.0
@@ -8441,12 +8568,12 @@ def _sh_rgba(res):
 
 def _bp_frag_cpu(fn):
     st = _FRAG
-    w, h = W(), H()
+    sz = _py.canvas_size()                       # the size of the current draw target (the screen, or a Surface)
+    w, h = int(sz[0]), int(sz[1])
     if w * h == 0:
         return
     raw = _py.get_canvas_data()
     buf = bytes(raw.to_py() if hasattr(raw, 'to_py') else raw)
-    st['scene'] = buf
     out = bytearray(buf)
     st['src'] = (buf, w, h)
     try:
@@ -8554,48 +8681,80 @@ def _sh_sample(pos):
     return Vec4(0.0, 0.0, 0.0, 0.0)
 
 
-def fragment(pos):
-    """The screen shader: define your own fragment(pos) to change how every pixel of the screen looks.
+def fragment(shader):
+    """Apply a shader to the screen as it is right now: shader(pos) is called for every pixel and returns its new colour.
 
-    pos is a Vec2 from 0 to 1 - (0, 0) is the top-left of the screen, (1, 1) the bottom-right. Return the
-    colour of that pixel as a Vec3(r, g, b) (opaque) or a Vec4(r, g, b, a), each value from 0 to 1.
-    get_pixel(pos) gives the colour that was drawn at a position, as a Vec4.
+    shader is a function that you write with def and one argument, pos: a Vec2 from 0 to 1 ((0, 0) is the top-left
+    of the screen, (1, 1) the bottom-right). It returns the colour of that pixel as a Vec3(r, g, b) or Vec4(r, g, b, a)
+    with values from 0 to 1, as a tuple of whole numbers from 0 to 255, or as a grey level. get_pixel(pos) gives the
+    colour that the screen had at a position, as a Vec4.
 
-    The default shader leaves the picture as it is:
+    Everything drawn so far goes through the shader and the result replaces the picture. Draw commands after the call
+    are not shaded, so call fragment() where you want the effect: at the end of update() to shade the whole frame.
 
-        def fragment(pos):
-            return get_pixel(pos)
-
-    Your function runs once per pixel, every frame, after update() - on the GPU, so it is very fast. For that,
-    BowPy turns it into a GPU program: use numbers, Vec2 / Vec3 / Vec4, math functions, if / for / while,
-    your own helper functions and your global variables (they are read again every frame).
+    It runs on the GPU, so it is very fast. BowPy turns your function into a GPU program: use numbers, Vec2 / Vec3 /
+    Vec4, math functions, if / for / while, your own helper functions and your global variables (they are read
+    again every time fragment() is called).
 
     Example (a pulsing vignette):
-        def fragment(pos):
+        def vignette(pos):
             c = get_pixel(pos)
             d = length(pos - Vec2(0.5, 0.5)) * (1.2 + 0.2 * sin(get_time() * 3))
             return c.rgb * (1.0 - clamp(d, 0, 1))
+
+        def update():
+            clear("steelblue")
+            draw_circle(W() / 2, H() / 2, 80, "orange")
+            fragment(vignette)
+            draw_text(20, 20, "this text is not shaded", "white", 24)
     """
-    if callable(pos):
-        raise TypeError('fragment() is now a function you define yourself: write  def fragment(pos): ...  where pos is '
-                        'a Vec2 from 0 to 1, and return the colour of that pixel (see the wiki page of fragment()).')
-    return get_pixel(pos)
+    if not isinstance(shader, _sh_types.FunctionType):
+        raise TypeError('fragment() takes a function: write  def my_shader(pos): ...  and call  fragment(my_shader)  '
+                        '(pos is a Vec2 from 0 to 1, and the function returns the colour of that pixel)')
+    code = shader.__code__
+    if shader.__name__ == '<lambda>':
+        raise TypeError('the shader given to fragment() must be written with def, a lambda cannot be used')
+    if code.co_argcount != 1 or code.co_flags & 0x0C or code.co_kwonlyargcount or shader.__defaults__:
+        raise TypeError('the shader given to fragment() must take exactly one argument: def %s(pos): ...  '
+                        'pos is a Vec2 from 0 to 1 and get_pixel(pos) is the colour that is on the screen there' % shader.__name__)
+    st = _FRAG
+    progs = st['progs']
+    ent = progs.get(code)
+    if ent is None:
+        if len(progs) >= 48:
+            progs.clear()
+        ent = progs[code] = _bp_frag_build(shader)
+    if ent['mode'] == 'gpu':
+        pk = ent['pack']
+        if _py.frag_apply(ent['id'], pk() if pk is not None else []):
+            return
+        # the GPU forgot the program (context lost, too many programs): build it once more
+        ent = progs[code] = _bp_frag_build(shader)
+        if ent['mode'] == 'gpu':
+            pk = ent['pack']
+            if _py.frag_apply(ent['id'], pk() if pk is not None else []):
+                return
+    _bp_frag_cpu(shader)
 
 
-_bp_default_fragment = fragment
+_bp_fragment_api = fragment
+
 
 _BP_RESERVED = set(globals().keys())
 _BP_API.update({k: v for k, v in globals().items() if not k.startswith('__')})
-_HAS_UPDATE=False; _HAS_SETUP=False; _HAS_FRAG=False; _HAS_LOOP=False
+_HAS_UPDATE=False; _HAS_SETUP=False; _HAS_LOOP=False
 def _check():
-    global _HAS_UPDATE,_HAS_SETUP,_HAS_FRAG,_HAS_LOOP
+    global _HAS_UPDATE,_HAS_SETUP,_HAS_LOOP
     g=globals(); _HAS_UPDATE=callable(g.get('update')); _HAS_SETUP=callable(g.get('setup'))
-    _f=g.get('fragment'); _HAS_FRAG=callable(_f) and _f is not _bp_default_fragment
-    _HAS_LOOP=_HAS_UPDATE or _HAS_FRAG     # a program that only defines fragment() is animated too
+    _HAS_LOOP=_HAS_UPDATE
+    _f=g.get('fragment')
+    if callable(_f) and _f is not _bp_fragment_api and not _FRAG['hinted']:
+        _FRAG['hinted']=True
+        _sh_warn("fragment() is now a function that you call, not one that you define. Your own function called fragment replaces it. "
+                 "Give it another name, for example def my_shader(pos), and call fragment(my_shader) in update() where the shading should happen.")
 def _setup():
     if _HAS_SETUP: globals()['setup']()
 def _frame():
-    if _FRAG['scene'] is not None: _bp_frag_restore()      # (CPU shader) the picture is back as it was drawn
     # Tick all live Timer instances (dt in ms = fps * 0.001 equivalent)
     _dt_ms = float(_py.dt()) * 1000.0
     _i = 0
@@ -8616,7 +8775,6 @@ def _frame():
         except Exception:
             _BP_KEY_RECORDERS.pop(_i)
     if _HAS_UPDATE: globals()['update']()
-    _bp_frag_tick()                                         # the screen shader: send its variables to the GPU
 `;
 
 // ══════════════════════════════════════════════════════════════
@@ -9731,8 +9889,7 @@ function frame(ts) {
     window.appendConsole(err.message, 'err');
     stopCode(); return;
   }
-  _bpTickShader();
-  BE.present();   // show the finished frame (WebGL: copy the screen target onto the canvas, through the fragment() shader)
+  BE.present();   // show the finished frame (WebGL: copy the screen target onto the canvas)
   // Clear img_from_screen cache accumulated this frame
   for (const img of _bpScreenCapImages) { img.src = ''; _bpImgDataCache.delete(img); }
   _bpScreenCapImages.length = 0;
@@ -9790,6 +9947,7 @@ async function runCode() {
 
 function stopCode(msg = true) {
   running = false;
+  try { _bpHost.fsStop(); } catch (e) {}      // leave a fullscreen that fullscreen() turned on (not one from the Settings tab)
   if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
   // Reset draw target to main canvas (safety – in case a Surface target was active)
   ctx = _mainCtx;
@@ -10066,7 +10224,7 @@ let ctx=BE.ctx;
 const _mainCtx=ctx;let _bpTargetCanvas=$canvas;
 let running=false,lastTs=0,deltaTime=0.016,fpsSmooth=60,fpsLimit=0;
 let _bpRunT0=performance.now();
-function _bpTickShader(){if(BE.tickLive)BE.tickLive((performance.now()-_bpRunT0)/1000,deltaTime,fpsSmooth,mx,my,btnsHeld.has(0)?1:0,btnsHeld.has(1)?1:0,btnsHeld.has(2)?1:0);}
+function _bpLiveVals(){return[(performance.now()-_bpRunT0)/1000,deltaTime,fpsSmooth,mx,my,btnsHeld.has(0)?1:0,btnsHeld.has(1)?1:0,btnsHeld.has(2)?1:0];}
 function _bpSetMainSrc(code){try{pyodide.globals.set('_BP_MAIN_SRC',String(code));}catch(e){}}
 let pyodide=null;
 const keysHeld=new Set(),keysPress=new Set(),keysRel=new Set();
@@ -10102,6 +10260,7 @@ function _bpColorToRGB(color){if(color===undefined||color===null||color===''||co
 function _bpSourcePixels(img){let cached=_bpImgDataCache.get(img);if(cached&&cached.w===img.naturalWidth&&cached.h===img.naturalHeight)return cached;const c=document.createElement('canvas');c.width=img.naturalWidth;c.height=img.naturalHeight;const g=c.getContext('2d');g.drawImage(img,0,0);cached={w:c.width,h:c.height,data:g.getImageData(0,0,c.width,c.height).data};_bpImgDataCache.set(img,cached);return cached;}
 function _bpSolveHomography(srcPts,dstPts){const A=[];const B=[];for(let i=0;i<4;i++){const sx=srcPts[i][0],sy=srcPts[i][1],dx=dstPts[i][0],dy=dstPts[i][1];A.push([dx,dy,1,0,0,0,-sx*dx,-sx*dy]);B.push(sx);A.push([0,0,0,dx,dy,1,-sy*dx,-sy*dy]);B.push(sy);}for(let i=0;i<8;i++){let piv=i;for(let r=i+1;r<8;r++)if(Math.abs(A[r][i])>Math.abs(A[piv][i]))piv=r;if(Math.abs(A[piv][i])<1e-12)return null;if(piv!==i){const tr=A[i];A[i]=A[piv];A[piv]=tr;const tb=B[i];B[i]=B[piv];B[piv]=tb;}const div=A[i][i];for(let j=i;j<8;j++)A[i][j]/=div;B[i]/=div;for(let r=0;r<8;r++){if(r===i)continue;const f=A[r][i];if(!f)continue;for(let j=i;j<8;j++)A[r][j]-=f*A[i][j];B[r]-=f*B[i];}}return B;}
 const _bpHost=_bpHostFactory();
+_bpHost.fsHooks.change=function(){fitCanvas();};
 window._py={
   sw(){return $canvas.width;},sh(){return $canvas.height;},
   is_mobile(){return _bpIsMobile();},clip_write(t){_bpHost.clipWrite(String(t));},clip_read(){return _bpHost.clipRead();},color_rgba(c){return _bpHost.parseColor(String(c));},
@@ -10131,14 +10290,15 @@ window._py={
   rectgrad(x,y,w,h,grad){ctx.fillStyle=grad;ctx.fillRect(x,y,w,h);},
   get_pixel(x,y){const d=ctx.getImageData(x,y,1,1).data;return[d[0],d[1],d[2],d[3]];},
   get_pixel_packed(x,y){const c=ctx;if(c.bpPixel)return c.bpPixel(x,y);const d=c.getImageData(x,y,1,1).data;return((d[0]<<24)|(d[1]<<16)|(d[2]<<8)|d[3])>>>0;},
-  frag_compile(glsl,nslots,live){return BE.setPost?BE.setPost(String(glsl),nslots|0,!!live):'the GPU renderer (WebGL2) is not in use';},
-  frag_set(u){if(BE.setPostUniforms)BE.setPostUniforms(u);},
-  frag_off(){if(BE.clearPost)BE.clearPost();},
+  frag_compile(glsl,nslots,live){return BE.compilePost?BE.compilePost(String(glsl),nslots|0,!!live):'the GPU renderer (WebGL2) is not in use';},
+  frag_apply(id,u){const c=ctx;return !!(c&&c.bpPost&&c.bpPost(id|0,u,_bpLiveVals()));},
+  frag_reset(){if(BE.dropPosts)BE.dropPosts();},
+  fullscreen(t){return _bpHost.fullscreen(t);},
   galpha(){return ctx.globalAlpha;},screen_pos(x,y){if(x!==undefined&&y!==undefined){screenX=Number(x)||0;screenY=Number(y)||0;}return[screenX,screenY];},screen_rot(angle,ox,oy){if(angle!==undefined){screenRot=Number(angle)||0;if(ox!==undefined&&oy!==undefined){screenRotOx=Number(ox)||0;screenRotOy=Number(oy)||0;}}return[screenRot,screenRotOx,screenRotOy];},
   img_create(url){const stored=_builtAssets[String(url)];const img=new window.Image();img.crossOrigin='anonymous';img.src=stored||String(url);return img;},
   img_draw(img,x,y,w,h,angle,ox,oy,tint){if(!img||!img.complete||!img.naturalWidth)return;const flipX=w<0;const flipY=h<0;const iw=(w===0)?img.naturalWidth:Math.abs(w);const ih=(h===0)?img.naturalHeight:Math.abs(h);const px=-iw*ox;const py=-ih*oy;const tintRGB=(tint!==undefined&&tint!==null&&tint!==""&&tint!=="none")?_bpColorToRGB(tint):null;ctx.save();ctx.translate(x,y);ctx.rotate(angle);if(flipX||flipY)ctx.scale(flipX?-1:1,flipY?-1:1);ctx.bpDrawImage(img,px,py,iw,ih,tintRGB);ctx.restore();},
-  get_canvas_data(){return Array.from(_mainCtx.getImageData(0,0,$canvas.width,$canvas.height).data);},
-  put_canvas_data(dp){let u8;try{const raw=(dp&&typeof dp.toJs==='function')?dp.toJs():dp;if(raw instanceof Uint8Array||raw instanceof Uint8ClampedArray){u8=(raw instanceof Uint8ClampedArray)?raw:new Uint8ClampedArray(raw.buffer,raw.byteOffset,raw.byteLength);}else if(raw instanceof ArrayBuffer){u8=new Uint8ClampedArray(raw);}else{u8=new Uint8ClampedArray(Array.isArray(raw)?raw:Array.from(raw));}}catch(_){u8=new Uint8ClampedArray(Array.from(dp));}_mainCtx.putImageData(new ImageData(u8,$canvas.width,$canvas.height),0,0);},img_draw_quad(img,pts,tint){if(!img||!img.complete||!img.naturalWidth)return;const rawPts=pts&&pts.toJs?pts.toJs():Array.from(pts||[]);if(rawPts.length!==4)return;const m=ctx.getTransform();const p=rawPts.map(pt=>{const q=pt&&pt.toJs?pt.toJs():Array.from(pt);const x=Number(q[0]),y=Number(q[1]);return[m.a*x+m.c*y+m.e,m.b*x+m.d*y+m.f];});ctx.bpDrawQuad(img,p,_bpColorToRGB(tint));},
+  get_canvas_data(){return Array.from(ctx.getImageData(0,0,_bpTargetCanvas.width,_bpTargetCanvas.height).data);},canvas_size(){return [_bpTargetCanvas.width,_bpTargetCanvas.height];},
+  put_canvas_data(dp){let u8;try{const raw=(dp&&typeof dp.toJs==='function')?dp.toJs():dp;if(raw instanceof Uint8Array||raw instanceof Uint8ClampedArray){u8=(raw instanceof Uint8ClampedArray)?raw:new Uint8ClampedArray(raw.buffer,raw.byteOffset,raw.byteLength);}else if(raw instanceof ArrayBuffer){u8=new Uint8ClampedArray(raw);}else{u8=new Uint8ClampedArray(Array.isArray(raw)?raw:Array.from(raw));}}catch(_){u8=new Uint8ClampedArray(Array.from(dp));}ctx.putImageData(new ImageData(u8,_bpTargetCanvas.width,_bpTargetCanvas.height),0,0);},img_draw_quad(img,pts,tint){if(!img||!img.complete||!img.naturalWidth)return;const rawPts=pts&&pts.toJs?pts.toJs():Array.from(pts||[]);if(rawPts.length!==4)return;const m=ctx.getTransform();const p=rawPts.map(pt=>{const q=pt&&pt.toJs?pt.toJs():Array.from(pt);const x=Number(q[0]),y=Number(q[1]);return[m.a*x+m.c*y+m.e,m.b*x+m.d*y+m.f];});ctx.bpDrawQuad(img,p,_bpColorToRGB(tint));},
   img_size(img){return[img.naturalWidth||0,img.naturalHeight||0];},
   img_ready(img){return!!(img&&img.complete&&img.naturalWidth);},img_from_screen(x1,y1,x2,y2,keep){const minX=Math.max(0,Math.floor(Math.min(x1,x2)));const minY=Math.max(0,Math.floor(Math.min(y1,y2)));const maxX=Math.min($canvas.width,Math.ceil(Math.max(x1,x2)));const maxY=Math.min($canvas.height,Math.ceil(Math.max(y1,y2)));const w=Math.max(0,maxX-minX);const h=Math.max(0,maxY-minY);const c=BE.captureRegion(minX,minY,w,h);const img=new window.Image();img.src=c.toDataURL("image/png");if(!keep)_bpScreenCapImages.push(img);return img;},
   snd_create(url){const stored=_builtAssets[String(url)];const src=stored&&typeof stored==='object'?(stored.url||String(url)):(stored||String(url));const h={buf:null};const ac=window._bpAC||(window._bpAC=new AudioContext());fetch(src).then(r=>r.arrayBuffer()).then(buf=>ac.decodeAudioData(buf).then(d=>{h.buf=d;})).catch(()=>{});return h;},
@@ -10212,7 +10372,6 @@ async function main(){
       fpsSmooth+=(1/(raw||0.001)-fpsSmooth)*0.08;_applyScreenTransform();
       try{pyodide.runPython('_frame()');}
       catch(e){console.error(e.message);running=false;return;}
-      _bpTickShader();
       BE.present();
       for(const img of _bpScreenCapImages){img.src='';_bpImgDataCache.delete(img);}
       _bpScreenCapImages.length=0;
@@ -10252,77 +10411,77 @@ const WIKI_DOCS = {
       <div class="wiki-note"><b>Tip:</b> Use the search bar at the top-left to jump to any page instantly.</div>
 
       <p class="wiki-p">
-        BowPy is an online Python coding environment with built-in support for graphics, images, audio, assets and utility functions. Programs run entirely in the browser via Pyodide — no installation required.
+        BowPy is an online Python coding environment with built-in support for graphics, images, audio, assets and utility functions. Programs run entirely in the browser via Pyodide - no installation required.
       </p>
 
       <h2 class="wiki-h2">Categories</h2>
       <div class="wiki-members">
         <div class="wiki-member" onclick="openWikiPage('introduction')">
-          <div class="wiki-member-name">🕮 Introduction</div>
+          <div class="wiki-member-name">Introduction</div>
           <div class="wiki-member-desc">How BowPy works: update(), setup() and the game loop.</div>
         </div>
         <div class="wiki-member" onclick="openWikiPage('utils_overview')">
-          <div class="wiki-member-name">🛠 Utils</div>
-          <div class="wiki-member-desc">Screen size, timing, FPS, reset and clipboard helpers.</div>
+          <div class="wiki-member-name">Utils</div>
+          <div class="wiki-member-desc">Screen size, fullscreen, timing, FPS, reset, clipboard and text helpers.</div>
         </div>
         <div class="wiki-member" onclick="openWikiPage('math_overview')">
-          <div class="wiki-member-name">π Math</div>
+          <div class="wiki-member-name">Math</div>
           <div class="wiki-member-desc">Lerp, mix, clamp, easing, noise, color math and more.</div>
         </div>
         <div class="wiki-member" onclick="openWikiPage('random_overview')">
-          <div class="wiki-member-name">⚄ Random</div>
+          <div class="wiki-member-name">Random</div>
           <div class="wiki-member-desc">Random numbers, choices, shuffling and seeds.</div>
         </div>
         <div class="wiki-member" onclick="openWikiPage('geometry_overview')">
-          <div class="wiki-member-name">▲ Geometry</div>
+          <div class="wiki-member-name">Geometry</div>
           <div class="wiki-member-desc">Polygons, moving and rotating them, and shape overlap tests.</div>
         </div>
         <div class="wiki-member" onclick="openWikiPage('graphics_overview')">
-          <div class="wiki-member-name">✎ Graphics</div>
+          <div class="wiki-member-name">Graphics</div>
           <div class="wiki-member-desc">Drawing, transforms, gradients, pixels and shaders.</div>
         </div>
         <div class="wiki-member" onclick="openWikiPage('input_overview')">
-          <div class="wiki-member-name">⌨ Input</div>
+          <div class="wiki-member-name">Input</div>
           <div class="wiki-member-desc">Keyboard and mouse polling every frame.</div>
         </div>
         <div class="wiki-member" onclick="openWikiPage('vec2_overview')">
-          <div class="wiki-member-name">↗ Vec2</div>
+          <div class="wiki-member-name">Vec2</div>
           <div class="wiki-member-desc">2D vector class with operators, math and helpers.</div>
         </div>
         <div class="wiki-member" onclick="openWikiPage('vec3_overview')">
-          <div class="wiki-member-name">↗ Vec3</div>
+          <div class="wiki-member-name">Vec3</div>
           <div class="wiki-member-desc">3D vector class with cross product and axis rotations.</div>
         </div>
         <div class="wiki-member" onclick="openWikiPage('vec4_overview')">
-          <div class="wiki-member-name">↗ Vec4</div>
+          <div class="wiki-member-name">Vec4</div>
           <div class="wiki-member-desc">4-component vector and colour with alpha (r, g, b, a).</div>
         </div>
         <div class="wiki-member" onclick="openWikiPage('matrix_overview')">
-          <div class="wiki-member-name">▦ Matrix</div>
+          <div class="wiki-member-name">Matrix</div>
           <div class="wiki-member-desc">2-D grid container with map, neighbors and transforms.</div>
         </div>
         <div class="wiki-member" onclick="openWikiPage('timer_overview')">
-          <div class="wiki-member-name">⏱ Timer</div>
+          <div class="wiki-member-name">Timer</div>
           <div class="wiki-member-desc">Frame-accurate millisecond timers with countdown support.</div>
         </div>
         <div class="wiki-member" onclick="openWikiPage('key_recorder_overview')">
-          <div class="wiki-member-name">⌨ Key Recorder</div>
+          <div class="wiki-member-name">Key Recorder</div>
           <div class="wiki-member-desc">Capture typed text into a string cache with KeyRecorder.</div>
         </div>
         <div class="wiki-member" onclick="openWikiPage('surface_overview')">
-          <div class="wiki-member-name">□ Surface</div>
+          <div class="wiki-member-name">Surface</div>
           <div class="wiki-member-desc">Off-screen pixel buffers for compositing, effects and pre-rendering.</div>
         </div>
         <div class="wiki-member" onclick="openWikiPage('sound_overview')">
-          <div class="wiki-member-name">♪ Sound</div>
+          <div class="wiki-member-name">Sound</div>
           <div class="wiki-member-desc">Load, play and control audio assets.</div>
         </div>
         <div class="wiki-member" onclick="openWikiPage('textjson_overview')">
-          <div class="wiki-member-name">🗎 Text & JSON</div>
+          <div class="wiki-member-name">Text & JSON</div>
           <div class="wiki-member-desc">Read, write, and manage text and JSON files.</div>
         </div>
         <div class="wiki-member" onclick="openWikiPage('libraries_overview')">
-          <div class="wiki-member-name">🗀 Libraries</div>
+          <div class="wiki-member-name">Libraries</div>
           <div class="wiki-member-desc">Import and run .bpy library files with include().</div>
         </div>
       </div>
@@ -10386,7 +10545,7 @@ def update():
     title: "Utils Overview",
     category: "Utils",
     type: "guide",
-    desc: "Screen dimensions, timing helpers, FPS limiting, reset and clipboard utilities.",
+    desc: "Screen size and fullscreen, timing helpers, FPS limiting, reset, clipboard and text helpers.",
     body: `
       <div class="wiki-members">
         <div class="wiki-member" onclick="openWikiPage('W')"><div class="wiki-member-name">W()</div><div class="wiki-member-desc">Screen width in pixels.</div></div>
@@ -10404,6 +10563,111 @@ def update():
         <div class="wiki-member" onclick="openWikiPage('in_bounds_fn')"><div class="wiki-member-name">in_bounds()</div><div class="wiki-member-desc">Test whether a value is within a range.</div></div>
         <div class="wiki-member" onclick="openWikiPage('write_clipboard_fn')"><div class="wiki-member-name">write_clipboard()</div><div class="wiki-member-desc">Copy text to the player's clipboard.</div></div>
         <div class="wiki-member" onclick="openWikiPage('read_clipboard_fn')"><div class="wiki-member-name">read_clipboard()</div><div class="wiki-member-desc">Read the text on the player's clipboard.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('fullscreen_fn')"><div class="wiki-member-name">fullscreen()</div><div class="wiki-member-desc">Switch fullscreen on or off.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('querty_fn')"><div class="wiki-member-name">querty()</div><div class="wiki-member-desc">The letters of a QWERTY keyboard, one row per line.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('abc_fn')"><div class="wiki-member-name">abc()</div><div class="wiki-member-desc">The letters a to z as text.</div></div>
+      </div>
+    `
+  },
+
+  "fullscreen_fn": {
+    title: "fullscreen()",
+    category: "Utils",
+    type: "function",
+    desc: "Turns fullscreen on or off, or switches it when no value is given.",
+    signature: `<span class="ws-fn">fullscreen</span><span class="ws-pun">(</span><span class="ws-param">toggle</span><span class="ws-pun">=</span><span class="ws-kw">None</span><span class="ws-pun">) →</span> <span class="ws-cls">bool</span>`,
+    body: `
+      <p class="wiki-p"><code>fullscreen()</code> makes the game fill the whole screen, or brings it back into its window. Without an argument it <b>switches</b>: fullscreen goes on if it is off and off if it is on. <code>fullscreen(True)</code> and <code>fullscreen(False)</code> set it, whatever it was before.</p>
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>toggle</td><td>bool | None</td><td><code>None</code> (the default) switches. <code>True</code> turns fullscreen on, <code>False</code> turns it off.</td></tr>
+      </table>
+      <p class="wiki-p">The function returns the state that was asked for: <code>True</code> for fullscreen, <code>False</code> for a window.</p>
+      <div class="wiki-note"><b>Note:</b> A browser only allows fullscreen while the player is interacting with the page. A call that comes right after a key press or a click (for example <code>if key_pressed("f"): fullscreen()</code>) works at once. If the browser refuses a call, for example one made when the game starts, the game goes fullscreen on the player's next click, tap or key press instead. Pressing Esc always leaves fullscreen, and the next <code>fullscreen()</code> switches it on again. Some browsers, such as Safari on an iPhone, do not allow fullscreen for web pages at all.</div>
+      <div class="wiki-note"><b>In the editor:</b> Stopping the program leaves the fullscreen that <code>fullscreen()</code> turned on. Fullscreen that was turned on with the Fullscreen setting in the Settings tab stays on when the program stops.</div>
+      <div class="wiki-example">
+        <div class="wiki-example-title">F switches fullscreen, Esc leaves it</div>
+<pre>
+def update():
+    clear("black")
+    draw_text(20, 20, "Press F to switch fullscreen", "white", 24)
+    draw_text(20, 60, "Screen: " + str(W()) + " x " + str(H()), "gray", 18)
+    if key_pressed("f"):
+        fullscreen()
+</pre>
+      </div>
+      <div class="wiki-example">
+        <div class="wiki-example-title">Set it from a button</div>
+<pre>
+on = False
+
+def update():
+    global on
+    clear("black")
+    draw_rect(20, 20, 200, 50, "royalblue")
+    draw_text(40, 33, "Fullscreen: " + ("on" if on else "off"), "white", 20)
+    if mouse_pressed(0) and point_in_rect(mouse_pos(), (20, 20, 200, 50)):
+        on = fullscreen(not on)
+</pre>
+      </div>
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('W')">W()</div>
+        <div class="wiki-ref" onclick="openWikiPage('H')">H()</div>
+        <div class="wiki-ref" onclick="openWikiPage('reset_fn')">reset()</div>
+      </div>
+    `
+  },
+
+  "querty_fn": {
+    title: "querty()",
+    category: "Utils",
+    type: "function",
+    desc: "Returns the letter keys of a QWERTY keyboard as text, one row per line.",
+    signature: `<span class="ws-fn">querty</span><span class="ws-pun">(</span><span class="ws-pun">) →</span> <span class="ws-cls">str</span>`,
+    body: `
+      <p class="wiki-p">Returns the text <code>qwertyuiop</code>, <code>asdfghjkl</code> and <code>zxcvbnm</code> joined by line breaks: <code>'qwertyuiop&#92;nasdfghjkl&#92;nzxcvbnm'</code> in Python's notation. Split it at the line breaks to get the three rows.</p>
+      <div class="wiki-note"><b>Note:</b> <code>qwerty()</code> is the same function with the usual spelling.</div>
+      <div class="wiki-example">
+        <div class="wiki-example-title">An on-screen keyboard</div>
+<pre>
+def update():
+    clear("black")
+    for row, letters in enumerate(querty().split("\\n")):
+        for col, letter in enumerate(letters):
+            x = 40 + col * 44 + row * 20
+            y = 40 + row * 50
+            color = "orange" if key_down(letter) else "dimgray"
+            draw_rect(x, y, 40, 40, color)
+            draw_text(x + 14, y + 10, letter, "white", 20)
+</pre>
+      </div>
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('abc_fn')">abc()</div>
+        <div class="wiki-ref" onclick="openWikiPage('key_down_fn')">key_down()</div>
+      </div>
+    `
+  },
+
+  "abc_fn": {
+    title: "abc()",
+    category: "Utils",
+    type: "function",
+    desc: "Returns the lowercase alphabet as text.",
+    signature: `<span class="ws-fn">abc</span><span class="ws-pun">(</span><span class="ws-pun">) →</span> <span class="ws-cls">str</span>`,
+    body: `
+      <p class="wiki-p">Returns <code>'abcdefghijklmnopqrstuvwxyz'</code>: the 26 letters from a to z as one piece of text.</p>
+      <div class="wiki-example">
+        <div class="wiki-example-title">Letter by letter</div>
+<pre>
+def update():
+    clear("black")
+    for i, letter in enumerate(abc()):
+        draw_text(20 + i * 26, 20, letter, "white", 22)
+    draw_text(20, 60, abc().upper(), "orange", 22)
+</pre>
+      </div>
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('querty_fn')">querty()</div>
       </div>
     `
   },
@@ -12461,7 +12725,7 @@ def update():
       <div class="wiki-members">
         <div class="wiki-member" onclick="openWikiPage('gradients')"><div class="wiki-member-name">linear_gradient() / radial_gradient()</div><div class="wiki-member-desc">Create gradient objects.</div></div>
         <div class="wiki-member" onclick="openWikiPage('fill_gradient')"><div class="wiki-member-name">fill_gradient() / rect_gradient()</div><div class="wiki-member-desc">Apply a gradient fill.</div></div>
-        <div class="wiki-member" onclick="openWikiPage('fragment_fn')"><div class="wiki-member-name">fragment()</div><div class="wiki-member-desc">Your own GPU shader: runs for every pixel of the screen.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('fragment_fn')"><div class="wiki-member-name">fragment()</div><div class="wiki-member-desc">Apply your own shader to the screen as it is right now.</div></div>
       </div>
       <h2 class="wiki-h2">Images</h2>
       <div class="wiki-members">
@@ -12797,7 +13061,7 @@ def update():
     desc: "Sets a single pixel at (x, y) to the given color.",
     signature: `<span class="ws-fn">draw_pixel</span><span class="ws-pun">(</span><span class="ws-param">x</span><span class="ws-pun">, </span><span class="ws-param">y</span><span class="ws-pun">, </span><span class="ws-param">color</span><span class="ws-pun">=WHITE</span><span class="ws-pun">)</span>`,
     body: `
-      <div class="wiki-note"><b>Performance:</b> Calling draw_pixel() in a tight loop is slow. For effects on every pixel write a <code>fragment(pos)</code> shader, which runs on the GPU.</div>
+      <div class="wiki-note"><b>Performance:</b> Calling draw_pixel() in a tight loop is slow. For an effect on every pixel write a shader and apply it with <code>fragment(shader)</code>, which runs on the GPU.</div>
 
       <div class="wiki-example">
         <div class="wiki-example-title">Dot grid</div>
@@ -12850,10 +13114,10 @@ def update():
     desc: "Reads the colour of the screen. get_pixel(x, y) gives (r, g, b, a) from 0 to 255 for one pixel; get_pixel(pos) takes a Vec2 from 0 to 1 and gives a Vec4 from 0 to 1.",
     signature: `<span class="ws-fn">get_pixel</span><span class="ws-pun">(</span><span class="ws-param">x</span><span class="ws-pun">, </span><span class="ws-param">y</span><span class="ws-pun">) →</span> <span class="ws-cls">tuple[int, int, int, int]</span><br><span class="ws-fn">get_pixel</span><span class="ws-pun">(</span><span class="ws-param">pos</span><span class="ws-pun">) →</span> <span class="ws-cls">Vec4</span>`,
     body: `
-      <p class="wiki-p"><code>get_pixel(x, y)</code> reads the pixel at the pixel position <code>x, y</code> (0 is the top-left). <code>get_pixel(pos)</code> reads at a position from 0 to 1 - <code>(0, 0)</code> is the top-left corner and <code>(1, 1)</code> the bottom-right - and blends the pixels around it, exactly like a GPU texture read. It is the form to use inside <code>fragment(pos)</code>, where it is a single fast texture read.</p>
+      <p class="wiki-p"><code>get_pixel(x, y)</code> reads the pixel at the pixel position <code>x, y</code> (0 is the top-left). <code>get_pixel(pos)</code> reads at a position from 0 to 1 - <code>(0, 0)</code> is the top-left corner and <code>(1, 1)</code> the bottom-right - and blends the pixels around it, exactly like a GPU texture read. It is the form to use inside a shader that you give to <code>fragment()</code>, where it is a single fast texture read.</p>
 
       <div class="wiki-note"><b>Performance:</b> The first read after something was drawn asks the GPU for that one pixel. Further reads of the same picture are answered from a copy, so a loop over many pixels is fast as long as nothing is drawn in between. For work on every pixel use <code>fragment()</code>, which does it on the GPU.</div>
-      <div class="wiki-note">Reading outside <code>update()</code>'s picture is never affected by <code>fragment()</code>: you always read what the program drew, not what the shader shows.</div>
+      <div class="wiki-note">Reads always see the picture as it is at that moment. After a call to <code>fragment()</code> that includes the effect of the shader, because <code>fragment()</code> changes the picture itself.</div>
 
       <div class="wiki-example">
         <div class="wiki-example-title">Sample a pixel under the mouse</div>
@@ -13089,127 +13353,153 @@ def update():
     title: "fragment()",
     category: "Graphics",
     type: "function",
-    desc: "Define fragment(pos) to shade every pixel of the screen on the GPU. pos is a Vec2 from 0 to 1 and the function returns the colour of that pixel.",
-    signature: `<span class="ws-kw">def</span> <span class="ws-fn">fragment</span><span class="ws-pun">(</span><span class="ws-param">pos</span><span class="ws-pun">) →</span> <span class="ws-cls">Vec3 | Vec4 | tuple | float</span>`,
+    desc: "Applies a shader to the screen as it is right now. The shader is a function of pos that returns the colour of every pixel; what you draw afterwards is not shaded.",
+    signature: `<span class="ws-fn">fragment</span><span class="ws-pun">(</span><span class="ws-param">shader</span><span class="ws-pun">) →</span> <span class="ws-cls">None</span>`,
     body: `
-      <p class="wiki-p"><code>fragment(pos)</code> is a function <b>you define</b>. After <code>update()</code> has drawn the frame, BowPy calls it for every pixel of the screen and shows the colours it returns. <code>pos</code> is a <code>Vec2</code> from 0 to 1: <code>(0, 0)</code> is the top-left corner and <code>(1, 1)</code> the bottom-right. <code>get_pixel(pos)</code> gives the colour that was drawn at a position, as a <code>Vec4</code>.</p>
-
-      <p class="wiki-p">The default shader leaves the picture as it is:</p>
-<pre>
-def fragment(pos):
-    return get_pixel(pos)
-</pre>
-
-      <p class="wiki-p">BowPy turns your function into a GPU program, so it runs for all pixels at the same time. A shader that does a few hundred operations per pixel still runs at full speed. The picture that your program drew is not changed: <code>get_pixel()</code> inside <code>update()</code> still reads the picture without the shader.</p>
-
-      <h2 class="wiki-h2">What to return</h2>
-      <div class="wiki-members">
-        <div class="wiki-member"><div class="wiki-member-name">Vec3(r, g, b)  or  (r, g, b)</div><div class="wiki-member-desc">An opaque colour.</div></div>
-        <div class="wiki-member"><div class="wiki-member-name">Vec4(r, g, b, a)  or  (r, g, b, a)</div><div class="wiki-member-desc">A colour with transparency. Use <code>get_pixel(pos)</code> as it is to keep the picture's own alpha.</div></div>
-        <div class="wiki-member"><div class="wiki-member-name">a number</div><div class="wiki-member-desc">A grey level (0 is black, 1 is white).</div></div>
-      </div>
-      <p class="wiki-p">Every value goes from 0 to 1 and is clamped to that range. Different returns in different branches are fine (a Vec3 in one place and a Vec4 in another).</p>
-
-      <h2 class="wiki-h2">Examples</h2>
+      <p class="wiki-p"><code>fragment(shader)</code> runs <code>shader</code> once for every pixel of the screen, on the GPU, and replaces the picture with the colours it returns. It works on the screen <b>as it is at that moment</b>: everything drawn so far goes through the shader, and everything you draw after the call is not shaded. You can call it as often as you like, so it is a post-processing step that you place where you want it.</p>
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>shader</td><td>function</td><td>A function written with <code>def</code> that takes one argument, <code>pos</code>, and returns a colour (see below).</td></tr>
+      </table>
+      <p class="wiki-p"><code>pos</code> is a <code>Vec2</code> from 0 to 1: <code>(0, 0)</code> is the top-left corner and <code>(1, 1)</code> the bottom-right. <code>get_pixel(pos)</code> gives the colour the screen had at a position before the shader ran, as a <code>Vec4</code>. A shader that returns <code>get_pixel(pos)</code> leaves the picture as it is.</p>
       <div class="wiki-example">
-        <div class="wiki-example-title">Vignette</div>
+        <div class="wiki-example-title">Vignette, with text drawn after it</div>
 <pre>
-def update():
-    clear(rgb(30, 60, 120))
-    draw_circle(W()/2, H()/2, 80, "orange")
-
-def fragment(pos):
+def vignette(pos):
     c = get_pixel(pos)
     d = Vec2.distance(pos, Vec2(0.5, 0.5)) * 1.4
     f = clamp(1.0 - d, 0, 1)
     return Vec3(c.r * f, c.g * f, c.b * f)
+
+def update():
+    clear(rgb(30, 60, 120))
+    draw_circle(W() / 2, H() / 2, 80, "orange")
+    fragment(vignette)                               # shades the circle and the background
+    draw_text(20, 20, "This text is not shaded", "white", 24)
 </pre>
       </div>
-
+      <h2 class="wiki-h2">What to return</h2>
+      <div class="wiki-members">
+        <div class="wiki-member"><div class="wiki-member-name">Vec3(r, g, b)</div><div class="wiki-member-desc">An opaque colour, each value from 0 to 1.</div></div>
+        <div class="wiki-member"><div class="wiki-member-name">Vec4(r, g, b, a)</div><div class="wiki-member-desc">A colour with transparency, each value from 0 to 1. Return <code>get_pixel(pos)</code> as it is to keep the picture's own alpha.</div></div>
+        <div class="wiki-member"><div class="wiki-member-name">(r, g, b)  or  (r, g, b, a)  with whole numbers</div><div class="wiki-member-desc">A colour written like everywhere else in BowPy, each value from 0 to 255: <code>(255, 128, 0)</code> is orange.</div></div>
+        <div class="wiki-member"><div class="wiki-member-name">(r, g, b)  or  (r, g, b, a)  with decimals</div><div class="wiki-member-desc">The same as a Vec3 or Vec4, each value from 0 to 1: <code>(1.0, 0.5, 0.0)</code>.</div></div>
+        <div class="wiki-member"><div class="wiki-member-name">a number</div><div class="wiki-member-desc">A grey level (0 is black, 1 is white).</div></div>
+      </div>
+      <p class="wiki-p">Values outside the range are clamped. Different returns in different branches are fine (a Vec3 in one place and a Vec4 in another). A tuple counts as 0 to 255 only when every number in it is a whole number: <code>(255, 0, 0)</code> is red, but <code>(1, 0, 0)</code> is almost black, so write <code>(1.0, 0.0, 0.0)</code> or <code>Vec3(1, 0, 0)</code> for a colour from 0 to 1.</p>
+      <h2 class="wiki-h2">More examples</h2>
       <div class="wiki-example">
         <div class="wiki-example-title">Invert the part of the screen left of the mouse</div>
 <pre>
-def update():
-    clear(rgb(30, 60, 120))
-    draw_circle(W()/2, H()/2, 80, "orange")
-
-def fragment(pos):
+def invert_left(pos):
     c = get_pixel(pos)
-    if pos.x * W() < mouse_x():
+    if pos.x * W() &lt; mouse_x():
         return Vec3(1 - c.r, 1 - c.g, 1 - c.b)
     return c
+
+def update():
+    clear(rgb(30, 60, 120))
+    draw_circle(W() / 2, H() / 2, 80, "orange")
+    fragment(invert_left)
 </pre>
       </div>
-
       <div class="wiki-example">
-        <div class="wiki-example-title">Waves (global variables are read again every frame)</div>
+        <div class="wiki-example-title">Waves (global variables are read every time fragment() is called)</div>
 <pre>
 amount = 0.01
+
+def waves(pos):
+    wave = sin(pos.y * 40 + get_time() * 3) * amount
+    return get_pixel(pos + Vec2(wave, 0))
 
 def update():
     global amount
     amount = 0.005 + 0.01 * abs(sin(get_time()))
     clear(rgb(30, 60, 120))
-    draw_text(40, H()/2, "BowPy", "white", 64)
-
-def fragment(pos):
-    wave = sin(pos.y * 40 + get_time() * 3) * amount
-    return get_pixel(pos + Vec2(wave, 0))
+    draw_text(40, H() / 2, "BowPy", "white", 64)
+    fragment(waves)
 </pre>
       </div>
-
       <div class="wiki-example">
         <div class="wiki-example-title">Pixelate, with a helper function</div>
 <pre>
 blocks = 48
 
-def update():
-    clear(rgb(30, 60, 120))
-    draw_circle(W()/2, H()/2, 80, "orange")
-
 def snap(p):
     return Vec2(floor(p.x * blocks) / blocks, floor(p.y * blocks) / blocks)
 
-def fragment(pos):
+def pixelate(pos):
     return get_pixel(snap(pos) + Vec2(0.5 / blocks, 0.5 / blocks))
+
+def update():
+    clear(rgb(30, 60, 120))
+    draw_circle(W() / 2, H() / 2, 80, "orange")
+    fragment(pixelate)
 </pre>
       </div>
-
       <div class="wiki-example">
-        <div class="wiki-example-title">A program with only a shader (no update needed)</div>
+        <div class="wiki-example-title">Two shaders in a row, then a menu on top</div>
 <pre>
-def fragment(pos):
+def darken(pos):
+    c = get_pixel(pos)
+    return Vec3(c.r * 0.5, c.g * 0.5, c.b * 0.5)
+
+def tint(pos):
+    c = get_pixel(pos)
+    return (c.r, c.g * 0.8, c.b * 1.2)
+
+def update():
+    clear(rgb(30, 60, 120))
+    draw_circle(W() / 2, H() / 2, 80, "orange")
+    fragment(darken)
+    fragment(tint)
+    draw_rect(20, 20, 160, 40, "white")      # not shaded
+</pre>
+      </div>
+      <div class="wiki-example">
+        <div class="wiki-example-title">A picture made only by a shader</div>
+<pre>
+def plasma(pos):
     t = get_time()
     v = sin(pos.x * 10 + t) + sin(pos.y * 10 + t * 1.3) + sin((pos.x + pos.y) * 10 + t * 0.7)
     return Vec3(0.5 + 0.5 * sin(v), 0.5 + 0.5 * sin(v + 2), 0.5 + 0.5 * sin(v + 4))
+
+def update():
+    fragment(plasma)
 </pre>
       </div>
-
       <h2 class="wiki-h2">What a shader can use</h2>
       <ul class="wiki-list">
         <li>Numbers, <code>True</code>/<code>False</code>, <code>Vec2</code>, <code>Vec3</code>, <code>Vec4</code> and tuples of 2 to 4 numbers. Swizzles can be read: <code>c.rgb</code>, <code>p.xy</code>, <code>v.zyx</code>.</li>
         <li><code>+ - * / // % **</code>, comparisons of numbers, <code>and</code> / <code>or</code> / <code>not</code>, <code>a if c else b</code>.</li>
         <li><code>if</code> / <code>elif</code> / <code>else</code>, <code>for i in range(...)</code>, <code>for x in a_global_list</code>, <code>while</code> (stopped after 1024 turns), <code>break</code>, <code>continue</code>.</li>
         <li>Your own functions, also from other tabs (<code>utils.warp(pos)</code>). They can be called with different kinds of values; recursion is not possible.</li>
-        <li>Math: <code>sin cos tan asin acos atan atan2 sqrt exp log pow abs min max floor ceil round fract sign hypot radians degrees</code>, <code>lerp clamp map_range smoothstep step smooth_step</code>, <code>dot cross length distance normalize</code> and <code>noise()</code>, <code>noise1/2/3()</code>, the Vec methods (<code>.length()</code>, <code>.normalized()</code>, <code>.rotated()</code>, <code>Vec2.distance()</code> ...).</li>
+        <li>Math: <code>sin cos tan asin acos atan atan2 sqrt exp log pow abs min max floor ceil round fract sign hypot radians degrees</code>, <code>lerp mix clamp map_range smoothstep step smooth_step</code>, <code>dot cross length distance normalize</code> and <code>noise()</code>, <code>noise1/2/3()</code>, the Vec methods (<code>.length()</code>, <code>.normalized()</code>, <code>.rotated()</code>, <code>Vec2.distance()</code> ...).</li>
         <li><code>get_pixel(pos)</code>, <code>get_time()</code> (seconds since the program started), <code>dt()</code>, <code>fps()</code>, <code>W()</code>, <code>H()</code>, <code>mouse_x()</code>, <code>mouse_y()</code>, <code>mouse_pos()</code>, <code>mouse_down()</code> (the button has to be written as 0, 1 or 2) and <code>is_mobile()</code>.</li>
-        <li>Global variables: numbers, booleans, Vec2/Vec3/Vec4, tuples and lists of those (up to 192 values together). They are sent to the GPU every frame as they are at the end of <code>update()</code>. On the GPU numbers have about 7 digits of precision: pass big values such as <code>time.time()</code> as a difference or use <code>get_time()</code> inside the shader.</li>
+        <li>Global variables: numbers, booleans, Vec2/Vec3/Vec4, tuples and lists of those (up to 192 values together). They are sent to the GPU every time <code>fragment()</code> is called, as they are at that moment. On the GPU numbers have about 7 digits of precision: pass big values such as <code>time.time()</code> as a difference or use <code>get_time()</code> inside the shader. Variables of the function around the shader are not global: make them global variables.</li>
       </ul>
       <div class="wiki-note"><b>Not possible in a shader:</b> <code>random</code>, text, dictionaries, classes, <code>lambda</code>, <code>print</code>, imports, comparing whole vectors or lists, and assigning several components at once (<code>v.xy = ...</code>; write <code>v.x = ...</code> and <code>v.y = ...</code>).</div>
-
+      <h2 class="wiki-h2">Good to know</h2>
+      <ul class="wiki-list">
+        <li>Every call is one pass over the whole screen, so two calls cost twice as much. The shader is translated to GPU code the first time it is used and kept after that.</li>
+        <li>The shader replaces the picture. A program that calls <code>fragment()</code> every frame without clearing the screen first shades its own result again and again.</li>
+        <li>It works on the whole of the current draw target, so with <code>set_target()</code> it shades that surface instead of the screen. The transform and the other drawing settings do not change what it does.</li>
+        <li><code>get_pixel()</code> outside a shader reads the shaded picture, because the picture itself was changed.</li>
+        <li>The function has to be written with <code>def</code> and one argument. A <code>lambda</code> cannot be used.</li>
+      </ul>
       <h2 class="wiki-h2">When the shader cannot run on the GPU</h2>
-      <p class="wiki-p">If the shader uses something from the list above, or the browser has no WebGL2, BowPy prints a warning that says what and where, and runs your function on the CPU instead. That gives the same picture but it is very slow (the whole screen is calculated in Python every frame), so fix the shader if you see the warning. Mistakes in the shader (a wrong name, a wrong kind of value) are reported the same way, with the file and line.</p>
-
-      <div class="wiki-note"><b>Changed:</b> the older <code>fragment(fn)</code> that was called with a function and received <code>r, g, b, pos</code> has been replaced by this one. To port it, write <code>def fragment(pos): c = get_pixel(pos)</code> and use <code>c.r</code>, <code>c.g</code>, <code>c.b</code> where it used <code>r</code>, <code>g</code>, <code>b</code>.</div>
-
+      <p class="wiki-p">If the shader uses something that is not in the list above, or the browser has no WebGL2, BowPy prints a warning that says what and where, and runs your function on the CPU instead. That gives the same picture but it is very slow (every pixel is calculated in Python on every call), so fix the shader if you see the warning. Mistakes in the shader (a wrong name, a wrong kind of value) are reported the same way, with the file and line.</p>
+      <div class="wiki-note"><b>Changed:</b> Before, a function called <code>fragment(pos)</code> was defined by the program and BowPy applied it to the screen after <code>update()</code>. Now <code>fragment</code> is a function that you call. To port an old program, give the function another name, for example <code>def my_shader(pos)</code>, and call <code>fragment(my_shader)</code> at the point of <code>update()</code> where the shading should happen (the end of <code>update()</code> gives the old result).</div>
       <div class="wiki-ref-list">
         <div class="wiki-ref" onclick="openWikiPage('get_pixel')">get_pixel()</div>
         <div class="wiki-ref" onclick="openWikiPage('vec2_overview')">Vec2</div>
         <div class="wiki-ref" onclick="openWikiPage('vec3_overview')">Vec3</div>
         <div class="wiki-ref" onclick="openWikiPage('vec4_overview')">Vec4</div>
+        <div class="wiki-ref" onclick="openWikiPage('set_target_fn')">set_target()</div>
       </div>
     `
   },
+
 
   "Image": {
     title: "Image",
@@ -15726,8 +16016,7 @@ function openWikiPage(id) {
     el.classList.toggle('active', el.dataset.page === id);
   });
 
-  const bc = document.getElementById('wiki-breadcrumb');
-  bc.innerHTML = '<span class="wiki-bc-seg" onclick="openWikiPage(\'home\')">Wiki</span><span class="wiki-bc-sep">›</span><span>' + page.category + '</span>';
+  _wikiRenderCrumbs(id);
 
   const body = document.getElementById('wiki-body');
 
@@ -15743,6 +16032,73 @@ function openWikiPage(id) {
     '<div class="wiki-desc">' + page.desc + '</div>' +
     (page.signature ? '<div class="wiki-sig">' + page.signature + '</div>' : '') +
     page.body;
+  _wikiColorize();
+}
+
+// ── breadcrumbs: BowPy > Math > lerp() ──
+// The path of a page is found through the overviews: the home page lists the overviews, an overview lists its pages,
+// and a page that lists pages of its own (wiki-member entries) adds one more step. "See also" links do not count.
+let _wikiParent = null;
+function _wikiBuildTree() {
+  const parent = { home: null }, kids = {}, re = /class="wiki-member"[^>]*onclick="openWikiPage\('([^']+)'\)"/g;
+  for (const id in WIKI_DOCS) {
+    const list = kids[id] = [], body = WIKI_DOCS[id].body || '';
+    let m; re.lastIndex = 0;
+    while ((m = re.exec(body))) if (m[1] !== id && WIKI_DOCS[m[1]]) list.push(m[1]);
+  }
+  const queue = ['home'];
+  while (queue.length) {
+    const id = queue.shift();
+    for (const k of kids[id]) if (!(k in parent)) { parent[k] = id; queue.push(k); }
+  }
+  // a page that nothing lists goes below the overview of its category (or the home page)
+  for (const id in WIKI_DOCS) if (!(id in parent)) {
+    const cat = WIKI_DOCS[id].category;
+    const ov = Object.keys(WIKI_DOCS).find(o => o !== id && parent[o] === 'home' && WIKI_DOCS[o].category === cat);
+    parent[id] = ov || 'home';
+  }
+  return parent;
+}
+function _wikiPath(id) {
+  if (!_wikiParent) _wikiParent = _wikiBuildTree();
+  const path = [];
+  for (let cur = id, n = 0; cur && n < 24; cur = _wikiParent[cur], n++) path.unshift(cur);
+  return path;
+}
+function _wikiCrumbLabel(id) {
+  if (id === 'home') return 'BowPy';
+  const page = WIKI_DOCS[id];
+  // an overview is the page of its whole category: "Math", not "Math Overview"
+  if (_wikiParent[id] === 'home' && /_overview$/.test(id)) return page.category;
+  return page.title;
+}
+function _wikiRenderCrumbs(id) {
+  const bc = document.getElementById('wiki-breadcrumb');
+  if (!bc) return;
+  const path = _wikiPath(id);
+  let h = '';
+  path.forEach((pid, i) => {
+    if (i) h += '<span class="wiki-bc-sep">›</span>';
+    const label = _wikiCrumbLabel(pid);
+    h += pid === id ? '<span class="wiki-bc-cur">' + label + '</span>'
+                    : '<span class="wiki-bc-seg" data-wiki="' + pid + '">' + label + '</span>';
+  });
+  bc.innerHTML = h;
+}
+document.getElementById('wiki-breadcrumb').addEventListener('click', e => {
+  const t = e.target.closest && e.target.closest('[data-wiki]');
+  if (t) openWikiPage(t.dataset.wiki);
+});
+
+// ── the code in the wiki is coloured like the editor, unless the syntax colouring setting is off ──
+function _wikiColorize() {
+  const body = document.getElementById('wiki-body');
+  if (!body) return;
+  body.querySelectorAll('pre').forEach(pre => {
+    if (pre.dataset.raw === undefined) pre.dataset.raw = pre.textContent.replace(/\n$/, '');
+    const raw = pre.dataset.raw;
+    pre.innerHTML = _bpSet.syntax ? highlight(raw).replace(/\n$/, '') : esc(raw);
+  });
 }
 
 function wikiSearch(query) {
@@ -15825,6 +16181,7 @@ function _bpApplySettings() {
   _bpApplyVars();
   document.body.classList.toggle('no-lnums', !_bpSet.lineNumbers);
   syncEditor();                                   // syntax colouring, tab width and line height of the code
+  _wikiColorize();                                // and the code in the wiki
   _HV.setEnabled(_bpSet.tooltips);
   _HV.setDelay(_bpSet.tooltipDelay);
   _HV.resetMetrics();
@@ -15871,10 +16228,7 @@ function _bpFsSupported() {
   return !!(document.fullscreenEnabled || document.webkitFullscreenEnabled) && !!(el.requestFullscreen || el.webkitRequestFullscreen);
 }
 function _bpFsExit() {
-  try {
-    const fn = document.exitFullscreen || document.webkitExitFullscreen;
-    if (fn && _bpFsElement()) { const p = fn.call(document); if (p && p.catch) p.catch(() => {}); }
-  } catch (e) {}
+  try { _bpHost.fsExit(); } catch (e) {}          // leaves every level (the game's screen and the page)
 }
 // a short message in place of the explanation under the switch (for when the browser says no)
 function _setFsNote(msg) {
@@ -15891,9 +16245,11 @@ function _setFullscreen(on) {
   if (!on) { _bpSet.fullscreen = false; _bpFsExit(); _setRefresh(); return; }
   _bpSet.fullscreen = true;                       // shown as on while the browser is answering
   if (_bpFsOn()) { _setRefresh(); return; }
+  try { _bpHost._fs.owner = 'settings'; } catch (e) {}          // stopping the program leaves this fullscreen alone
   const el = document.documentElement, fn = el.requestFullscreen || el.webkitRequestFullscreen;
   const fail = e => {
     _bpFs.want = false; _bpSet.fullscreen = false;
+    try { if (_bpHost._fs.owner === 'settings') _bpHost._fs.owner = null; } catch (e2) {}
     _setFsNote('The browser did not allow fullscreen' + (e && e.message ? ' (' + e.message + ')' : '') + '.');
     _setRefresh();
   };
