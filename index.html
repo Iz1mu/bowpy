@@ -515,6 +515,7 @@ body.dropping #drop-overlay{display:flex;}
 .set-lab{flex:1;min-width:0;}
 .set-name{font:500 13px var(--font-ui);color:var(--txt);}
 .set-hint{font:11.5px/1.45 var(--font-ui);color:var(--txt2);margin-top:2px;}
+.set-hint.err{color:var(--red);}
 .set-ctl{flex-shrink:0;display:flex;align-items:center;gap:8px;}
 .set-val{min-width:44px;text-align:right;font:12px var(--font-code);color:var(--txt2);}
 .set-input{background:var(--bg);border:1px solid var(--bdr);border-radius:5px;color:var(--txt);font:12px var(--font-code);padding:5px 8px;outline:none;transition:border-color .12s;}
@@ -2832,6 +2833,7 @@ const _SET_DEFAULTS = Object.freeze({
   autoBrackets: true, autoQuotes: true, autoIndent: true,
   tooltips: true, tooltipDelay: 300,
   conFontSize: 12, clearConsole: true,
+  fullscreen: false,        // lasts until the page is closed: a browser only starts fullscreen after a click, so this is never saved
 });
 const _SET_FONTS_CODE = {
   plex:      { label: 'IBM Plex Mono (default)', css: "'IBM Plex Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace" },
@@ -2986,7 +2988,9 @@ function _bpLoadSettings() {
   return _bpValidateSettings(raw);
 }
 function _bpSaveSettings() {
-  try { localStorage.setItem(_SET_KEY, JSON.stringify(_bpSet)); } catch (e) {}
+  const o = Object.assign({}, _bpSet);
+  delete o.fullscreen;      // never remembered (and _bpValidateSettings never reads it back)
+  try { localStorage.setItem(_SET_KEY, JSON.stringify(o)); } catch (e) {}
 }
 const _bpSet = _bpLoadSettings();
 const $runBtn = document.getElementById('run-btn');
@@ -15850,10 +15854,69 @@ function _setChange(key, value) {
 function _setResetAll() {
   for (const k of Object.keys(_bpSet)) delete _bpSet[k];
   Object.assign(_bpSet, JSON.parse(JSON.stringify(_SET_DEFAULTS)));
+  _bpFs.want = false; _bpFsExit();                // fullscreen is one of the options: back to its default, which is off
   _bpSaveSettings();
   _bpApplySettings();
   _setRefresh();
 }
+
+// ── fullscreen ──
+// The editor (the whole page) fills the screen. The switch always shows what the browser really does: Esc, F11, the
+// browser's own exit button or anything else that leaves fullscreen turns it off again, whatever the way out was.
+const _bpFs = { want: false, hint: '', timer: 0 };
+const _bpFsElement = () => document.fullscreenElement || document.webkitFullscreenElement || null;
+const _bpFsOn = () => _bpFsElement() === document.documentElement;
+function _bpFsSupported() {
+  const el = document.documentElement;
+  return !!(document.fullscreenEnabled || document.webkitFullscreenEnabled) && !!(el.requestFullscreen || el.webkitRequestFullscreen);
+}
+function _bpFsExit() {
+  try {
+    const fn = document.exitFullscreen || document.webkitExitFullscreen;
+    if (fn && _bpFsElement()) { const p = fn.call(document); if (p && p.catch) p.catch(() => {}); }
+  } catch (e) {}
+}
+// a short message in place of the explanation under the switch (for when the browser says no)
+function _setFsNote(msg) {
+  const h = _setUI.fsHint;
+  clearTimeout(_bpFs.timer);
+  if (!h) return;
+  h.textContent = msg || _bpFs.hint;
+  h.classList.toggle('err', !!msg);
+  if (msg) _bpFs.timer = setTimeout(() => _setFsNote(''), 9000);
+}
+function _setFullscreen(on) {
+  _bpFs.want = !!on;
+  _setFsNote('');
+  if (!on) { _bpSet.fullscreen = false; _bpFsExit(); _setRefresh(); return; }
+  _bpSet.fullscreen = true;                       // shown as on while the browser is answering
+  if (_bpFsOn()) { _setRefresh(); return; }
+  const el = document.documentElement, fn = el.requestFullscreen || el.webkitRequestFullscreen;
+  const fail = e => {
+    _bpFs.want = false; _bpSet.fullscreen = false;
+    _setFsNote('The browser did not allow fullscreen' + (e && e.message ? ' (' + e.message + ')' : '') + '.');
+    _setRefresh();
+  };
+  if (!fn || !_bpFsSupported()) return fail(null);
+  try {
+    const p = fn.call(el, { navigationUI: 'hide' });
+    if (p && p.then) p.then(() => { if (!_bpFs.want) _bpFsExit(); }, fail);   // switched off again before the browser answered
+  } catch (e) { fail(e); }
+}
+// the browser went in or out of fullscreen (for any reason): the setting follows
+function _bpFsChanged() {
+  const on = _bpFsOn();
+  _bpSet.fullscreen = on;
+  if (!on) _bpFs.want = false;
+  _setRefresh();
+}
+['fullscreenchange', 'webkitfullscreenchange'].forEach(ev => document.addEventListener(ev, _bpFsChanged));
+['fullscreenerror', 'webkitfullscreenerror'].forEach(ev => document.addEventListener(ev, () => {
+  if (_bpFsOn()) return;
+  _bpFs.want = false; _bpSet.fullscreen = false;
+  _setFsNote('The browser did not allow fullscreen.');
+  _setRefresh();
+}));
 
 function _setRow(card, key, name, hint, ctl) {
   const row = _setEl('div', 'set-row');
@@ -15934,8 +15997,20 @@ function _setBuildUI() {
     return c;
   };
 
+  // ── window ──
+  let c = card('Window');
+  _bpFs.hint = 'Fill the whole screen with the editor. It turns itself off when you press Esc or leave fullscreen in any other way. It is not remembered between visits, because a browser only allows fullscreen after a click.';
+  const fsRow = _setRow(c, 'fullscreen', 'Fullscreen', _bpFs.hint, _setToggle('fullscreen'));
+  _setUI.fsHint = fsRow.querySelector('.set-hint');
+  _setUI.ctl.fullscreen.onchange = () => _setFullscreen(_setUI.ctl.fullscreen.checked);
+  if (!_bpFsSupported()) {
+    _setUI.ctl.fullscreen.disabled = true; fsRow.classList.add('off');
+    _bpFs.hint = 'This browser or window does not allow fullscreen for web pages (an embedded page needs permission from the page around it).';
+    _setFsNote('');
+  }
+
   // ── editor ──
-  let c = card('Editor');
+  c = card('Editor');
   _setRow(c, 'tabSize', 'Tab size', 'Spaces the Tab key inserts, and the width of tab characters.', _setNumber('tabSize', 1, 8));
   _setRow(c, 'fontCode', 'Code font', 'Used by the editor, the console and the wiki examples. Some fonts load when you are online; the others must be installed on your device.',
     _setSelect('fontCode', Object.entries(_SET_FONTS_CODE).map(([k, f]) => [k, f.label])));
@@ -16020,7 +16095,7 @@ function _setColorInput(k, value, commit) {
 
 // controls show what _bpSet says
 function _setRefresh() {
-  for (const k of ['lineNumbers', 'syntax', 'autoBrackets', 'autoQuotes', 'autoIndent', 'tooltips', 'clearConsole']) { const i = _setUI.ctl[k]; if (i) i.checked = !!_bpSet[k]; }
+  for (const k of ['fullscreen', 'lineNumbers', 'syntax', 'autoBrackets', 'autoQuotes', 'autoIndent', 'tooltips', 'clearConsole']) { const i = _setUI.ctl[k]; if (i) i.checked = !!_bpSet[k]; }
   for (const k of ['fontSize', 'lineHeight', 'tooltipDelay', 'conFontSize']) {
     const i = _setUI.ctl[k]; if (i) { i.value = _bpSet[k]; i._val.textContent = i._fmt(_bpSet[k]); }
   }
@@ -16046,7 +16121,7 @@ function _bpInitSettings() {
   _setBuildUI();
   _bpApplySettings();
 }
-window._bpSettings = { state: _bpSet, change: _setChange, resetAll: _setResetAll, apply: _bpApplySettings, vars: _bpSettingsVars };
+window._bpSettings = { state: _bpSet, change: _setChange, resetAll: _setResetAll, apply: _bpApplySettings, vars: _bpSettingsVars, fullscreen: _setFullscreen };
 _bpInitSettings();
 
 // ══════════════════════════════════════════════════════════════
