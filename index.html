@@ -853,6 +853,8 @@ class Gradient {
 
 // ───────────────────────── shaders ─────────────────────────
 const K_COLOR = 0, K_TEX = 1, K_TINT = 2, K_QUAD = 3, K_LIN = 4, K_RAD = 5, K_COPY = 6, K_LOAD = 7;
+// the same three image shaders for imageSmoothingEnabled = false: they pick one exact pixel of the image
+const K_TEXN = 8, K_TINTN = 9, K_QUADN = 10;
 
 const VERT_SRC = `#version 300 es
 precision highp float;
@@ -968,6 +970,23 @@ vec4 srcColor() {
   vec2 uv = vUV.xy / vUV.z;
   if (uv.x < 0.0 || uv.y < 0.0 || uv.x > uTexSize.x - 1.0 || uv.y > uTexSize.y - 1.0) discard;
   vec4 t = texture(uTex, (uv + 0.5) / uTexSize);
+  return vec4(t.rgb * vCol.rgb, t.a) * vCol.a;\n`; break;
+    case K_TEXN:      // nearest pixel: the texel index is rounded the same way everywhere (the 0.001 settles a position exactly on the border of two pixels)
+      s += `  vec2 tp = floor(vUV.xy / vUV.z * uTexSize + 0.001);
+  tp = clamp(tp, uClamp.xy * uTexSize, uClamp.zw * uTexSize - 1.0);
+  return texture(uTex, (tp + 0.5) / uTexSize) * vCol;\n`; break;
+    case K_TINTN:
+      s += `  vec2 tp = clamp(floor(vUV.xy / vUV.z * uTexSize + 0.001), vec2(0.0), uTexSize - 1.0);
+  vec4 t = texture(uTex, (tp + 0.5) / uTexSize);
+  float ab = t.a;
+  vec3 cs = vCol.rgb;
+  return vec4(ab * cs * (1.0 - ab + t.rgb), ab) * vCol.a;\n`; break;
+    case K_QUADN:     // perspective-mapped image, nearest pixel: the quad covers the image from its outer edges, pixel (floor u, floor v) is shown
+      s += `  if (abs(vUV.z) < 1e-9) discard;
+  vec2 uv = vUV.xy / vUV.z;
+  if (uv.x < 0.0 || uv.y < 0.0 || uv.x >= uTexSize.x || uv.y >= uTexSize.y) discard;
+  vec2 tp = min(floor(uv + 0.001), uTexSize - 1.0);
+  vec4 t = texture(uTex, (tp + 0.5) / uTexSize);
   return vec4(t.rgb * vCol.rgb, t.a) * vCol.a;\n`; break;
     case K_LIN:
       s += `  vec2 p = userPos();
@@ -1153,7 +1172,8 @@ class Renderer {
       const list = gl.getInternalformatParameter(gl.RENDERBUFFER, gl.RGBA8, gl.SAMPLES) || [];
       for (const n of list) if (n <= 8 && n > best) best = n;
     } catch (e) { best = 0; }
-    this.samples = best;
+    if (isMobileUA()) best = Math.min(best, 4);        // tile-based phone GPUs: four samples look the same and cost far less memory
+    this.samples = this.noMSAA ? 0 : best;               // noMSAA: set when a device failed its self-test with multisampling
     gl.disable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE); gl.disable(gl.DITHER);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     this.pvao = gl.createVertexArray();      // no attributes: the shader pass draws a triangle from gl_VertexID
@@ -2546,8 +2566,9 @@ class Ctx2D {
     const J = R.job(op);
     if (this._ga === 0 && !GLOBAL_OPS.has(op)) return;
     J.tex = info.tex; J.texW = W; J.texH = H; J.smooth = this._smooth; J.grad = null;
-    if (tint) { J.kind = K_TINT; J.col = packRaw(tint[0], tint[1], tint[2], this._ga); }
-    else { J.kind = K_TEX; J.col = packPremul(255, 255, 255, this._ga); }
+    const near = !this._smooth;                         // imageSmoothingEnabled = false: nearest pixel
+    if (tint) { J.kind = near ? K_TINTN : K_TINT; J.col = packRaw(tint[0], tint[1], tint[2], this._ga); }
+    else { J.kind = near ? K_TEXN : K_TEX; J.col = packPremul(255, 255, 255, this._ga); }
     if (sx > 0 || sy > 0 || sx + sw < W || sy + sh < H) {
       J.clamp = this._smooth ? [(sx + 0.5) / W, (sy + 0.5) / H, (sx + sw - 0.5) / W, (sy + sh - 0.5) / H] : [sx / W, sy / H, (sx + sw) / W, (sy + sh) / H];
     }
@@ -2570,7 +2591,7 @@ class Ctx2D {
     const k = solveHomography(p, info.w, info.h);
     if (!k) return;
     const J = R.job(op);
-    J.kind = K_QUAD; J.tex = info.tex; J.texW = info.w; J.texH = info.h; J.smooth = true;
+    J.kind = this._smooth ? K_QUAD : K_QUADN; J.tex = info.tex; J.texW = info.w; J.texH = info.h; J.smooth = this._smooth;
     J.col = tint ? packRaw(tint[0], tint[1], tint[2], this._ga) : packRaw(255, 255, 255, this._ga);
     const v = (pt) => { const x = pt[0], y = pt[1]; return [x, y, k[0] * x + k[1] * y + k[2], k[3] * x + k[4] * y + k[5], k[6] * x + k[7] * y + 1]; };
     const a = v(p[0]), b = v(p[1]), c = v(p[3]), d = v(p[2]);
@@ -2616,24 +2637,48 @@ class Ctx2D {
 //   surfaceScreen()  copy of the screen as a surface                     captureRegion(x, y, w, h) → <canvas>
 //   present()      show what was drawn (WebGL only)                      name  'webgl2' | 'canvas2d'
 
-function glAttrs(strict) {
+// Software renderers (SwiftShader, llvmpipe, ...) are slower than the Canvas 2D fallback, so they are not used.
+const SOFT_GL = /swiftshader|llvmpipe|softpipe|software|basic render|\bwarp\b|mesa offscreen/i;
+let glWhy = '';                 // why the last tryWebGL2() gave up (shown in the message of fragment(safe=True))
+
+// True on phones and tablets (same test as the editor's is_mobile(); this code also runs inside exported games)
+function isMobileUA() {
+  try {
+    const n = navigator;
+    if (n.userAgentData && n.userAgentData.mobile === true) return true;
+    const ua = n.userAgent || '';
+    if (/Android|iPhone|iPad|iPod|Windows Phone|IEMobile|BlackBerry|BB10|Opera Mini|webOS|Silk|Kindle|Mobile/i.test(ua)) return true;
+    if (/Macintosh/i.test(ua) && (n.maxTouchPoints || 0) > 1) return true;
+    if (window.matchMedia && matchMedia('(pointer: coarse)').matches && matchMedia('(hover: none)').matches) return true;
+  } catch (e) {}
+  return false;
+}
+
+function glAttrs(strict, power) {
   return { alpha: true, premultipliedAlpha: true, antialias: false, depth: false, stencil: false,
-           preserveDrawingBuffer: false, powerPreference: 'high-performance', failIfMajorPerformanceCaveat: !!strict };
+           preserveDrawingBuffer: false, powerPreference: power || 'high-performance', failIfMajorPerformanceCaveat: !!strict };
+}
+
+function rendererName(gl) {
+  try { const x = gl.getExtension('WEBGL_debug_renderer_info'); if (x) return String(gl.getParameter(x.UNMASKED_RENDERER_WEBGL)); } catch (e) {}
+  return '';
 }
 
 // build a renderer on `canvas`; throws when anything is off
-function buildRenderer(canvas, gl) {
+function buildRenderer(canvas, gl, noMSAA) {
   const R = new Renderer(canvas, gl);
+  if (noMSAA) { R.noMSAA = true; R.samples = 0; }
   R.screen = new Target(R, canvas.width, canvas.height, true);
-  for (let k = 0; k <= K_LOAD; k++) R._prog(k, 0);
+  for (let k = 0; k <= K_QUADN; k++) R._prog(k, 0);
   R._prog(K_COLOR, 1); R._prog(K_TEX, 9);
   R._globalProg('destination-in');
   return R;
 }
 
-// draw one rectangle and one gradient on a throw-away canvas and check the pixels that come back
-function selfTest(gl, canvas) {
-  const R = buildRenderer(canvas, gl);
+// draw one rectangle and one gradient on a throw-away canvas and check the pixels that come back (a few levels of
+// rounding are fine: phone GPUs do not all round the same way)
+function selfTest(gl, canvas, noMSAA) {
+  const R = buildRenderer(canvas, gl, noMSAA);
   const g = new Ctx2D(R, R.screen, canvas);
   g.fillStyle = '#ff0000'; g.fillRect(0, 0, 8, 8);
   g.globalCompositeOperation = 'multiply'; g.fillStyle = '#80ff80'; g.fillRect(0, 0, 4, 8);
@@ -2642,40 +2687,92 @@ function selfTest(gl, canvas) {
   g.fillStyle = lg; g.fillRect(4, 0, 4, 8);
   const a = g.getImageData(1, 1, 1, 1).data, b = g.getImageData(6, 6, 1, 1).data;
   const gerr = gl.getError();
-  if (gerr !== gl.NO_ERROR) throw new Error('GL error ' + gerr);
-  if (!(a[0] > 120 && a[0] < 136 && a[1] === 0 && a[2] === 0 && a[3] === 255)) throw new Error('self-test: multiply pixel is ' + Array.from(a));
-  if (!(b[0] === 0 && b[1] === 0 && b[2] === 255 && b[3] === 255)) throw new Error('self-test: gradient pixel is ' + Array.from(b));
+  const near = (v, t) => Math.abs(v - t) <= 3;
+  if (!(a[0] > 120 && a[0] < 136 && near(a[1], 0) && near(a[2], 0) && near(a[3], 255)))
+    throw new Error('multiply pixel is ' + Array.from(a) + (gerr ? ' (GL error ' + gerr + ')' : ''));
+  if (!(near(b[0], 0) && near(b[1], 0) && near(b[2], 255) && near(b[3], 255)))
+    throw new Error('gradient pixel is ' + Array.from(b) + (gerr ? ' (GL error ' + gerr + ')' : ''));
 }
 
+// one rehearsal on a spare canvas, so a failure never leaves the real canvas stuck with a useless WebGL context
+function probeGL(attrs, noMSAA, needHardware) {
+  const c = document.createElement('canvas');
+  c.width = 16; c.height = 16;
+  let why = '';
+  c.addEventListener('webglcontextcreationerror', e => { why = (e && e.statusMessage) || why; }, false);
+  let gl = null;
+  try { gl = c.getContext('webgl2', attrs); } catch (e) { why = String(e && e.message || e); }
+  if (!gl) return { none: true, why: why || 'the browser did not create a WebGL2 context' };
+  try {
+    const name = rendererName(gl);
+    if (needHardware && SOFT_GL.test(name)) return { ok: false, why: 'WebGL2 only runs in software here (' + name + '), which is slower than Canvas 2D' };
+    selfTest(gl, c, noMSAA);
+    return { ok: true, name };
+  } catch (err) {
+    return { ok: false, why: 'the WebGL2 self-test failed' + (noMSAA ? ' even without multisampling' : '') + ': ' + (err && err.message || err) };
+  } finally {
+    try { const ext = gl.getExtension('WEBGL_lose_context'); if (ext) ext.loseContext(); } catch (e) {}
+  }
+}
+
+// Ask for WebGL2 in a few ways, easing one requirement at a time, and use the first one that passes the self-test:
+//   1. the fast GPU      2. the default GPU      3. without multisampling (drivers that get that wrong)
+//   4. phones and tablets only: a browser that calls its GPU a "major performance caveat" is still used, unless it is a software renderer
 function tryWebGL2(canvas, opts) {
   opts = opts || {};
   const soft = !!opts.allowSoftware || (typeof window !== 'undefined' && !!window.__BOWGL_ALLOW_SOFTWARE);
+  const mobile = isMobileUA();
   const strict = !soft;
-  // 1) rehearse on a spare canvas, so a failure never leaves the real canvas stuck with a useless WebGL context
-  try {
-    const probe = document.createElement('canvas');
-    probe.width = 16; probe.height = 16;
-    const pgl = probe.getContext('webgl2', glAttrs(strict));
-    if (!pgl) return null;
-    try { selfTest(pgl, probe); }
-    finally { const ext = pgl.getExtension('WEBGL_lose_context'); if (ext) ext.loseContext(); }
-  } catch (err) {
-    if (typeof console !== 'undefined') console.warn('[BowGL] WebGL2 not usable, falling back to Canvas 2D:', err && err.message || err);
-    return null;
+  const steps = [
+    { attrs: glAttrs(strict, 'high-performance') },
+    { attrs: glAttrs(strict, 'default') },
+    { attrs: glAttrs(strict, 'default'), noMSAA: true },
+  ];
+  if (strict && mobile) steps.push({ attrs: glAttrs(false, 'default'), hw: true }, { attrs: glAttrs(false, 'default'), noMSAA: true, hw: true });
+  const why = [];
+  let strictNone = false, created = false, status = '';
+  for (const st of steps) {
+    const isStrict = !!st.attrs.failIfMajorPerformanceCaveat;
+    if (isStrict && strictNone) continue;              // no context at all with these requirements: the next steps would not get one either
+    const r = probeGL(st.attrs, st.noMSAA, st.hw);
+    if (r.none) { if (isStrict) strictNone = true; status = status || r.why; continue; }
+    created = true;
+    if (!r.ok) { if (why.indexOf(r.why) < 0) why.push(r.why); continue; }
+    let gl = null;
+    try { gl = canvas.getContext('webgl2', st.attrs); } catch (e) { gl = null; }
+    if (!gl) { why.push('the real canvas did not get a WebGL2 context'); continue; }
+    glWhy = '';
+    return finishGL(canvas, gl, st.noMSAA);
   }
-  // 2) the real thing
-  let gl = null;
-  try { gl = canvas.getContext('webgl2', glAttrs(strict)); } catch (e) { gl = null; }
-  if (!gl) return null;
-  const R = buildRenderer(canvas, gl);
+  // nothing worked: say why in words
+  if (strictNone && !mobile) {
+    let name = null;
+    try {
+      const c = document.createElement('canvas');
+      const g2 = c.getContext('webgl2', glAttrs(false, 'default'));
+      if (g2) { name = rendererName(g2) || 'unknown'; const ext = g2.getExtension('WEBGL_lose_context'); if (ext) ext.loseContext(); }
+    } catch (e) {}
+    glWhy = name === null ? 'WebGL2 is not available in this browser'
+                          : 'WebGL2 only runs in software here' + (name !== 'unknown' ? ' (' + name + ')' : '') + ', which is slower than Canvas 2D';
+  } else if (!created) {
+    glWhy = 'WebGL2 is not available in this browser' + (status && !/did not create/.test(status) ? ' (' + status + ')' : '');
+  } else {
+    glWhy = why.join('; ');
+  }
+  if (typeof console !== 'undefined') console.warn('[BowGL] WebGL2 not usable, falling back to Canvas 2D: ' + glWhy);
+  return null;
+}
+
+// the real renderer on the canvas that passed
+function finishGL(canvas, gl, noMSAA) {
+  const R = buildRenderer(canvas, gl, noMSAA);
   if (typeof document !== 'undefined' && document.fonts && document.fonts.addEventListener) {
     document.fonts.addEventListener('loadingdone', () => R.clearText());
   }
   const main = new Ctx2D(R, R.screen, canvas);
-  let info = 'WebGL2';
-  try { const x = gl.getExtension('WEBGL_debug_renderer_info'); if (x) info = String(gl.getParameter(x.UNMASKED_RENDERER_WEBGL)); } catch (e) {}
+  const info = rendererName(gl) || 'WebGL2';
   return {
-    name: 'webgl2', info, canvas, ctx: main, R, samples: R.samples,
+    name: 'webgl2', info, why: '', canvas, ctx: main, R, samples: R.samples,
     createSurface(w, h) {
       const T = new Target(R, w, h, false);
       return { _canvas: T, _ctx: new Ctx2D(R, T, T) };
@@ -2715,6 +2812,7 @@ function createCanvas2D(canvas) {
     if (w <= 0 || hh <= 0) return;
     const k = solveHomography(p, sw, sh);
     if (!k) return;
+    const near = g.imageSmoothingEnabled === false;     // nearest pixel, same rule as the GPU shader
     const out = new Uint8ClampedArray(w * hh * 4);
     const [a, b, c, d, e, f, gg, h2] = k;
     const D = src.data;
@@ -2725,6 +2823,12 @@ function createCanvas2D(canvas) {
         const den = gg * x + h2 * y + 1;
         if (Math.abs(den) < 1e-12) continue;
         const u = (a * x + b * y + c) / den, v = (d * x + e * y + f) / den;
+        if (near) {
+          if (u < 0 || v < 0 || u >= sw || v >= sh) continue;
+          const ni = (Math.min(sh - 1, Math.floor(v + 0.001)) * sw + Math.min(sw - 1, Math.floor(u + 0.001))) * 4, no = (py * w + px) * 4;
+          for (let ch = 0; ch < 4; ch++) out[no + ch] = (tint && ch < 3) ? D[ni + ch] * tint[ch] / 255 : D[ni + ch];
+          continue;
+        }
         if (u < 0 || v < 0 || u > sw - 1 || v > sh - 1) continue;
         const x0 = Math.floor(u), y0 = Math.floor(v), x1 = Math.min(x0 + 1, sw - 1), y1 = Math.min(y0 + 1, sh - 1);
         const tx = u - x0, ty = v - y0, c0 = 1 - tx, c1 = tx, d0 = 1 - ty, d1 = ty;
@@ -2747,6 +2851,7 @@ function createCanvas2D(canvas) {
       if (tint) {
         const iw = Math.abs(dw), ih = Math.abs(dh);
         tintCanvas.width = iw; tintCanvas.height = ih;
+        tintCtx.imageSmoothingEnabled = this.imageSmoothingEnabled;      // resizing the canvas reset it
         tintCtx.clearRect(0, 0, iw, ih);
         tintCtx.globalCompositeOperation = 'source-over';
         tintCtx.drawImage(img, 0, 0, iw, ih);
@@ -2792,18 +2897,24 @@ function createCanvas2D(canvas) {
 }
 
 // create(canvas[, { force2d, allowSoftware }]) → backend. Add ?renderer=2d to the page address to force Canvas 2D.
+// A Canvas 2D backend says why it is one in .why (shown by fragment(shader, safe=True)).
 function create(canvas, opts) {
   opts = opts || {};
-  let want2d = !!opts.force2d;
-  try { if (/[?&]renderer=2d\b/.test(location.search) || localStorage.getItem('bowpy_renderer') === '2d') want2d = true; } catch (e) {}
-  if (!want2d) {
+  let forced = opts.force2d ? 'WebGL2 was switched off by the program' : '';
+  try {
+    if (/[?&]renderer=2d\b/.test(location.search)) forced = 'WebGL2 is switched off with ?renderer=2d in the address';
+    else if (localStorage.getItem('bowpy_renderer') === '2d') forced = 'WebGL2 is switched off by the saved renderer setting';
+  } catch (e) {}
+  if (!forced) {
     const be = tryWebGL2(canvas, opts);
     if (be) return be;
   }
-  return createCanvas2D(canvas);
+  const be2 = createCanvas2D(canvas);
+  be2.why = forced || glWhy || 'WebGL2 is not available in this browser';
+  return be2;
 }
 
-return { create, parseColor, Gradient, Renderer, Target, Ctx2D, K: { K_COLOR, K_TEX, K_TINT, K_QUAD, K_LIN, K_RAD, K_COPY, K_LOAD } };
+return { create, parseColor, Gradient, Renderer, Target, Ctx2D, K: { K_COLOR, K_TEX, K_TINT, K_QUAD, K_LIN, K_RAD, K_COPY, K_LOAD, K_TEXN, K_TINTN, K_QUADN } };
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -4185,6 +4296,61 @@ function _bpColorToRGB(color) {
   _bpTintCache.set(key, out);
   return out;
 }
+// A gradient as the tint of an image: the picture is drawn into a scratch layer, multiplied by the gradient (like a plain
+// colour tint, the gradient's own transparency is not used) and cut back to the shape of the picture; then the layer is drawn
+// like any other image.  Only plain Canvas 2D calls are used, so the GPU renderer and the Canvas 2D fallback agree.
+const _bpGradLayers = new Map();
+function _bpGradLayer(w, h) {
+  const lw = Math.max(64, Math.ceil(w / 64) * 64), lh = Math.max(64, Math.ceil(h / 64) * 64);
+  const key = lw + 'x' + lh;
+  let L = _bpGradLayers.get(key);
+  if (!L) {
+    if (_bpGradLayers.size >= 12) _bpGradLayers.clear();
+    L = BE.createSurface(lw, lh);
+    _bpGradLayers.set(key, L);
+  }
+  return L;
+}
+// corners: device-space corners of the picture; gm: the transform the gradient's coordinates are in;
+// drawFn(g, dx, dy): draws the untinted picture into layer g, shifted by (-dx, -dy)
+function _bpGradTint(corners, grad, gm, drawFn) {
+  const tw = _bpTargetCanvas.width, th = _bpTargetCanvas.height;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const p of corners) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
+  if (!(isFinite(x0) && isFinite(y0) && isFinite(x1) && isFinite(y1))) return;
+  const bx = Math.max(0, Math.floor(x0)), by = Math.max(0, Math.floor(y0));
+  const ex = Math.min(tw, bx + 4096, Math.ceil(x1)), ey = Math.min(th, by + 4096, Math.ceil(y1));
+  const w = ex - bx, h = ey - by;
+  if (w <= 0 || h <= 0) return;
+  const L = _bpGradLayer(w, h), g = L._ctx;
+  g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = 'source-over';
+  g.clearRect(0, 0, L._canvas.width, L._canvas.height);
+  g.imageSmoothingEnabled = ctx.imageSmoothingEnabled;
+  drawFn(g, bx, by);
+  g.globalCompositeOperation = 'multiply';
+  g.setTransform(gm.a, gm.b, gm.c, gm.d, gm.e - bx, gm.f - by);
+  g.fillStyle = grad;
+  g.fillRect(-1e6, -1e6, 2e6, 2e6);
+  g.globalCompositeOperation = 'destination-in';
+  drawFn(g, bx, by);
+  g.globalCompositeOperation = 'source-over';
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(L._canvas, 0, 0, w, h, bx, by, w, h);
+  ctx.restore();
+}
+// interpolate=False: a picture that is only moved and scaled (not turned) is placed on whole screen pixels, so its edges stay sharp and
+// neighbouring pictures leave no seams.  m: the current transform; the rectangle x, y, w, h is in the coordinates m maps from.
+function _bpSnapRect(m, x, y, w, h) {
+  if (Math.abs(m.b) > 1e-9 || Math.abs(m.c) > 1e-9 || !m.a || !m.d) return [x, y, w, h];
+  const X0 = m.a * x + m.e, X1 = m.a * (x + w) + m.e, Y0 = m.d * y + m.f, Y1 = m.d * (y + h) + m.f;
+  if (!(isFinite(X0) && isFinite(X1) && isFinite(Y0) && isFinite(Y1))) return [x, y, w, h];
+  let l = Math.round(Math.min(X0, X1)), r = Math.round(Math.max(X0, X1)), t = Math.round(Math.min(Y0, Y1)), b = Math.round(Math.max(Y0, Y1));
+  if (r === l && X0 !== X1) r = l + 1;
+  if (b === t && Y0 !== Y1) b = t + 1;
+  const lx = m.a > 0 ? l : r, rx = m.a > 0 ? r : l, ty = m.d > 0 ? t : b, by = m.d > 0 ? b : t;
+  return [(lx - m.e) / m.a, (ty - m.f) / m.d, (rx - lx) / m.a, (by - ty) / m.d];
+}
 function _bpSourcePixels(img) {
   let cached = _bpImgDataCache.get(img);
   if (cached && cached.w === img.naturalWidth && cached.h === img.naturalHeight) return cached;
@@ -4398,7 +4564,9 @@ function _bpHostFactory() {
     fsx.busy = false; fsx.cancel = false;
     if (!fsx.warned) { fsx.warned = true; fsWarn('fullscreen(): the browser did not allow it yet. It will be tried again on the next click, tap or key press.'); }
   }));
-  return { clipWrite, clipRead, parseColor, fullscreen, fsStop, fsExit, fsHooks, _clip: clip, _fs: fsx };
+  // the state the browser is in right now (fullscreen() returns the state that was asked for)
+  const isFullscreen = () => !!fsEl();
+  return { clipWrite, clipRead, parseColor, fullscreen, isFullscreen, fsStop, fsExit, fsHooks, _clip: clip, _fs: fsx };
 }
 
 const _bpHost = _bpHostFactory();
@@ -4498,10 +4666,13 @@ window._py = {
     return ((d[0] << 24) | (d[1] << 16) | (d[2] << 8) | d[3]) >>> 0;
   },
   // shaders (fragment)
-  frag_compile(glsl, nslots, live) { return BE.compilePost ? BE.compilePost(String(glsl), nslots | 0, !!live) : 'the GPU renderer (WebGL2) is not in use'; },
+  frag_compile(glsl, nslots, live) { return BE.compilePost ? BE.compilePost(String(glsl), nslots | 0, !!live) : 'the GPU renderer (WebGL2) is not in use' + (BE.why ? ' (' + BE.why + ')' : ''); },
+  // '' when WebGL2 draws the screen, 'lost' while the browser has taken the GPU away for a moment, else the reason it is not in use
+  frag_gpu() { if (!BE.compilePost) return BE.why || 'WebGL2 is not in use'; return BE.R && BE.R.lost ? 'lost' : ''; },
   frag_apply(id, u) { const c = ctx; return !!(c && c.bpPost && c.bpPost(id | 0, u, _bpLiveVals())); },
   frag_reset() { if (BE.dropPosts) BE.dropPosts(); },
   fullscreen(t) { return _bpHost.fullscreen(t); },
+  is_fs() { return _bpHost.isFullscreen(); },
   // key/btn set accessors
   keys_held()    { return Array.from(keysHeld); },
   keys_pressed() { return Array.from(keysPress); },
@@ -4576,25 +4747,35 @@ window._py = {
     img.src = stored ? stored.url : String(url);
     return img;
   },
-  img_draw(img, x, y, w, h, angle, ox, oy, tint) {
+  img_draw(img, x, y, w, h, angle, ox, oy, tint, smooth) {
     if (!img || !img.complete || !img.naturalWidth) return;
     // w/h == 0  → use natural size;  negative → flip that axis, abs = draw size
     const flipX = w < 0;
     const flipY = h < 0;
-    const iw = (w === 0) ? img.naturalWidth  : Math.abs(w);
-    const ih = (h === 0) ? img.naturalHeight : Math.abs(h);
-    const px = -iw * ox;
-    const py = -ih * oy;
-    const tintRGB = (tint !== undefined && tint !== null && tint !== '' && tint !== 'none') ? _bpColorToRGB(tint) : null;
+    let iw = (w === 0) ? img.naturalWidth  : Math.abs(w);
+    let ih = (h === 0) ? img.naturalHeight : Math.abs(h);
+    let px = -iw * ox;
+    let py = -ih * oy;
+    const isGrad = !!tint && typeof tint === 'object';
+    const tintRGB = (!isGrad && tint !== undefined && tint !== null && tint !== '' && tint !== 'none') ? _bpColorToRGB(tint) : null;
+    const gm = isGrad ? ctx.getTransform() : null;
     ctx.save();
+    ctx.imageSmoothingEnabled = smooth !== false;      // interpolate=False: nearest pixel
     ctx.translate(x, y);
     ctx.rotate(angle);
     if (flipX || flipY) ctx.scale(flipX ? -1 : 1, flipY ? -1 : 1);
-    // tinting (multiply by the colour, keep the image's own alpha) happens inside the renderer
-    ctx.bpDrawImage(img, px, py, iw, ih, tintRGB);
+    if (smooth === false) { const sn = _bpSnapRect(ctx.getTransform(), px, py, iw, ih); px = sn[0]; py = sn[1]; iw = sn[2]; ih = sn[3]; }   // whole screen pixels
+    if (isGrad) {
+      const m = ctx.getTransform();
+      const cs = [[px, py], [px + iw, py], [px + iw, py + ih], [px, py + ih]].map(q => [m.a * q[0] + m.c * q[1] + m.e, m.b * q[0] + m.d * q[1] + m.f]);
+      _bpGradTint(cs, tint, gm, (g, dx, dy) => { g.setTransform(m.a, m.b, m.c, m.d, m.e - dx, m.f - dy); g.bpDrawImage(img, px, py, iw, ih, null); });
+    } else {
+      // tinting (multiply by the colour, keep the image's own alpha) happens inside the renderer
+      ctx.bpDrawImage(img, px, py, iw, ih, tintRGB);
+    }
     ctx.restore();
   },
-  img_draw_quad(img, pts, tint) {
+  img_draw_quad(img, pts, tint, smooth) {
     if (!img || !img.complete || !img.naturalWidth) return;
     const rawPts = pts && pts.toJs ? pts.toJs() : Array.from(pts || []);
     if (rawPts.length !== 4) return;
@@ -4605,7 +4786,15 @@ window._py = {
       return [m.a * x + m.c * y + m.e, m.b * x + m.d * y + m.f];
     });
     // perspective-correct textured quad (corners: top-left, top-right, bottom-left, bottom-right)
-    ctx.bpDrawQuad(img, p, _bpColorToRGB(tint));
+    const keepSmooth = ctx.imageSmoothingEnabled;
+    ctx.imageSmoothingEnabled = smooth !== false;      // interpolate=False: nearest pixel
+    try {
+      if (tint && typeof tint === 'object') {
+        _bpGradTint(p, tint, m, (g, dx, dy) => { g.setTransform(1, 0, 0, 1, 0, 0); g.bpDrawQuad(img, p.map(q => [q[0] - dx, q[1] - dy]), null); });
+        return;
+      }
+      ctx.bpDrawQuad(img, p, _bpColorToRGB(tint));
+    } finally { ctx.imageSmoothingEnabled = keepSmooth; }
   },
   img_size(img)  { return [img.naturalWidth || 0, img.naturalHeight || 0]; },
   img_ready(img) { return !!(img && img.complete && img.naturalWidth); },
@@ -4680,9 +4869,17 @@ window._py = {
     ctx = _mainCtx;
     _bpTargetCanvas = $canvas;
   },
-  surface_draw(sfc, x, y) {
+  surface_draw(sfc, x, y, smooth) {
     if (!sfc || !sfc._canvas) return;
-    ctx.drawImage(sfc._canvas, Number(x), Number(y));
+    const keepSmooth = ctx.imageSmoothingEnabled;
+    ctx.imageSmoothingEnabled = smooth !== false;      // interpolate=False: nearest pixel
+    try {
+      x = Number(x); y = Number(y);
+      if (smooth === false) {                            // placed on whole screen pixels (see _bpSnapRect)
+        const r = _bpSnapRect(ctx.getTransform(), x, y, sfc._canvas.width, sfc._canvas.height);
+        ctx.drawImage(sfc._canvas, r[0], r[1], r[2], r[3]);
+      } else ctx.drawImage(sfc._canvas, x, y);
+    } finally { ctx.imageSmoothingEnabled = keepSmooth; }
   },
   surface_to_image(sfc) {
     if (!sfc || !sfc._canvas) return null;
@@ -4778,23 +4975,25 @@ def input(prompt=''):
 _py=js._py
 
 def _css(c):
-    """Return (rgb_css_string, alpha_0_to_1) for regular colors."""
+    """Return (rgb_css_string, alpha_0_to_1) for regular colors.  A Gradient gives its canvas gradient and 1.0."""
     if isinstance(c,str): return c, 1.0
     if isinstance(c,(tuple,list)):
         if len(c)==3: return 'rgb({},{},{})'.format(int(c[0]),int(c[1]),int(c[2])), 1.0
         if len(c)==4: return 'rgba({},{},{},{:.4f})'.format(int(c[0]),int(c[1]),int(c[2]),float(c[3])/255.0), 1.0
+    if isinstance(c,Gradient): return c._js, 1.0
     return c, None
 
 def _css_clear(c):
-    """Return CSS string for regular colors and pass-through for other styles."""
+    """Return CSS string for regular colors, the canvas gradient for a Gradient and pass-through for other styles."""
     if isinstance(c,str): return c
     if isinstance(c,(tuple,list)):
         if len(c)==3: return 'rgb({},{},{})'.format(int(c[0]),int(c[1]),int(c[2]))
         if len(c)==4: return 'rgba({},{},{},{:.4f})'.format(int(c[0]),int(c[1]),int(c[2]),c[3]/255)
+    if isinstance(c,Gradient): return c._js
     return c
 
 def _style(c):
-    if isinstance(c,str) or isinstance(c,(tuple,list)):
+    if isinstance(c,(str,tuple,list,Gradient)):
         return _css(c)
     return c, None
 
@@ -5258,6 +5457,17 @@ def draw_text(x,y,text,color=WHITE,size=16,font='monospace',*,align='left',basel
         pts=[(float(x),sy+i*line_h) for i in range(n)]; per_base='top'
     needs_rot=float(angle)!=0; needs_skew=bool(italic)
     needs_transform=needs_rot or needs_skew
+    if needs_transform and (isinstance(color,Gradient) or isinstance(stroke,Gradient)):
+        # rotated or slanted text is drawn in its own frame: carry a gradient into that frame so it stays where it was put on the screen
+        _k=-0.25 if needs_skew else 0.0
+        _th=_deg(angle) if needs_rot else 0.0
+        _c=math.cos(_th); _s=math.sin(_th); _ox=float(x); _oy=float(y)
+        def _to_local(px,py):
+            dx=px-_ox; dy=py-_oy
+            ry=-dx*_s+dy*_c
+            return dx*_c+dy*_s-_k*ry, ry
+        if isinstance(color,Gradient): color=color._mapped(_to_local)
+        if isinstance(stroke,Gradient): stroke=stroke._mapped(_to_local)
     if needs_transform:
         _py.save(); _py.trans(float(x),float(y))
         if needs_rot: _py.rot(_deg(angle))
@@ -5267,6 +5477,7 @@ def draw_text(x,y,text,color=WHITE,size=16,font='monospace',*,align='left',basel
         draw_pts=pts
     if stroke is not None:
         fc,fa=_css(color); sc,sa=_css(stroke)
+        if fa is None: fa=1.0
         prev=float(_py.galpha()) if fa<0.9999 else None
         if prev is not None: _py.alpha(prev*fa)
         for i,(lx,ly) in enumerate(draw_pts):
@@ -5283,21 +5494,146 @@ def measure_text(text,size=16,font='monospace'):
     v=_py.mtxt(str(text),float(size),str(font))
     r=v.toJs() if hasattr(v,'toJs') else list(v); return tuple(r)
 
-def _grad_stops(stops):
+def _grad_norm(stops):
+    """The stops of a gradient as a list of (position, color): a single list of stops is accepted too."""
     if len(stops) == 1 and isinstance(stops[0], (list, tuple)) and stops[0] and isinstance(stops[0][0], (list, tuple)):
         stops = stops[0]
     out = []
     for stop in stops:
         if hasattr(stop, 'toJs'):
             stop = stop.toJs()
+        if not isinstance(stop, (list, tuple)) or len(stop) != 2:
+            raise TypeError('a gradient stop must be a (position, color) pair, for example (0.5, "red")')
         pos, color = stop[0], stop[1]
-        out.append((float(pos), _css_clear(color)))
+        if isinstance(color, Gradient):
+            raise TypeError('a gradient stop needs a regular color, not another gradient')
+        if not isinstance(color, (str, tuple, list)):
+            raise TypeError('a gradient stop needs a color name or an (r, g, b) tuple, not ' + type(color).__name__)
+        pos = float(pos)
+        if not (0.0 <= pos <= 1.0):
+            raise ValueError('a gradient stop position goes from 0 to 1, not ' + repr(pos))
+        out.append((pos, color))
     return out
 
-def linear_gradient(x1,y1,x2,y2,*stops): return _py.lingrad(float(x1),float(y1),float(x2),float(y2),_grad_stops(stops))
-def radial_gradient(x,y,r0,x2,y2,r1,*stops): return _py.radgrad(float(x),float(y),float(r0),float(x2),float(y2),float(r1),_grad_stops(stops))
-def fill_gradient(grad): _py.fillgrad(grad)
-def rect_gradient(x,y,w,h,grad): _py.rectgrad(float(x),float(y),float(w),float(h),grad)
+def _opaque_css(c):
+    v = _mix_rgba(c)
+    return 'rgb({},{},{})'.format(int(v[0]), int(v[1]), int(v[2]))
+
+class Gradient:
+    """A color that changes from place to place.  Make one with linear_gradient() or radial_gradient().
+
+    A Gradient works wherever a color does: clear(g), draw_rect(x, y, w, h, g), draw_text(x, y, text, g),
+    the tint of draw_image() and so on.  It never changes: angled() and rotated() return a new gradient.
+
+    Properties:
+        g.angle         – how far the gradient is turned, in degrees (0 when it was not turned)
+        g.kind          – "linear" or "radial"
+
+    Methods:
+        g.angled(deg)   – the same gradient at the angle deg (the angle it had before is ignored)
+        g.rotated(deg)  – the same gradient with deg added to its angle
+    """
+    __slots__ = ('_kind', '_a', '_raw', '_angle', '_map', '_js', '_ojs')
+
+    def __init__(s, kind, a, raw, angle=0.0, map_=None):
+        s._kind = kind
+        s._a = tuple(a)
+        s._raw = tuple(raw)
+        s._angle = float(angle)
+        s._map = map_                    # (internal) maps the points of the gradient, used for rotated and slanted text
+        s._ojs = None
+        s._js = s._build([(p, _css_clear(c)) for p, c in s._raw])
+
+    def _points(s):
+        p = s._a
+        if s._angle != 0.0:
+            th = math.radians(s._angle); c = math.cos(th); sn = math.sin(th)
+            if s._kind == 'linear':
+                x1, y1, x2, y2 = p
+                mx = (x1 + x2) / 2.0; my = (y1 + y2) / 2.0
+                dx = x1 - mx; dy = y1 - my; ex = x2 - mx; ey = y2 - my
+                p = (mx + dx * c - dy * sn, my + dx * sn + dy * c, mx + ex * c - ey * sn, my + ex * sn + ey * c)
+            else:                                    # the inner circle swings around the center of the outer one
+                x, y, r0, x2, y2, r1 = p
+                dx = x - x2; dy = y - y2
+                p = (x2 + dx * c - dy * sn, y2 + dx * sn + dy * c, r0, x2, y2, r1)
+        m = s._map
+        if m is not None:
+            if s._kind == 'linear':
+                a = m(p[0], p[1]); b = m(p[2], p[3])
+                p = (a[0], a[1], b[0], b[1])
+            else:
+                a = m(p[0], p[1]); b = m(p[3], p[4])
+                p = (a[0], a[1], p[2], b[0], b[1], p[5])
+        return p
+
+    def _mapped(s, fn):
+        return Gradient(s._kind, s._a, s._raw, s._angle, fn)
+
+    def _build(s, stops):
+        p = s._points()
+        if s._kind == 'linear':
+            return _py.lingrad(p[0], p[1], p[2], p[3], stops)
+        return _py.radgrad(p[0], p[1], p[2], p[3], p[4], p[5], stops)
+
+    def _tint_js(s):
+        """The canvas gradient with every stop made opaque: an image tint only uses the colors."""
+        if s._ojs is None:
+            s._ojs = s._build([(p, _opaque_css(c)) for p, c in s._raw])
+        return s._ojs
+
+    @property
+    def angle(s): return s._angle
+
+    @property
+    def kind(s): return s._kind
+
+    def angled(s, deg):
+        """Return the same gradient at the angle deg, whatever angle this one has.  This gradient is not changed."""
+        return Gradient(s._kind, s._a, s._raw, float(deg), s._map)
+
+    def rotated(s, deg):
+        """Return the same gradient turned by deg more degrees (deg is added to the angle).  This gradient is not changed."""
+        return Gradient(s._kind, s._a, s._raw, s._angle + float(deg), s._map)
+
+    def __repr__(s):
+        return 'Gradient({}, {}, angle={:g})'.format(s._kind, ', '.join('{:g}'.format(v) for v in s._a), s._angle)
+
+def _tint_arg(t):
+    if t is None: return None
+    if isinstance(t, Gradient): return t._tint_js()
+    return _css_clear(t)
+
+def linear_gradient(x1,y1,x2,y2,*stops,angle=0):
+    """A color that changes along the line from (x1, y1) to (x2, y2).
+
+    stops are (position, color) pairs with the position from 0 (at the start) to 1 (at the end).
+    angle turns the gradient by that many degrees (clockwise on the screen) around the middle of the line.
+
+    Example:
+        g = linear_gradient(0, 0, 0, H(), (0, "navy"), (1, "orange"))
+        draw_rect(0, 0, W(), H(), g)
+    """
+    return Gradient('linear', (float(x1),float(y1),float(x2),float(y2)), _grad_norm(stops), angle)
+
+def radial_gradient(x,y,r0,x2,y2,r1,*stops):
+    """A color that changes outwards from the circle (x, y, r0) to the circle (x2, y2, r1).
+
+    stops are (position, color) pairs with the position from 0 (inner circle) to 1 (outer circle).
+
+    Example:
+        g = radial_gradient(160, 120, 0, 160, 120, 100, (0, "white"), (1, "blue"))
+        draw_circle(160, 120, 100, g)
+    """
+    return Gradient('radial', (float(x),float(y),float(r0),float(x2),float(y2),float(r1)), _grad_norm(stops))
+
+def fill_gradient(grad):
+    """Fill the whole screen with a gradient (an older shortcut: clear(grad) or draw_rect(0, 0, W(), H(), grad) do the same)."""
+    _py.fillgrad(_css_clear(grad))
+
+def rect_gradient(x,y,w,h,grad):
+    """Fill a rectangle with a gradient (an older shortcut: draw_rect(x, y, w, h, grad) does the same)."""
+    draw_rect(x,y,w,h,grad)
 
 def push():              _py.save()
 def pop():               _py.restore()
@@ -5848,18 +6184,20 @@ class Image:
     def size(s):
         v=_py.img_size(s._h).to_py(); return (int(v[0]),int(v[1]))
 
-def draw_image(img, x, y, width=None, height=None, angle=0, origin=(0,0), tint=None):
+def draw_image(img, x, y, width=None, height=None, angle=0, origin=(0,0), tint=None, interpolate=True):
     """Draw an Image. x,y is the anchor; origin=(ox,oy) defines which point
     within the image is the anchor: (0,0)=top-left, (0.5,0.5)=center, (1,1)=bottom-right.
     angle is in degrees, rotating around the anchor point.
     width/height default to the image's natural size.
     Pass a negative width or height to flip/mirror the image along that axis.
     tint multiplies every pixel of the image by the given color.
+    interpolate=True blends neighbouring pixels when the image is scaled or rotated (smooth).
+    interpolate=False uses the nearest pixel instead, so a scaled up image keeps hard square pixels.
     """
     w = float(width)  if width  is not None else 0.0   # 0 = natural size
     h = float(height) if height is not None else 0.0
     ox, oy = _get_origin(origin)
-    _py.img_draw(img._h, float(x), float(y), w, h, _deg(angle), ox, oy, _css_clear(tint) if tint is not None else None)
+    _py.img_draw(img._h, float(x), float(y), w, h, _deg(angle), ox, oy, _tint_arg(tint), bool(interpolate))
 
 
 def _asset_info(name):
@@ -5970,10 +6308,15 @@ def burn(name):
         raise ValueError(f"burn(): filename must end in .txt or .json, got {_nm!r}")
     _py.file_burn(_nm)
 
-def draw_image_quad(img, p1, p2, p3, p4, tint=None):
-    """Draw an Image onto a 4-point quadrilateral using projective mapping."""
+def draw_image_quad(img, p1, p2, p3, p4, tint=None, interpolate=True):
+    """Draw an Image onto a 4-point quadrilateral using projective mapping.
+
+    The points are the top-left, top-right, bottom-left and bottom-right corners of the image.
+    interpolate=True blends neighbouring pixels (smooth); interpolate=False gives every screen pixel
+    the colour of the nearest image pixel, so the image pixels stay hard-edged.
+    """
     pts = [_pt2(p1), _pt2(p2), _pt2(p3), _pt2(p4)]
-    _py.img_draw_quad(img._h, pts, _css_clear(tint) if tint is not None else None)
+    _py.img_draw_quad(img._h, pts, _tint_arg(tint), bool(interpolate))
 
 # ── Sound ─────────────────────────────────────────────────────
 
@@ -6211,6 +6554,20 @@ def fullscreen(toggle=None):
             fullscreen()
     """
     return bool(_py.fullscreen(None if toggle is None else bool(toggle)))
+
+
+def is_fullscreen():
+    """Return True when the game is fullscreen right now, False when it is in its window.
+
+    fullscreen() returns the state that was asked for; is_fullscreen() is the state the browser is in. The browser
+    needs a moment to change, so right after fullscreen(True) it can still be False. It is False while the browser has
+    not allowed a request yet, and False again when the player leaves fullscreen with Esc.
+
+    Example:
+        if is_fullscreen():
+            draw_text(20, 20, "Press Esc to leave fullscreen", "white", 20)
+    """
+    return bool(_py.is_fs())
 
 
 # ── Misc ───────────────────────────────────────────────────────
@@ -6699,9 +7056,13 @@ def reset_target():
     """Reset the draw target back to the main screen canvas."""
     _py.surface_reset_target()
 
-def draw_surface(surface, x, y):
-    """Draw *surface* at (x, y) on the current draw target."""
-    _py.surface_draw(surface._h, float(x), float(y))
+def draw_surface(surface, x, y, interpolate=True):
+    """Draw *surface* at (x, y) on the current draw target.
+
+    interpolate=True blends neighbouring pixels when the surface is scaled, rotated or at a fractional
+    position (smooth); interpolate=False uses the nearest pixel, so the pixels stay hard-edged.
+    """
+    _py.surface_draw(surface._h, float(x), float(y), bool(interpolate))
 
 
 # ── Timer-aware frame runner ───────────────────────────────────
@@ -8519,7 +8880,7 @@ def _bp_frag_reset():
         pass
 
 
-def _bp_frag_build(fn):
+def _bp_frag_build(fn, safe=False):
     """Translate a shader function to GLSL and compile it on the GPU: {'mode': 'gpu', 'id': n, 'pack': f} or {'mode': 'cpu'}."""
     st = _FRAG
     ent = {'mode': 'cpu', 'id': 0, 'pack': None}
@@ -8537,6 +8898,9 @@ def _bp_frag_build(fn):
         else:
             ent.update(mode='gpu', id=int(res), pack=_sh_make_packer(comp) if comp.nslots else None, glsl=glsl)
             return ent
+    ent['reason'] = reason                       # kept with the entry: a later fragment(safe=True) call reports it too
+    if safe:
+        raise RuntimeError('fragment(%s, safe=True): the shader cannot run on the GPU: %s' % (getattr(fn, '__name__', 'shader'), reason))
     if not st['warned']:
         st['warned'] = True
         _sh_warn('fragment() cannot run on the GPU, so it runs on the CPU, which is very slow: %s' % reason)
@@ -8681,7 +9045,7 @@ def _sh_sample(pos):
     return Vec4(0.0, 0.0, 0.0, 0.0)
 
 
-def fragment(shader):
+def fragment(shader, safe=False):
     """Apply a shader to the screen as it is right now: shader(pos) is called for every pixel and returns its new colour.
 
     shader is a function that you write with def and one argument, pos: a Vec2 from 0 to 1 ((0, 0) is the top-left
@@ -8695,6 +9059,11 @@ def fragment(shader):
     It runs on the GPU, so it is very fast. BowPy turns your function into a GPU program: use numbers, Vec2 / Vec3 /
     Vec4, math functions, if / for / while, your own helper functions and your global variables (they are read
     again every time fragment() is called).
+
+    safe=False (the default): a shader that cannot run on the GPU still works: a warning is printed and the CPU calculates
+    every pixel, which is very slow. safe=True never does that: fragment() raises a RuntimeError, with the reason, when the
+    shader would have to run on the CPU (WebGL2 is not available or switched off, or the GPU cannot run this shader).
+    Catch it to go on without the effect.
 
     Example (a pulsing vignette):
         def vignette(pos):
@@ -8718,22 +9087,32 @@ def fragment(shader):
         raise TypeError('the shader given to fragment() must take exactly one argument: def %s(pos): ...  '
                         'pos is a Vec2 from 0 to 1 and get_pixel(pos) is the colour that is on the screen there' % shader.__name__)
     st = _FRAG
+    safe = bool(safe)
+    if safe:
+        gone = str(_py.frag_gpu() or '')
+        if gone == 'lost':
+            return                                 # the browser took the GPU away for a moment (page in the background): nothing to shade
+        if gone:
+            raise RuntimeError('fragment(%s, safe=True) needs WebGL2 and it is not available here (%s). '
+                               'Leave out safe=True to let the shader run on the CPU instead, which is very slow.' % (shader.__name__, gone))
     progs = st['progs']
     ent = progs.get(code)
     if ent is None:
         if len(progs) >= 48:
             progs.clear()
-        ent = progs[code] = _bp_frag_build(shader)
+        ent = progs[code] = _bp_frag_build(shader, safe)
     if ent['mode'] == 'gpu':
         pk = ent['pack']
         if _py.frag_apply(ent['id'], pk() if pk is not None else []):
             return
         # the GPU forgot the program (context lost, too many programs): build it once more
-        ent = progs[code] = _bp_frag_build(shader)
+        ent = progs[code] = _bp_frag_build(shader, safe)
         if ent['mode'] == 'gpu':
             pk = ent['pack']
             if _py.frag_apply(ent['id'], pk() if pk is not None else []):
                 return
+    if safe:
+        raise RuntimeError('fragment(%s, safe=True): the shader cannot run on the GPU: %s' % (shader.__name__, ent.get('reason') or 'the GPU did not run it'))
     _bp_frag_cpu(shader)
 
 
@@ -9902,10 +10281,26 @@ function frame(ts) {
 // ══════════════════════════════════════════════════════════════
 //  Run / Stop
 // ══════════════════════════════════════════════════════════════
+// A focused editor, and above all a text selection in it, keeps a phone's keyboard typing into the editor: the game then gets
+// no key events.  Running the program therefore blurs whatever has the focus and collapses every selection.
+function _bpReleaseEditor() {
+  try {
+    const a = document.activeElement;
+    if (a && a !== document.body && typeof a.blur === 'function') a.blur();
+    if ($ed) {
+      try { $ed.setSelectionRange($ed.selectionEnd, $ed.selectionEnd); } catch (e) {}
+      $ed.blur();
+    }
+    const sel = window.getSelection && window.getSelection();
+    if (sel && sel.removeAllRanges) sel.removeAllRanges();
+  } catch (e) {}
+}
+
 async function runCode() {
   if (running) stopCode();
   if (_bpSet.clearConsole) clearCon();
   _saveNow();
+  _bpReleaseEditor();
   $runBtn.disabled = true; $stpBtn.disabled = false;
   switchTab('screen'); fitCanvas();
   ctx.clearRect(0, 0, $canvas.width, $canvas.height);
@@ -10057,6 +10452,17 @@ def update():
 // ══════════════════════════════════════════════════════════════
 //  Import / Export
 // ══════════════════════════════════════════════════════════════
+// Hands a file to the browser's downloads. Phones and tablets are picky: the link has to be in the page when it is clicked, and the
+// temporary address must live until the browser has read the whole file (releasing it right after the click can cancel the download).
+function _bpDownload(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = name; a.rel = 'noopener'; a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { try { document.body.removeChild(a); } catch (e) {} try { URL.revokeObjectURL(url); } catch (e) {} }, 60000);
+}
+
 async function exportFile() {
   const prog = _bpGetProgram();
   const raw  = (document.getElementById('fname').value || 'sketch').trim();
@@ -10070,8 +10476,10 @@ async function exportFile() {
   }
   // Extra code tabs travel in a second header line (restored by Import, and by include())
   const tabBlock = prog.tabs.length ? '# BOWPY_TABS: ' + JSON.stringify(prog.tabs) + '\n' : '';
-  const blob = new Blob([assetBlock + tabBlock + prog.main], { type: 'text/plain' });
-  if (window.showSaveFilePicker) {
+  // on a phone or tablet the file just goes to the browser's downloads (a generic type makes every browser download it instead of showing it)
+  const mobile = _bpIsMobile();
+  const blob = new Blob([assetBlock + tabBlock + prog.main], { type: mobile ? 'application/octet-stream' : 'text/plain' });
+  if (!mobile && window.showSaveFilePicker) {
     try {
       const fh = await window.showSaveFilePicker({
         suggestedName: slug + '.bpy',
@@ -10087,12 +10495,8 @@ async function exportFile() {
       // fall through to download fallback
     }
   }
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = slug + '.bpy';
-  a.click();
-  URL.revokeObjectURL(a.href);
-  window.appendConsole('Saved: ' + slug + '.bpy', 'ok');
+  _bpDownload(blob, slug + '.bpy');
+  window.appendConsole((mobile ? 'Downloaded: ' : 'Saved: ') + slug + '.bpy' + (mobile ? " (see your browser's downloads)" : ''), 'ok');
 }
 
 let _newClickTimer = null, _newClicks = 0;
@@ -10257,6 +10661,61 @@ const _bpTintProbeCtx=_bpTintProbeCanvas.getContext('2d');
 const _bpTintCanvas=document.createElement('canvas');const _bpTintCtx=_bpTintCanvas.getContext('2d');
 function _bpPoint2D(p){if(!p)return[0,0];if(p.toJs)p=p.toJs();if(Array.isArray(p))return[Number(p[0]),Number(p[1])];return[Number(p.x),Number(p.y)];}
 function _bpColorToRGB(color){if(color===undefined||color===null||color===''||color==='none')return null;const key=typeof color==='string'?color:JSON.stringify(color);if(_bpTintCache.has(key))return _bpTintCache.get(key);let css=color;if(Array.isArray(color)&&color.length>=3)css=color.length>=4?('rgba('+color[0]+','+color[1]+','+color[2]+','+(Number(color[3])/255)+')'):('rgb('+color[0]+','+color[1]+','+color[2]+')');if(typeof css!=='string')return null;_bpTintProbeCtx.setTransform(1,0,0,1,0,0);_bpTintProbeCtx.clearRect(0,0,1,1);_bpTintProbeCtx.fillStyle=css;_bpTintProbeCtx.fillRect(0,0,1,1);const d=_bpTintProbeCtx.getImageData(0,0,1,1).data;const out=[d[0],d[1],d[2]];_bpTintCache.set(key,out);return out;}
+// A gradient as the tint of an image: the picture is drawn into a scratch layer, multiplied by the gradient (like a plain
+// colour tint, the gradient's own transparency is not used) and cut back to the shape of the picture; then the layer is drawn
+// like any other image.  Only plain Canvas 2D calls are used, so the GPU renderer and the Canvas 2D fallback agree.
+const _bpGradLayers = new Map();
+function _bpGradLayer(w, h) {
+  const lw = Math.max(64, Math.ceil(w / 64) * 64), lh = Math.max(64, Math.ceil(h / 64) * 64);
+  const key = lw + 'x' + lh;
+  let L = _bpGradLayers.get(key);
+  if (!L) {
+    if (_bpGradLayers.size >= 12) _bpGradLayers.clear();
+    L = BE.createSurface(lw, lh);
+    _bpGradLayers.set(key, L);
+  }
+  return L;
+}
+// corners: device-space corners of the picture; gm: the transform the gradient's coordinates are in;
+// drawFn(g, dx, dy): draws the untinted picture into layer g, shifted by (-dx, -dy)
+function _bpGradTint(corners, grad, gm, drawFn) {
+  const tw = _bpTargetCanvas.width, th = _bpTargetCanvas.height;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const p of corners) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
+  if (!(isFinite(x0) && isFinite(y0) && isFinite(x1) && isFinite(y1))) return;
+  const bx = Math.max(0, Math.floor(x0)), by = Math.max(0, Math.floor(y0));
+  const ex = Math.min(tw, bx + 4096, Math.ceil(x1)), ey = Math.min(th, by + 4096, Math.ceil(y1));
+  const w = ex - bx, h = ey - by;
+  if (w <= 0 || h <= 0) return;
+  const L = _bpGradLayer(w, h), g = L._ctx;
+  g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = 'source-over';
+  g.clearRect(0, 0, L._canvas.width, L._canvas.height);
+  g.imageSmoothingEnabled = ctx.imageSmoothingEnabled;
+  drawFn(g, bx, by);
+  g.globalCompositeOperation = 'multiply';
+  g.setTransform(gm.a, gm.b, gm.c, gm.d, gm.e - bx, gm.f - by);
+  g.fillStyle = grad;
+  g.fillRect(-1e6, -1e6, 2e6, 2e6);
+  g.globalCompositeOperation = 'destination-in';
+  drawFn(g, bx, by);
+  g.globalCompositeOperation = 'source-over';
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(L._canvas, 0, 0, w, h, bx, by, w, h);
+  ctx.restore();
+}
+// interpolate=False: a picture that is only moved and scaled (not turned) is placed on whole screen pixels, so its edges stay sharp and
+// neighbouring pictures leave no seams.  m: the current transform; the rectangle x, y, w, h is in the coordinates m maps from.
+function _bpSnapRect(m, x, y, w, h) {
+  if (Math.abs(m.b) > 1e-9 || Math.abs(m.c) > 1e-9 || !m.a || !m.d) return [x, y, w, h];
+  const X0 = m.a * x + m.e, X1 = m.a * (x + w) + m.e, Y0 = m.d * y + m.f, Y1 = m.d * (y + h) + m.f;
+  if (!(isFinite(X0) && isFinite(X1) && isFinite(Y0) && isFinite(Y1))) return [x, y, w, h];
+  let l = Math.round(Math.min(X0, X1)), r = Math.round(Math.max(X0, X1)), t = Math.round(Math.min(Y0, Y1)), b = Math.round(Math.max(Y0, Y1));
+  if (r === l && X0 !== X1) r = l + 1;
+  if (b === t && Y0 !== Y1) b = t + 1;
+  const lx = m.a > 0 ? l : r, rx = m.a > 0 ? r : l, ty = m.d > 0 ? t : b, by = m.d > 0 ? b : t;
+  return [(lx - m.e) / m.a, (ty - m.f) / m.d, (rx - lx) / m.a, (by - ty) / m.d];
+}
 function _bpSourcePixels(img){let cached=_bpImgDataCache.get(img);if(cached&&cached.w===img.naturalWidth&&cached.h===img.naturalHeight)return cached;const c=document.createElement('canvas');c.width=img.naturalWidth;c.height=img.naturalHeight;const g=c.getContext('2d');g.drawImage(img,0,0);cached={w:c.width,h:c.height,data:g.getImageData(0,0,c.width,c.height).data};_bpImgDataCache.set(img,cached);return cached;}
 function _bpSolveHomography(srcPts,dstPts){const A=[];const B=[];for(let i=0;i<4;i++){const sx=srcPts[i][0],sy=srcPts[i][1],dx=dstPts[i][0],dy=dstPts[i][1];A.push([dx,dy,1,0,0,0,-sx*dx,-sx*dy]);B.push(sx);A.push([0,0,0,dx,dy,1,-sy*dx,-sy*dy]);B.push(sy);}for(let i=0;i<8;i++){let piv=i;for(let r=i+1;r<8;r++)if(Math.abs(A[r][i])>Math.abs(A[piv][i]))piv=r;if(Math.abs(A[piv][i])<1e-12)return null;if(piv!==i){const tr=A[i];A[i]=A[piv];A[piv]=tr;const tb=B[i];B[i]=B[piv];B[piv]=tb;}const div=A[i][i];for(let j=i;j<8;j++)A[i][j]/=div;B[i]/=div;for(let r=0;r<8;r++){if(r===i)continue;const f=A[r][i];if(!f)continue;for(let j=i;j<8;j++)A[r][j]-=f*A[i][j];B[r]-=f*B[i];}}return B;}
 const _bpHost=_bpHostFactory();
@@ -10290,15 +10749,17 @@ window._py={
   rectgrad(x,y,w,h,grad){ctx.fillStyle=grad;ctx.fillRect(x,y,w,h);},
   get_pixel(x,y){const d=ctx.getImageData(x,y,1,1).data;return[d[0],d[1],d[2],d[3]];},
   get_pixel_packed(x,y){const c=ctx;if(c.bpPixel)return c.bpPixel(x,y);const d=c.getImageData(x,y,1,1).data;return((d[0]<<24)|(d[1]<<16)|(d[2]<<8)|d[3])>>>0;},
-  frag_compile(glsl,nslots,live){return BE.compilePost?BE.compilePost(String(glsl),nslots|0,!!live):'the GPU renderer (WebGL2) is not in use';},
+  frag_compile(glsl,nslots,live){return BE.compilePost?BE.compilePost(String(glsl),nslots|0,!!live):'the GPU renderer (WebGL2) is not in use'+(BE.why?' ('+BE.why+')':'');},
+  frag_gpu(){if(!BE.compilePost)return BE.why||'WebGL2 is not in use';return BE.R&&BE.R.lost?'lost':'';},
   frag_apply(id,u){const c=ctx;return !!(c&&c.bpPost&&c.bpPost(id|0,u,_bpLiveVals()));},
   frag_reset(){if(BE.dropPosts)BE.dropPosts();},
   fullscreen(t){return _bpHost.fullscreen(t);},
+  is_fs(){return _bpHost.isFullscreen();},
   galpha(){return ctx.globalAlpha;},screen_pos(x,y){if(x!==undefined&&y!==undefined){screenX=Number(x)||0;screenY=Number(y)||0;}return[screenX,screenY];},screen_rot(angle,ox,oy){if(angle!==undefined){screenRot=Number(angle)||0;if(ox!==undefined&&oy!==undefined){screenRotOx=Number(ox)||0;screenRotOy=Number(oy)||0;}}return[screenRot,screenRotOx,screenRotOy];},
   img_create(url){const stored=_builtAssets[String(url)];const img=new window.Image();img.crossOrigin='anonymous';img.src=stored||String(url);return img;},
-  img_draw(img,x,y,w,h,angle,ox,oy,tint){if(!img||!img.complete||!img.naturalWidth)return;const flipX=w<0;const flipY=h<0;const iw=(w===0)?img.naturalWidth:Math.abs(w);const ih=(h===0)?img.naturalHeight:Math.abs(h);const px=-iw*ox;const py=-ih*oy;const tintRGB=(tint!==undefined&&tint!==null&&tint!==""&&tint!=="none")?_bpColorToRGB(tint):null;ctx.save();ctx.translate(x,y);ctx.rotate(angle);if(flipX||flipY)ctx.scale(flipX?-1:1,flipY?-1:1);ctx.bpDrawImage(img,px,py,iw,ih,tintRGB);ctx.restore();},
+  img_draw(img,x,y,w,h,angle,ox,oy,tint,smooth){if(!img||!img.complete||!img.naturalWidth)return;const flipX=w<0;const flipY=h<0;let iw=(w===0)?img.naturalWidth:Math.abs(w);let ih=(h===0)?img.naturalHeight:Math.abs(h);let px=-iw*ox;let py=-ih*oy;const isGrad=!!tint&&typeof tint==='object';const tintRGB=(!isGrad&&tint!==undefined&&tint!==null&&tint!==""&&tint!=="none")?_bpColorToRGB(tint):null;const gm=isGrad?ctx.getTransform():null;ctx.save();ctx.imageSmoothingEnabled=smooth!==false;ctx.translate(x,y);ctx.rotate(angle);if(flipX||flipY)ctx.scale(flipX?-1:1,flipY?-1:1);if(smooth===false){const sn=_bpSnapRect(ctx.getTransform(),px,py,iw,ih);px=sn[0];py=sn[1];iw=sn[2];ih=sn[3];}if(isGrad){const m=ctx.getTransform();const cs=[[px,py],[px+iw,py],[px+iw,py+ih],[px,py+ih]].map(q=>[m.a*q[0]+m.c*q[1]+m.e,m.b*q[0]+m.d*q[1]+m.f]);_bpGradTint(cs,tint,gm,(g,dx,dy)=>{g.setTransform(m.a,m.b,m.c,m.d,m.e-dx,m.f-dy);g.bpDrawImage(img,px,py,iw,ih,null);});}else{ctx.bpDrawImage(img,px,py,iw,ih,tintRGB);}ctx.restore();},
   get_canvas_data(){return Array.from(ctx.getImageData(0,0,_bpTargetCanvas.width,_bpTargetCanvas.height).data);},canvas_size(){return [_bpTargetCanvas.width,_bpTargetCanvas.height];},
-  put_canvas_data(dp){let u8;try{const raw=(dp&&typeof dp.toJs==='function')?dp.toJs():dp;if(raw instanceof Uint8Array||raw instanceof Uint8ClampedArray){u8=(raw instanceof Uint8ClampedArray)?raw:new Uint8ClampedArray(raw.buffer,raw.byteOffset,raw.byteLength);}else if(raw instanceof ArrayBuffer){u8=new Uint8ClampedArray(raw);}else{u8=new Uint8ClampedArray(Array.isArray(raw)?raw:Array.from(raw));}}catch(_){u8=new Uint8ClampedArray(Array.from(dp));}ctx.putImageData(new ImageData(u8,_bpTargetCanvas.width,_bpTargetCanvas.height),0,0);},img_draw_quad(img,pts,tint){if(!img||!img.complete||!img.naturalWidth)return;const rawPts=pts&&pts.toJs?pts.toJs():Array.from(pts||[]);if(rawPts.length!==4)return;const m=ctx.getTransform();const p=rawPts.map(pt=>{const q=pt&&pt.toJs?pt.toJs():Array.from(pt);const x=Number(q[0]),y=Number(q[1]);return[m.a*x+m.c*y+m.e,m.b*x+m.d*y+m.f];});ctx.bpDrawQuad(img,p,_bpColorToRGB(tint));},
+  put_canvas_data(dp){let u8;try{const raw=(dp&&typeof dp.toJs==='function')?dp.toJs():dp;if(raw instanceof Uint8Array||raw instanceof Uint8ClampedArray){u8=(raw instanceof Uint8ClampedArray)?raw:new Uint8ClampedArray(raw.buffer,raw.byteOffset,raw.byteLength);}else if(raw instanceof ArrayBuffer){u8=new Uint8ClampedArray(raw);}else{u8=new Uint8ClampedArray(Array.isArray(raw)?raw:Array.from(raw));}}catch(_){u8=new Uint8ClampedArray(Array.from(dp));}ctx.putImageData(new ImageData(u8,_bpTargetCanvas.width,_bpTargetCanvas.height),0,0);},img_draw_quad(img,pts,tint,smooth){if(!img||!img.complete||!img.naturalWidth)return;const rawPts=pts&&pts.toJs?pts.toJs():Array.from(pts||[]);if(rawPts.length!==4)return;const m=ctx.getTransform();const p=rawPts.map(pt=>{const q=pt&&pt.toJs?pt.toJs():Array.from(pt);const x=Number(q[0]),y=Number(q[1]);return[m.a*x+m.c*y+m.e,m.b*x+m.d*y+m.f];});const keepSmooth=ctx.imageSmoothingEnabled;ctx.imageSmoothingEnabled=smooth!==false;try{if(tint&&typeof tint==='object'){_bpGradTint(p,tint,m,(g,dx,dy)=>{g.setTransform(1,0,0,1,0,0);g.bpDrawQuad(img,p.map(q=>[q[0]-dx,q[1]-dy]),null);});return;}ctx.bpDrawQuad(img,p,_bpColorToRGB(tint));}finally{ctx.imageSmoothingEnabled=keepSmooth;}},
   img_size(img){return[img.naturalWidth||0,img.naturalHeight||0];},
   img_ready(img){return!!(img&&img.complete&&img.naturalWidth);},img_from_screen(x1,y1,x2,y2,keep){const minX=Math.max(0,Math.floor(Math.min(x1,x2)));const minY=Math.max(0,Math.floor(Math.min(y1,y2)));const maxX=Math.min($canvas.width,Math.ceil(Math.max(x1,x2)));const maxY=Math.min($canvas.height,Math.ceil(Math.max(y1,y2)));const w=Math.max(0,maxX-minX);const h=Math.max(0,maxY-minY);const c=BE.captureRegion(minX,minY,w,h);const img=new window.Image();img.src=c.toDataURL("image/png");if(!keep)_bpScreenCapImages.push(img);return img;},
   snd_create(url){const stored=_builtAssets[String(url)];const src=stored&&typeof stored==='object'?(stored.url||String(url)):(stored||String(url));const h={buf:null};const ac=window._bpAC||(window._bpAC=new AudioContext());fetch(src).then(r=>r.arrayBuffer()).then(buf=>ac.decodeAudioData(buf).then(d=>{h.buf=d;})).catch(()=>{});return h;},
@@ -10315,7 +10776,7 @@ window._py={
   surface_fill(sfc,cssColor){if(!sfc||!sfc._ctx)return;const g=sfc._ctx;g.save();g.setTransform(1,0,0,1,0,0);g.fillStyle=cssColor;g.fillRect(0,0,sfc._canvas.width,sfc._canvas.height);g.restore();},
   surface_set_target(sfc){if(!sfc||!sfc._ctx)return;ctx=sfc._ctx;_bpTargetCanvas=sfc._canvas;},
   surface_reset_target(){ctx=_mainCtx;_bpTargetCanvas=$canvas;},
-  surface_draw(sfc,x,y){if(!sfc||!sfc._canvas)return;ctx.drawImage(sfc._canvas,Number(x),Number(y));},
+  surface_draw(sfc,x,y,smooth){if(!sfc||!sfc._canvas)return;const keepSmooth=ctx.imageSmoothingEnabled;ctx.imageSmoothingEnabled=smooth!==false;try{x=Number(x);y=Number(y);if(smooth===false){const r=_bpSnapRect(ctx.getTransform(),x,y,sfc._canvas.width,sfc._canvas.height);ctx.drawImage(sfc._canvas,r[0],r[1],r[2],r[3]);}else ctx.drawImage(sfc._canvas,x,y);}finally{ctx.imageSmoothingEnabled=keepSmooth;}},
   surface_to_image(sfc){if(!sfc||!sfc._canvas)return null;const img=new window.Image();img.src=sfc._canvas.toDataURL('image/png');return img;},
   surface_screen(){return BE.surfaceScreen();},
   surface_w(sfc){return sfc?sfc._canvas.width:0;},
@@ -10386,13 +10847,10 @@ main().catch(e=>{document.getElementById('load-txt').textContent='Error: '+e.mes
 </html>`;
 
   const finalHtml = html.replace('__BUILT_ASSETS__', assetJson);
-  const blob = new Blob([finalHtml], { type: 'text/html' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = slug + '.html';
-  a.click();
-  URL.revokeObjectURL(a.href);
-  window.appendConsole('Built: ' + slug + '.html (' + _bpAssets.size + ' assets, ' + (prog.tabs.length + 1) + ' code tab(s) embedded)', 'ok');
+  const mobile = _bpIsMobile();
+  const blob = new Blob([finalHtml], { type: mobile ? 'application/octet-stream' : 'text/html' });
+  _bpDownload(blob, slug + '.html');
+  window.appendConsole('Built: ' + slug + '.html (' + _bpAssets.size + ' assets, ' + (prog.tabs.length + 1) + ' code tab(s) embedded)' + (mobile ? " - downloaded, see your browser's downloads" : ''), 'ok');
 }
 
 
@@ -10564,6 +11022,7 @@ def update():
         <div class="wiki-member" onclick="openWikiPage('write_clipboard_fn')"><div class="wiki-member-name">write_clipboard()</div><div class="wiki-member-desc">Copy text to the player's clipboard.</div></div>
         <div class="wiki-member" onclick="openWikiPage('read_clipboard_fn')"><div class="wiki-member-name">read_clipboard()</div><div class="wiki-member-desc">Read the text on the player's clipboard.</div></div>
         <div class="wiki-member" onclick="openWikiPage('fullscreen_fn')"><div class="wiki-member-name">fullscreen()</div><div class="wiki-member-desc">Switch fullscreen on or off.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('is_fullscreen_fn')"><div class="wiki-member-name">is_fullscreen()</div><div class="wiki-member-desc">True when the game is fullscreen.</div></div>
         <div class="wiki-member" onclick="openWikiPage('querty_fn')"><div class="wiki-member-name">querty()</div><div class="wiki-member-desc">The letters of a QWERTY keyboard, one row per line.</div></div>
         <div class="wiki-member" onclick="openWikiPage('abc_fn')"><div class="wiki-member-name">abc()</div><div class="wiki-member-desc">The letters a to z as text.</div></div>
       </div>
@@ -10613,7 +11072,48 @@ def update():
       <div class="wiki-ref-list">
         <div class="wiki-ref" onclick="openWikiPage('W')">W()</div>
         <div class="wiki-ref" onclick="openWikiPage('H')">H()</div>
+        <div class="wiki-ref" onclick="openWikiPage('is_fullscreen_fn')">is_fullscreen()</div>
         <div class="wiki-ref" onclick="openWikiPage('reset_fn')">reset()</div>
+      </div>
+    `
+  },
+
+  "is_fullscreen_fn": {
+    title: "is_fullscreen()",
+    category: "Utils",
+    type: "function",
+    desc: "Returns True when the game is fullscreen and False when it is in its window.",
+    signature: `<span class="ws-fn">is_fullscreen</span><span class="ws-pun">(</span><span class="ws-pun">) →</span> <span class="ws-cls">bool</span>`,
+    body: `
+      <p class="wiki-p"><code>is_fullscreen()</code> tells whether the game is fullscreen <b>right now</b>: <code>True</code> for fullscreen, <code>False</code> for a window. Use it to draw differently in fullscreen, or to know what <code>fullscreen()</code> will do next.</p>
+      <div class="wiki-note"><b>Note:</b> <code>fullscreen()</code> returns the state that was <i>asked for</i>. <code>is_fullscreen()</code> returns the state the browser is in. The browser needs a moment to change, so in the very frame where <code>fullscreen(True)</code> was called <code>is_fullscreen()</code> can still be <code>False</code>. It also stays <code>False</code> while the browser has not allowed the request yet, and it turns <code>False</code> again when the player leaves fullscreen with Esc.</div>
+      <div class="wiki-example">
+        <div class="wiki-example-title">Show the state, F switches it</div>
+<pre>
+def update():
+    clear("black")
+    if is_fullscreen():
+        draw_text(20, 20, "Fullscreen. F or Esc leaves it", "lime", 24)
+    else:
+        draw_text(20, 20, "In a window. F for fullscreen", "white", 24)
+    if key_pressed("f"):
+        fullscreen()
+</pre>
+      </div>
+      <div class="wiki-example">
+        <div class="wiki-example-title">A button that follows the real state</div>
+<pre>
+def update():
+    clear("black")
+    label = "Leave fullscreen" if is_fullscreen() else "Go fullscreen"
+    draw_rect(20, 20, 220, 50, "royalblue")
+    draw_text(40, 33, label, "white", 20)
+    if mouse_pressed(0) and point_in_rect(mouse_pos(), (20, 20, 220, 50)):
+        fullscreen(not is_fullscreen())
+</pre>
+      </div>
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('fullscreen_fn')">fullscreen()</div>
       </div>
     `
   },
@@ -12723,8 +13223,8 @@ def update():
       </div>
       <h2 class="wiki-h2">Gradients & Shaders</h2>
       <div class="wiki-members">
-        <div class="wiki-member" onclick="openWikiPage('gradients')"><div class="wiki-member-name">linear_gradient() / radial_gradient()</div><div class="wiki-member-desc">Create gradient objects.</div></div>
-        <div class="wiki-member" onclick="openWikiPage('fill_gradient')"><div class="wiki-member-name">fill_gradient() / rect_gradient()</div><div class="wiki-member-desc">Apply a gradient fill.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('gradients')"><div class="wiki-member-name">linear_gradient() / radial_gradient()</div><div class="wiki-member-desc">Colors that change across the screen. They work wherever a color does.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('fill_gradient')"><div class="wiki-member-name">fill_gradient() / rect_gradient()</div><div class="wiki-member-desc">Older shortcuts for filling with a gradient.</div></div>
         <div class="wiki-member" onclick="openWikiPage('fragment_fn')"><div class="wiki-member-name">fragment()</div><div class="wiki-member-desc">Apply your own shader to the screen as it is right now.</div></div>
       </div>
       <h2 class="wiki-h2">Images</h2>
@@ -13301,25 +13801,106 @@ def update():
     title: "linear_gradient() / radial_gradient()",
     category: "Graphics",
     type: "function",
-    desc: "Create gradient objects that can be applied with fill_gradient() or rect_gradient().",
-    signature: `<span class="ws-fn">linear_gradient</span><span class="ws-pun">(</span><span class="ws-param">x1</span><span class="ws-pun">,</span><span class="ws-param">y1</span><span class="ws-pun">,</span><span class="ws-param">x2</span><span class="ws-pun">,</span><span class="ws-param">y2</span><span class="ws-pun">, *stops) → gradient<br></span><span class="ws-fn">radial_gradient</span><span class="ws-pun">(</span><span class="ws-param">x</span><span class="ws-pun">,</span><span class="ws-param">y</span><span class="ws-pun">,</span><span class="ws-param">r0</span><span class="ws-pun">,</span><span class="ws-param">x2</span><span class="ws-pun">,</span><span class="ws-param">y2</span><span class="ws-pun">,</span><span class="ws-param">r1</span><span class="ws-pun">, *stops) → gradient</span>`,
+    desc: "Create a gradient: a color that changes from place to place. A gradient works anywhere a color does.",
+    signature: `<span class="ws-fn">linear_gradient</span><span class="ws-pun">(</span><span class="ws-param">x1</span><span class="ws-pun">, </span><span class="ws-param">y1</span><span class="ws-pun">, </span><span class="ws-param">x2</span><span class="ws-pun">, </span><span class="ws-param">y2</span><span class="ws-pun">, </span><span class="ws-param">*stops</span><span class="ws-pun">, </span><span class="ws-param">angle</span><span class="ws-pun">=</span><span class="ws-lit">0</span><span class="ws-pun">) →</span> <span class="ws-cls">Gradient</span><br><span class="ws-fn">radial_gradient</span><span class="ws-pun">(</span><span class="ws-param">x</span><span class="ws-pun">, </span><span class="ws-param">y</span><span class="ws-pun">, </span><span class="ws-param">r0</span><span class="ws-pun">, </span><span class="ws-param">x2</span><span class="ws-pun">, </span><span class="ws-param">y2</span><span class="ws-pun">, </span><span class="ws-param">r1</span><span class="ws-pun">, </span><span class="ws-param">*stops</span><span class="ws-pun">) →</span> <span class="ws-cls">Gradient</span>`,
     body: `
-      <p class="wiki-p">Each stop is a <code>(position, color)</code> tuple where <code>position</code> is 0.0–1.0. Pass two or more stops.</p>
-
+      <p class="wiki-p">A gradient is a <b>color that changes from place to place</b>. <code>linear_gradient()</code> and <code>radial_gradient()</code> make one, and then you use it exactly like a color: <code>draw_rect(x, y, w, h, gradient)</code>, <code>draw_text(x, y, text, gradient)</code>, <code>clear(gradient)</code> and so on.</p>
+      <h2 class="wiki-h2">linear_gradient()</h2>
+      <p class="wiki-p">The color changes along a straight line, from the point (x1, y1) to the point (x2, y2).</p>
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>x1, y1</td><td>number</td><td>Where the line starts. Position 0 of the stops is the color here.</td></tr>
+        <tr><td>x2, y2</td><td>number</td><td>Where the line ends. Position 1 of the stops is the color here.</td></tr>
+        <tr><td>*stops</td><td>(position, color)</td><td>Two or more stops. <code>position</code> goes from 0 (the start) to 1 (the end) and <code>color</code> is any regular color. Before the first stop and after the last one the gradient keeps the color of that stop.</td></tr>
+        <tr><td>angle</td><td>number</td><td>Optional, written as <code>angle=45</code>. Turns the gradient by this many degrees, clockwise on the screen, around the middle of the line. The default is 0.</td></tr>
+      </table>
+      <h2 class="wiki-h2">radial_gradient()</h2>
+      <p class="wiki-p">The color changes outwards, from one circle to another. When both circles have the same center the gradient is a set of rings around it.</p>
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>x, y, r0</td><td>number</td><td>Center and radius of the inner circle. Position 0 of the stops is the color of this circle.</td></tr>
+        <tr><td>x2, y2, r1</td><td>number</td><td>Center and radius of the outer circle. Position 1 of the stops is the color of this circle.</td></tr>
+        <tr><td>*stops</td><td>(position, color)</td><td>The stops, as for <code>linear_gradient()</code>.</td></tr>
+      </table>
+      <h2 class="wiki-h2">Use it like a color</h2>
+      <p class="wiki-p">A gradient is accepted everywhere a color is: <code>clear()</code>, <code>draw_rect()</code>, <code>draw_square()</code>, <code>draw_circle()</code>, <code>draw_ellipse()</code>, <code>draw_arc()</code>, <code>draw_line()</code>, <code>draw_lines()</code>, <code>draw_poly()</code>, <code>draw_bezier()</code>, <code>draw_quad_curve()</code>, <code>draw_pixel()</code>, <code>draw_text()</code> (the text and its stroke), the <code>tint</code> of <code>draw_image()</code> and <code>draw_image_quad()</code>, and the color of a <code>Surface</code> or <code>Surface.clear()</code>.</p>
       <div class="wiki-example">
-        <div class="wiki-example-title">Sunset background gradient</div>
+        <div class="wiki-example-title">A gradient is a color</div>
 <pre>
 def update():
-    g = linear_gradient(0, 0, 0, H(),
-        (0.0, "black"),
-        (0.5, rgb(180, 60, 0)),
-        (1.0, rgb(255, 200, 50)))
-    rect_gradient(0, 0, W(), H(), g)
+    clear("black")
+    sky = linear_gradient(0, 0, 0, 200, (0, "navy"), (1, "orange"))
+    draw_rect(0, 0, W(), 200, sky)
+    sun = radial_gradient(160, 200, 0, 160, 200, 80, (0, "white"), (0.3, "yellow"), (1, (255, 200, 0, 0)))
+    draw_circle(160, 200, 80, sun)
+    rainbow = linear_gradient(20, 0, 300, 0, (0, "cyan"), (0.5, "magenta"), (1, "yellow"))
+    draw_text(20, 230, "Gradient text", rainbow, 40)
+    draw_line(20, 300, 300, 300, rainbow, 8)
 </pre>
       </div>
+      <h2 class="wiki-h2">Turning a gradient</h2>
+      <p class="wiki-p">A gradient never changes once it exists. Its <code>angle</code> tells how far it is turned, and two methods give you a <b>new</b> gradient with another angle while the original stays exactly as it was:</p>
+      <table class="wiki-param-table">
+        <tr><th>Member</th><th>Returns</th><th>Description</th></tr>
+        <tr><td>gradient.angle</td><td>float</td><td>The angle of the gradient in degrees (0 for a gradient that was not turned). Read only.</td></tr>
+        <tr><td>gradient.angled(deg)</td><td>Gradient</td><td>The same gradient at the angle <code>deg</code>. The angle it had before is ignored: it is never added to <code>deg</code>.</td></tr>
+        <tr><td>gradient.rotated(deg)</td><td>Gradient</td><td>The same gradient turned further: <code>deg</code> is added to its angle.</td></tr>
+      </table>
+      <p class="wiki-p">Positive angles turn clockwise on the screen. A linear gradient turns around the middle of its line. A radial gradient turns the inner circle around the center of the outer circle, so it only changes when the two centers are not the same.</p>
+      <div class="wiki-example">
+        <div class="wiki-example-title">angle, angled() and rotated()</div>
+<pre>
+def bar(y, g):
+    draw_rect(40, y, 320, 80, g)
 
+red_to_blue = linear_gradient(40, 80, 360, 80, (0, "red"), (0.5, "yellow"), (1, "blue"))
+print(red_to_blue.angle)                              # 0.0
+print(red_to_blue.angled(45).angle)                   # 45.0
+print(red_to_blue.angled(45).rotated(90).angle)       # 135.0
+
+def update():
+    clear("black")
+    bar(40, red_to_blue)
+    bar(140, linear_gradient(40, 180, 360, 180, (0, "red"), (0.5, "yellow"), (1, "blue"), angle=45))
+</pre>
+      </div>
+      <div class="wiki-example">
+        <div class="wiki-example-title">A gradient that spins</div>
+<pre>
+def update():
+    cx, cy = W() / 2, H() / 2
+    base = linear_gradient(cx - 200, cy, cx + 200, cy, (0, "deeppink"), (1, "gold"))
+    clear(base.rotated(get_time() * 60))      # a new gradient every frame, base never changes
+    draw_text(cx, cy, "Spinning", "white", 40, align="center", baseline="middle")
+</pre>
+      </div>
+      <div class="wiki-example">
+        <div class="wiki-example-title">A gradient as the tint of an image</div>
+<pre>
+sprite = None
+
+def setup():
+    global sprite
+    s = Surface(100, 100, fill=(0, 0, 0, 0))
+    set_target(s)
+    draw_circle(50, 50, 48, "white")
+    reset_target()
+    sprite = s.to_image()
+
+def update():
+    clear("black")
+    fade = linear_gradient(0, 20, 0, 120, (0, "gold"), (1, "crimson"))
+    draw_image(sprite, 40, 20, tint=fade)
+</pre>
+      </div>
+      <div class="wiki-note"><b>Position:</b> A gradient belongs to the screen, not to the shape. Its positions are coordinates, like the ones of <code>draw_rect()</code>. If a shape moves, build the gradient from the position of the shape, or move the drawing with <code>translate()</code> first: the gradient then moves with everything else you draw. Text drawn with <code>angle</code> or <code>italic</code> keeps its gradient where it is on the screen, and so does an image drawn with <code>angle</code>.</div>
+      <div class="wiki-note"><b>Tint:</b> As the <code>tint</code> of an image a gradient multiplies the colors of the image, like a plain color does, and the image keeps its own transparency. The transparency of the gradient itself is not used for a tint.</div>
+      <div class="wiki-note"><b>Stops:</b> A stop position outside 0 to 1 raises a <code>ValueError</code>, and a gradient cannot be a color of another gradient.</div>
       <div class="wiki-ref-list">
         <div class="wiki-ref" onclick="openWikiPage('fill_gradient')">fill_gradient()</div>
+        <div class="wiki-ref" onclick="openWikiPage('draw_rect')">draw_rect()</div>
+        <div class="wiki-ref" onclick="openWikiPage('draw_text')">draw_text()</div>
+        <div class="wiki-ref" onclick="openWikiPage('translate_fn')">translate()</div>
       </div>
     `
   },
@@ -13328,23 +13909,28 @@ def update():
     title: "fill_gradient() / rect_gradient()",
     category: "Graphics",
     type: "function",
-    desc: "Apply a gradient to the entire canvas (fill_gradient) or to a specific rectangle (rect_gradient).",
-    signature: `<span class="ws-fn">fill_gradient</span><span class="ws-pun">(</span><span class="ws-param">grad</span><span class="ws-pun">)<br></span><span class="ws-fn">rect_gradient</span><span class="ws-pun">(</span><span class="ws-param">x</span><span class="ws-pun">,</span><span class="ws-param">y</span><span class="ws-pun">,</span><span class="ws-param">w</span><span class="ws-pun">,</span><span class="ws-param">h</span><span class="ws-pun">, </span><span class="ws-param">grad</span><span class="ws-pun">)</span>`,
+    desc: "Older shortcuts for filling the screen or a rectangle with a gradient. A gradient is a color now, so clear() and draw_rect() do the same.",
+    signature: `<span class="ws-fn">fill_gradient</span><span class="ws-pun">(</span><span class="ws-param">grad</span><span class="ws-pun">) →</span> <span class="ws-cls">None</span><br><span class="ws-fn">rect_gradient</span><span class="ws-pun">(</span><span class="ws-param">x</span><span class="ws-pun">, </span><span class="ws-param">y</span><span class="ws-pun">, </span><span class="ws-param">w</span><span class="ws-pun">, </span><span class="ws-param">h</span><span class="ws-pun">, </span><span class="ws-param">grad</span><span class="ws-pun">) →</span> <span class="ws-cls">None</span>`,
     body: `
+      <p class="wiki-p">These two functions are kept so that older programs keep working. Since a gradient is a color, you can give it to the normal functions instead:</p>
+      <table class="wiki-param-table">
+        <tr><th>Member</th><th>Returns</th><th>Description</th></tr>
+        <tr><td>fill_gradient(grad)</td><td>None</td><td>Fills the whole screen (or the current target) with the gradient. Same as <code>draw_rect(0, 0, W(), H(), grad)</code> or <code>clear(grad)</code>.</td></tr>
+        <tr><td>rect_gradient(x, y, w, h, grad)</td><td>None</td><td>Fills a rectangle. Same as <code>draw_rect(x, y, w, h, grad)</code>.</td></tr>
+      </table>
       <div class="wiki-example">
-        <div class="wiki-example-title">Gradient button</div>
+        <div class="wiki-example-title">A gradient button</div>
 <pre>
 def update():
     clear("black")
-    g = linear_gradient(60, 80, 260, 80,
-        (0.0, "cyan"), (1.0, "blue"))
-    rect_gradient(60, 60, 200, 40, g)
+    g = linear_gradient(60, 80, 260, 80, (0, "cyan"), (1, "blue"))
+    draw_rect(60, 60, 200, 40, g)
     draw_text(160, 80, "Click me", "white", 18, align="center", baseline="middle")
 </pre>
       </div>
-
       <div class="wiki-ref-list">
         <div class="wiki-ref" onclick="openWikiPage('gradients')">linear_gradient()</div>
+        <div class="wiki-ref" onclick="openWikiPage('draw_rect')">draw_rect()</div>
       </div>
     `
   },
@@ -13354,12 +13940,13 @@ def update():
     category: "Graphics",
     type: "function",
     desc: "Applies a shader to the screen as it is right now. The shader is a function of pos that returns the colour of every pixel; what you draw afterwards is not shaded.",
-    signature: `<span class="ws-fn">fragment</span><span class="ws-pun">(</span><span class="ws-param">shader</span><span class="ws-pun">) →</span> <span class="ws-cls">None</span>`,
+    signature: `<span class="ws-fn">fragment</span><span class="ws-pun">(</span><span class="ws-param">shader</span><span class="ws-pun">, </span><span class="ws-param">safe</span><span class="ws-pun">=</span><span class="ws-kw">False</span><span class="ws-pun">) →</span> <span class="ws-cls">None</span>`,
     body: `
       <p class="wiki-p"><code>fragment(shader)</code> runs <code>shader</code> once for every pixel of the screen, on the GPU, and replaces the picture with the colours it returns. It works on the screen <b>as it is at that moment</b>: everything drawn so far goes through the shader, and everything you draw after the call is not shaded. You can call it as often as you like, so it is a post-processing step that you place where you want it.</p>
       <table class="wiki-param-table">
         <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
         <tr><td>shader</td><td>function</td><td>A function written with <code>def</code> that takes one argument, <code>pos</code>, and returns a colour (see below).</td></tr>
+        <tr><td>safe</td><td>bool</td><td>Optional, <code>False</code> by default. With <code>safe=True</code> the call raises a <code>RuntimeError</code> instead of running the shader on the slow CPU (see <b>safe=True</b> below).</td></tr>
       </table>
       <p class="wiki-p"><code>pos</code> is a <code>Vec2</code> from 0 to 1: <code>(0, 0)</code> is the top-left corner and <code>(1, 1)</code> the bottom-right. <code>get_pixel(pos)</code> gives the colour the screen had at a position before the shader ran, as a <code>Vec4</code>. A shader that returns <code>get_pixel(pos)</code> leaves the picture as it is.</p>
       <div class="wiki-example">
@@ -13489,6 +14076,31 @@ def update():
       </ul>
       <h2 class="wiki-h2">When the shader cannot run on the GPU</h2>
       <p class="wiki-p">If the shader uses something that is not in the list above, or the browser has no WebGL2, BowPy prints a warning that says what and where, and runs your function on the CPU instead. That gives the same picture but it is very slow (every pixel is calculated in Python on every call), so fix the shader if you see the warning. Mistakes in the shader (a wrong name, a wrong kind of value) are reported the same way, with the file and line.</p>
+      <h2 class="wiki-h2">safe=True</h2>
+      <p class="wiki-p">Without <code>safe</code> a shader that cannot run on the GPU still works: BowPy prints a warning and calculates every pixel on the CPU, which is very slow. <code>fragment(shader, safe=True)</code> never does that. It raises a <code>RuntimeError</code> instead, whose message says why, when the shader would have to run on the CPU: WebGL2 is not available in the browser (or it was switched off with <code>?renderer=2d</code> in the address), or the GPU cannot run this shader.</p>
+      <p class="wiki-p">WebGL2 works in nearly every browser today, on phones and tablets as well, so <code>safe=True</code> is for programs that need the effect to be fast. Catch the error to run without the effect when the GPU is not there:</p>
+      <div class="wiki-example">
+        <div class="wiki-example-title">Run without the effect where WebGL2 is missing</div>
+<pre>
+use_shader = True
+
+def vignette(pos):
+    d = Vec2.distance(pos, Vec2(0.5, 0.5)) * 1.4
+    return get_pixel(pos).rgb * clamp(1.0 - d, 0, 1)
+
+def update():
+    global use_shader
+    clear(rgb(30, 60, 120))
+    draw_circle(W() / 2, H() / 2, 80, "orange")
+    if use_shader:
+        try:
+            fragment(vignette, safe=True)
+        except RuntimeError as e:
+            print(e)
+            use_shader = False          # no WebGL2 here: the game goes on without the effect
+</pre>
+      </div>
+      <div class="wiki-note"><b>Note:</b> While the browser has lost the GPU for a moment (for example the page was in the background), <code>safe=True</code> skips the call and does not raise an error.</div>
       <div class="wiki-note"><b>Changed:</b> Before, a function called <code>fragment(pos)</code> was defined by the program and BowPy applied it to the screen after <code>update()</code>. Now <code>fragment</code> is a function that you call. To port an old program, give the function another name, for example <code>def my_shader(pos)</code>, and call <code>fragment(my_shader)</code> at the point of <code>update()</code> where the shading should happen (the end of <code>update()</code> gives the old result).</div>
       <div class="wiki-ref-list">
         <div class="wiki-ref" onclick="openWikiPage('get_pixel')">get_pixel()</div>
@@ -13548,7 +14160,7 @@ def update():
     category: "Graphics",
     type: "function",
     desc: "Draws an Image onto the canvas at (x, y), with optional scaling, rotation, origin anchor and tint.",
-    signature: `<span class="ws-fn">draw_image</span><span class="ws-pun">(</span><span class="ws-param">img</span><span class="ws-pun">, </span><span class="ws-param">x</span><span class="ws-pun">, </span><span class="ws-param">y</span><span class="ws-pun">, </span><span class="ws-param">width</span><span class="ws-pun">=</span><span class="ws-kw">None</span><span class="ws-pun">, </span><span class="ws-param">height</span><span class="ws-pun">=</span><span class="ws-kw">None</span><span class="ws-pun">, </span><span class="ws-param">angle</span><span class="ws-pun">=</span><span class="ws-lit">0</span><span class="ws-pun">, </span><span class="ws-param">origin</span><span class="ws-pun">=(</span><span class="ws-lit">0</span><span class="ws-pun">,</span><span class="ws-lit">0</span><span class="ws-pun">), </span><span class="ws-param">tint</span><span class="ws-pun">=</span><span class="ws-kw">None</span><span class="ws-pun">)</span>`,
+    signature: `<span class="ws-fn">draw_image</span><span class="ws-pun">(</span><span class="ws-param">img</span><span class="ws-pun">, </span><span class="ws-param">x</span><span class="ws-pun">, </span><span class="ws-param">y</span><span class="ws-pun">, </span><span class="ws-param">width</span><span class="ws-pun">=</span><span class="ws-kw">None</span><span class="ws-pun">, </span><span class="ws-param">height</span><span class="ws-pun">=</span><span class="ws-kw">None</span><span class="ws-pun">, </span><span class="ws-param">angle</span><span class="ws-pun">=</span><span class="ws-lit">0</span><span class="ws-pun">, </span><span class="ws-param">origin</span><span class="ws-pun">=(</span><span class="ws-lit">0</span><span class="ws-pun">,</span><span class="ws-lit">0</span><span class="ws-pun">), </span><span class="ws-param">tint</span><span class="ws-pun">=</span><span class="ws-kw">None</span><span class="ws-pun">, </span><span class="ws-param">interpolate</span><span class="ws-pun">=</span><span class="ws-kw">True</span><span class="ws-pun">)</span>`,
     body: `
       <table class="wiki-param-table">
         <tr><th>Parameter</th><th>Description</th></tr>
@@ -13556,6 +14168,7 @@ def update():
         <tr><td>angle</td><td>Rotation in degrees around the anchor point.</td></tr>
         <tr><td>tint</td><td>Multiply every pixel by this color. Pass None for no tint.</td></tr>
         <tr><td>width/height</td><td>Pass a negative value to flip the image along that axis.</td></tr>
+        <tr><td>interpolate</td><td><code>True</code> (default): when the image is scaled or rotated, neighbouring pixels are blended, so it looks smooth. <code>False</code>: every screen pixel takes the colour of the nearest image pixel, so a scaled up image keeps hard square pixels (pixel art). The same flag is on <code>draw_image_quad()</code> and <code>draw_surface()</code>.</td></tr>
       </table>
 
       <div class="wiki-example">
@@ -13571,6 +14184,55 @@ def update():
     draw_image(img, mouse_x(), mouse_y(), angle=angle, origin=(0.5, 0.5))
 </pre>
       </div>
+
+      <h2 class="wiki-h2">Smooth or crisp: interpolate</h2>
+      <p class="wiki-p">By default an image that is drawn bigger or smaller than it is, or turned by an angle, is <b>interpolated</b>: BowPy blends the neighbouring pixels, which looks smooth. A small sprite scaled up 8 times then looks soft. <code>interpolate=False</code> turns the blending off: every pixel on the screen simply takes the colour of the nearest pixel of the image, so the pixels of the image stay sharp squares. That is what pixel art and retro looking games want.</p>
+      <p class="wiki-p"><code>interpolate=False</code> changes nothing when the image is drawn at its own size at a whole-number position, because there is nothing to blend. It works together with <code>tint</code>, <code>angle</code>, <code>origin</code> and negative sizes.</p>
+      <p class="wiki-p">An image that is only moved and scaled (not rotated) is also placed on <b>whole screen pixels</b> when <code>interpolate=False</code>: a position such as <code>x = 10.5</code> is rounded. That keeps its edges sharp, keeps a moving sprite from shimmering, and leaves no seams between tiles that are drawn next to each other. A rotated image is not moved; its edges are smoothed like any other shape.</p>
+      <div class="wiki-example">
+        <div class="wiki-example-title">Smooth and crisp, side by side</div>
+<pre>
+# an 8 x 8 sprite made with a Surface
+s = Surface(8, 8, "black")
+set_target(s)
+draw_rect(2, 2, 4, 4, "royalblue")
+for i in range(8):
+    draw_pixel(i, i, "yellow")
+    draw_pixel(7 - i, i, "red")
+reset_target()
+sprite = s.to_image()
+
+def update():
+    clear(rgb(30, 30, 40))
+    draw_image(sprite, 40, 40, 160, 160)                        # smooth: the edges blur
+    draw_image(sprite, 240, 40, 160, 160, interpolate=False)    # crisp: hard square pixels
+    draw_text(40, 220, "interpolate=True", "white", 16)
+    draw_text(240, 220, "interpolate=False", "white", 16)
+</pre>
+      </div>
+      <div class="wiki-example">
+        <div class="wiki-example-title">A spinning sprite that keeps its pixels</div>
+<pre>
+s = Surface(16, 16, (0, 0, 0, 0))
+set_target(s)
+draw_rect(2, 2, 12, 12, "orange")
+draw_rect(5, 5, 6, 6, "black")
+draw_pixel(8, 8, "white")
+reset_target()
+sprite = s.to_image()
+
+def update():
+    clear("black")
+    draw_image(sprite, W() / 2, H() / 2, 128, 128, angle=get_time() * 40,
+               origin=(0.5, 0.5), interpolate=False)
+</pre>
+      </div>
+
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('draw_image_quad')">draw_image_quad()</div>
+        <div class="wiki-ref" onclick="openWikiPage('draw_surface_fn')">draw_surface()</div>
+        <div class="wiki-ref" onclick="openWikiPage('surface_to_image')">.to_image()</div>
+      </div>
     `
   },
 
@@ -13579,9 +14241,14 @@ def update():
     category: "Graphics",
     type: "function",
     desc: "Maps an image onto an arbitrary 4-point quadrilateral using projective (perspective) mapping.",
-    signature: `<span class="ws-fn">draw_image_quad</span><span class="ws-pun">(</span><span class="ws-param">img</span><span class="ws-pun">, </span><span class="ws-param">p1</span><span class="ws-pun">, </span><span class="ws-param">p2</span><span class="ws-pun">, </span><span class="ws-param">p3</span><span class="ws-pun">, </span><span class="ws-param">p4</span><span class="ws-pun">, </span><span class="ws-param">tint</span><span class="ws-pun">=</span><span class="ws-kw">None</span><span class="ws-pun">)</span>`,
+    signature: `<span class="ws-fn">draw_image_quad</span><span class="ws-pun">(</span><span class="ws-param">img</span><span class="ws-pun">, </span><span class="ws-param">p1</span><span class="ws-pun">, </span><span class="ws-param">p2</span><span class="ws-pun">, </span><span class="ws-param">p3</span><span class="ws-pun">, </span><span class="ws-param">p4</span><span class="ws-pun">, </span><span class="ws-param">tint</span><span class="ws-pun">=</span><span class="ws-kw">None</span><span class="ws-pun">, </span><span class="ws-param">interpolate</span><span class="ws-pun">=</span><span class="ws-kw">True</span><span class="ws-pun">)</span>`,
     body: `
-      <p class="wiki-p">Points are in order: top-left, top-right, bottom-right, bottom-left. Each point is a <code>(x, y)</code> tuple or Vec2.</p>
+      <p class="wiki-p">Points are in this order: <b>top-left, top-right, bottom-left, bottom-right</b> (along the top edge, then along the bottom edge). Each point is a <code>(x, y)</code> tuple or Vec2.</p>
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Description</th></tr>
+        <tr><td>tint</td><td>Multiply every pixel by this color (or gradient). Pass None for no tint.</td></tr>
+        <tr><td>interpolate</td><td><code>True</code> (default): neighbouring pixels of the image are blended, so the stretched image looks smooth. <code>False</code>: every screen pixel inside the quad takes the colour of the nearest image pixel, so each image pixel stays a hard-edged patch (pixel art, tiles, a Mode 7 style floor). A quad is placed exactly where its points are; it is not moved to whole pixels.</td></tr>
+      </table>
 
       <div class="wiki-example">
         <div class="wiki-example-title">Perspective floor tile</div>
@@ -13592,8 +14259,30 @@ def update():
     clear("black")
     draw_image_quad(tile,
         (100, 200), (W()-100, 200),
-        (W()-20, H()-20), (20, H()-20))
+        (20, H()-20), (W()-20, H()-20))
 </pre>
+      </div>
+      <div class="wiki-example">
+        <div class="wiki-example-title">A crisp perspective floor</div>
+<pre>
+s = Surface(4, 4, "darkgreen")
+set_target(s)
+draw_pixel(0, 0, "white"); draw_pixel(2, 0, "white")
+draw_pixel(1, 1, "white"); draw_pixel(3, 1, "white")
+draw_pixel(0, 2, "white"); draw_pixel(2, 2, "white")
+draw_pixel(1, 3, "white"); draw_pixel(3, 3, "white")
+reset_target()
+tile = s.to_image()
+
+def update():
+    clear("black")
+    draw_image_quad(tile, (140, 100), (W() - 140, 100), (20, H() - 20), (W() - 20, H() - 20),
+                    interpolate=False)
+</pre>
+      </div>
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('draw_image')">draw_image()</div>
+        <div class="wiki-ref" onclick="openWikiPage('draw_surface_fn')">draw_surface()</div>
       </div>
     `
   },
@@ -15298,7 +15987,7 @@ def update():
     category: "Surface",
     type: "function",
     desc: "Blits a Surface onto the current draw target at the given (x, y) coordinates.",
-    signature: `<span class="ws-fn">draw_surface</span><span class="ws-pun">(</span><span class="ws-param">surface</span><span class="ws-pun">: </span><span class="ws-cls">Surface</span><span class="ws-pun">, </span><span class="ws-param">x</span><span class="ws-pun">: float, </span><span class="ws-param">y</span><span class="ws-pun">: float)</span>`,
+    signature: `<span class="ws-fn">draw_surface</span><span class="ws-pun">(</span><span class="ws-param">surface</span><span class="ws-pun">: </span><span class="ws-cls">Surface</span><span class="ws-pun">, </span><span class="ws-param">x</span><span class="ws-pun">: float, </span><span class="ws-param">y</span><span class="ws-pun">: float, </span><span class="ws-param">interpolate</span><span class="ws-pun">: bool = </span><span class="ws-kw">True</span><span class="ws-pun">)</span>`,
     body: `
       <p class="wiki-p">Draws the entire surface at the top-left position <code>(x, y)</code> relative to the current draw target. Pixels are composited using the current alpha and blend mode. If a surface target is active via <code>set_target()</code>, <code>draw_surface()</code> draws onto that surface.</p>
 
@@ -15326,10 +16015,36 @@ def update():
 </pre>
       </div>
 
+      <h2 class="wiki-h2">Smooth or crisp: interpolate</h2>
+      <p class="wiki-p">A surface that is drawn at its own size on whole pixels is copied exactly, so <code>interpolate</code> makes no difference. It matters when the surface is resampled: after <code>scale_ctx()</code> or <code>rotate()</code>, or at a position with a fraction such as <code>x = 10.5</code>. With <code>interpolate=True</code> (default) neighbouring pixels are blended, which looks smooth. With <code>interpolate=False</code> every pixel takes the colour of the nearest pixel of the surface, so the pixels stay sharp.</p>
+      <p class="wiki-p">Like <code>draw_image()</code>, a surface that is only moved and scaled is placed on whole screen pixels when <code>interpolate=False</code>, so scrolling a world surface with a position such as <code>-cam_x</code> that is not a whole number does not blur its edges or leave seams.</p>
+      <div class="wiki-example">
+        <div class="wiki-example-title">A tiny screen scaled up with hard pixels</div>
+<pre>
+low = Surface(80, 45)           # a low resolution canvas
+
+def update():
+    set_target(low)
+    clear(rgb(20, 24, 40))
+    x = 40 + sin(get_time() * 2) * 30
+    draw_circle(x, 22, 8, "orange")
+    draw_line(0, 40, 80, 40, "lime")
+    reset_target()
+
+    clear("black")
+    push()
+    scale_ctx(W() / 80, H() / 45)
+    draw_surface(low, 0, 0, interpolate=False)      # chunky pixels instead of a blur
+    pop()
+</pre>
+      </div>
       <div class="wiki-ref-list">
         <div class="wiki-ref" onclick="openWikiPage('surface_class')">Surface()</div>
         <div class="wiki-ref" onclick="openWikiPage('set_target_fn')">set_target()</div>
         <div class="wiki-ref" onclick="openWikiPage('reset_target_fn')">reset_target()</div>
+        <div class="wiki-ref" onclick="openWikiPage('draw_image')">draw_image()</div>
+        <div class="wiki-ref" onclick="openWikiPage('draw_image_quad')">draw_image_quad()</div>
+        <div class="wiki-ref" onclick="openWikiPage('scale_ctx_fn')">scale_ctx()</div>
       </div>
     `
   },
@@ -15962,7 +16677,7 @@ def update():
       <p class="wiki-p">A tab can use the whole BowPy API (<code>draw_rect()</code>, <code>Image()</code>, <code>Vec2</code> and so on) and can use the other tabs, but it cannot see the variables of <code>main.bpy</code>. Pass values in as arguments, or keep shared values in a tab (<code>utils.score = 10</code>). A <code>setup()</code> or <code>update()</code> inside another tab is just a normal function: call it yourself, for example <code>enemy.update()</code>.</p>
 
       <h2 class="wiki-h2">Export and Build</h2>
-      <p class="wiki-p">Export saves every tab inside the <code>.bpy</code> file, and Import brings them all back. Build embeds every tab in the finished HTML game. If you <code>include()</code> a file that was exported with tabs, its tabs become available as modules too (a tab is skipped if one with the same name already exists).</p>
+      <p class="wiki-p">Export saves every tab inside the <code>.bpy</code> file, and Import brings them all back. Build embeds every tab in the finished HTML game. On a phone or tablet both buttons simply download their file, which you find in your browser's downloads. If you <code>include()</code> a file that was exported with tabs, its tabs become available as modules too (a tab is skipped if one with the same name already exists).</p>
 
       <div class="wiki-ref-list">
         <div class="wiki-ref" onclick="openWikiPage('include_fn')">include()</div>
