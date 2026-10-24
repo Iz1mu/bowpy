@@ -10600,6 +10600,7 @@ function buildFile() {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>${slug}</title>
+<style>html,body{background:#000;}</style>
 <script src="https://cdn.jsdelivr.net/pyodide/v0.27.0/full/pyodide.js"><\/script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;}
@@ -10607,15 +10608,12 @@ html,body{width:100%;height:100%;overflow:hidden;background:#000;overscroll-beha
 #screen{display:none;position:fixed;top:0;left:0;width:100%;height:100%;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;}
 #load{
   position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
-  background:#0b0d11;color:#6a738f;font:13px/1 'IBM Plex Mono',monospace;
-  flex-direction:column;gap:14px;user-select:none;
+  background:#000;color:#8b8f99;font:13px/1.5 monospace;padding:24px;text-align:center;white-space:pre-wrap;overflow:auto;
 }
-#load-dot{width:8px;height:8px;border-radius:50%;background:#e5b567;animation:p 1.2s infinite;}
-@keyframes p{0%,100%{opacity:1}50%{opacity:.2}}
 </style>
 </head>
 <body>
-<div id="load"><div id="load-dot"></div><span id="load-txt">Loading Python...</span></div>
+<div id="load"></div>
 <canvas id="screen"></canvas>
 <script>
 'use strict';
@@ -10648,7 +10646,8 @@ window.addEventListener('resize',fitCanvas);fitCanvas();
 _bpInputFactory().install($canvas,{pos(cx,cy){mx=cx;my=cy;},down:_btnDown,up:_btnUp,releaseAll(){for(const b of Array.from(btnsHeld))_btnUp(b);}});
 document.addEventListener('keydown',e=>{if(e.getModifierState)_bpCapsLock=e.getModifierState('CapsLock');const k=e.key.toLowerCase();if(!keysHeld.has(k))keysPress.add(k);keysHeld.add(k);});
 document.addEventListener('keyup',e=>{const k=e.key.toLowerCase();keysHeld.delete(k);keysRel.add(k);});
-window.appendConsole=(t,type)=>{if(type==='err')console.error(t);else console.log(t);};
+const _bpErr=[];
+window.appendConsole=(t,type)=>{if(type==='err'){console.error(t);if(_bpErr.push(String(t))>20)_bpErr.shift();}else console.log(t);};
 
 let screenX=0,screenY=0,screenRot=0,screenRotOx=0,screenRotOy=0;
 function _applyScreenTransform(){ctx.setTransform(1,0,0,1,0,0);ctx.translate(screenX,screenY);ctx.translate(screenRotOx,screenRotOy);ctx.rotate(screenRot);ctx.translate(-screenRotOx,-screenRotOy);}
@@ -10756,7 +10755,7 @@ window._py={
   fullscreen(t){return _bpHost.fullscreen(t);},
   is_fs(){return _bpHost.isFullscreen();},
   galpha(){return ctx.globalAlpha;},screen_pos(x,y){if(x!==undefined&&y!==undefined){screenX=Number(x)||0;screenY=Number(y)||0;}return[screenX,screenY];},screen_rot(angle,ox,oy){if(angle!==undefined){screenRot=Number(angle)||0;if(ox!==undefined&&oy!==undefined){screenRotOx=Number(ox)||0;screenRotOy=Number(oy)||0;}}return[screenRot,screenRotOx,screenRotOy];},
-  img_create(url){const stored=_builtAssets[String(url)];const img=new window.Image();img.crossOrigin='anonymous';img.src=stored||String(url);return img;},
+  img_create(url){const stored=_builtAssets[String(url)];const img=new window.Image();img.crossOrigin='anonymous';img.src=stored?(typeof stored==='object'?String(stored.url):stored):String(url);return img;},
   img_draw(img,x,y,w,h,angle,ox,oy,tint,smooth){if(!img||!img.complete||!img.naturalWidth)return;const flipX=w<0;const flipY=h<0;let iw=(w===0)?img.naturalWidth:Math.abs(w);let ih=(h===0)?img.naturalHeight:Math.abs(h);let px=-iw*ox;let py=-ih*oy;const isGrad=!!tint&&typeof tint==='object';const tintRGB=(!isGrad&&tint!==undefined&&tint!==null&&tint!==""&&tint!=="none")?_bpColorToRGB(tint):null;const gm=isGrad?ctx.getTransform():null;ctx.save();ctx.imageSmoothingEnabled=smooth!==false;ctx.translate(x,y);ctx.rotate(angle);if(flipX||flipY)ctx.scale(flipX?-1:1,flipY?-1:1);if(smooth===false){const sn=_bpSnapRect(ctx.getTransform(),px,py,iw,ih);px=sn[0];py=sn[1];iw=sn[2];ih=sn[3];}if(isGrad){const m=ctx.getTransform();const cs=[[px,py],[px+iw,py],[px+iw,py+ih],[px,py+ih]].map(q=>[m.a*q[0]+m.c*q[1]+m.e,m.b*q[0]+m.d*q[1]+m.f]);_bpGradTint(cs,tint,gm,(g,dx,dy)=>{g.setTransform(m.a,m.b,m.c,m.d,m.e-dx,m.f-dy);g.bpDrawImage(img,px,py,iw,ih,null);});}else{ctx.bpDrawImage(img,px,py,iw,ih,tintRGB);}ctx.restore();},
   get_canvas_data(){return Array.from(ctx.getImageData(0,0,_bpTargetCanvas.width,_bpTargetCanvas.height).data);},canvas_size(){return [_bpTargetCanvas.width,_bpTargetCanvas.height];},
   put_canvas_data(dp){let u8;try{const raw=(dp&&typeof dp.toJs==='function')?dp.toJs():dp;if(raw instanceof Uint8Array||raw instanceof Uint8ClampedArray){u8=(raw instanceof Uint8ClampedArray)?raw:new Uint8ClampedArray(raw.buffer,raw.byteOffset,raw.byteLength);}else if(raw instanceof ArrayBuffer){u8=new Uint8ClampedArray(raw);}else{u8=new Uint8ClampedArray(Array.isArray(raw)?raw:Array.from(raw));}}catch(_){u8=new Uint8ClampedArray(Array.from(dp));}ctx.putImageData(new ImageData(u8,_bpTargetCanvas.width,_bpTargetCanvas.height),0,0);},img_draw_quad(img,pts,tint,smooth){if(!img||!img.complete||!img.naturalWidth)return;const rawPts=pts&&pts.toJs?pts.toJs():Array.from(pts||[]);if(rawPts.length!==4)return;const m=ctx.getTransform();const p=rawPts.map(pt=>{const q=pt&&pt.toJs?pt.toJs():Array.from(pt);const x=Number(q[0]),y=Number(q[1]);return[m.a*x+m.c*y+m.e,m.b*x+m.d*y+m.f];});const keepSmooth=ctx.imageSmoothingEnabled;ctx.imageSmoothingEnabled=smooth!==false;try{if(tint&&typeof tint==='object'){_bpGradTint(p,tint,m,(g,dx,dy)=>{g.setTransform(1,0,0,1,0,0);g.bpDrawQuad(img,p.map(q=>[q[0]-dx,q[1]-dy]),null);});return;}ctx.bpDrawQuad(img,p,_bpColorToRGB(tint));}finally{ctx.imageSmoothingEnabled=keepSmooth;}},
@@ -10818,9 +10817,9 @@ async function main(){
   pyodide.runPython('_check()');
   pyodide.runPython('_setup()');
   if(!pyodide.runPython('_all_assets_ready()')){
-    document.getElementById('load-txt').textContent='Loading assets...';
-    await new Promise(resolve=>{const poll=()=>{if(pyodide.runPython('_all_assets_ready()'))resolve();else setTimeout(poll,80);};poll();});
+    await new Promise(resolve=>{const t0=performance.now();let warned=false;const poll=()=>{if(pyodide.runPython('_all_assets_ready()'))resolve();else{if(!warned&&performance.now()-t0>15000){warned=true;console.warn('Still waiting for the assets to load (an image or sound that cannot be loaded keeps the screen black).');}setTimeout(poll,80);}};poll();});
   }
+  BE.present();                               // whatever setup() drew is on the canvas before it is shown
   document.getElementById('load').style.display='none';
   $canvas.style.display='block';
   if(pyodide.runPython('_HAS_LOOP')){
@@ -10841,7 +10840,7 @@ async function main(){
     });
   }
 }
-main().catch(e=>{document.getElementById('load-txt').textContent='Error: '+e.message;console.error(e);});
+main().catch(e=>{console.error(e);if($canvas.style.display==='block')return;const l=document.getElementById('load');l.style.display='flex';const t=(e&&e.message)||_bpErr.slice().reverse().find(x=>String(x).trim())||(e&&(e.type||e.name))||String(e);l.textContent='Error: '+t;});
 <\/script>
 </body>
 </html>`;
@@ -16677,7 +16676,7 @@ def update():
       <p class="wiki-p">A tab can use the whole BowPy API (<code>draw_rect()</code>, <code>Image()</code>, <code>Vec2</code> and so on) and can use the other tabs, but it cannot see the variables of <code>main.bpy</code>. Pass values in as arguments, or keep shared values in a tab (<code>utils.score = 10</code>). A <code>setup()</code> or <code>update()</code> inside another tab is just a normal function: call it yourself, for example <code>enemy.update()</code>.</p>
 
       <h2 class="wiki-h2">Export and Build</h2>
-      <p class="wiki-p">Export saves every tab inside the <code>.bpy</code> file, and Import brings them all back. Build embeds every tab in the finished HTML game. On a phone or tablet both buttons simply download their file, which you find in your browser's downloads. If you <code>include()</code> a file that was exported with tabs, its tabs become available as modules too (a tab is skipped if one with the same name already exists).</p>
+      <p class="wiki-p">Export saves every tab inside the <code>.bpy</code> file, and Import brings them all back. Build embeds every tab in the finished HTML game. While a built game loads (Python, your assets and <code>setup()</code>) the page is plain black, and the game appears once everything is ready. On a phone or tablet both buttons simply download their file, which you find in your browser's downloads. If you <code>include()</code> a file that was exported with tabs, its tabs become available as modules too (a tab is skipped if one with the same name already exists).</p>
 
       <div class="wiki-ref-list">
         <div class="wiki-ref" onclick="openWikiPage('include_fn')">include()</div>
