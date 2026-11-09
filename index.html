@@ -852,10 +852,62 @@ class Gradient {
   }
 }
 
+// ───────────────────────── polygon colours ─────────────────────────
+// pts: [x, y, r, g, b, alpha] per point (r, g, b from 0 to 255, alpha from 0 to 1)
+class PolyPaint {
+  constructor(a) {
+    const n = (a.length / 6) | 0;
+    this.n = n; this.ox = +a[0]; this.oy = +a[1];
+    const d = this.data = new Float32Array(n * 8);
+    for (let i = 0; i < n; i++) {
+      const o = i * 6, al = +a[o + 5];
+      d[i * 8] = a[o] - this.ox; d[i * 8 + 1] = a[o + 1] - this.oy;
+      d[i * 8 + 4] = a[o + 2] / 255 * al; d[i * 8 + 5] = a[o + 3] / 255 * al; d[i * 8 + 6] = a[o + 4] / 255 * al; d[i * 8 + 7] = al;
+    }
+  }
+}
+// the same colour as polyColor() in the shader, on the CPU (the Canvas 2D fallback). d: PolyPaint.data; out gets premultiplied r, g, b, a (0..1)
+function polyEval(d, n, px, py, out) {
+  let ax0 = d[0] - px, ay0 = d[1] - py;
+  const r0 = Math.hypot(ax0, ay0);
+  if (r0 < 1e-4) { out[0] = d[4]; out[1] = d[5]; out[2] = d[6]; out[3] = d[7]; return; }
+  let ax = ax0, ay = ay0, ra = r0, ia = 0;
+  let s0 = 0, s1 = 0, s2 = 0, s3 = 0, ws = 0;
+  for (let i = 1; i <= n; i++) {
+    let bx, by, rb, ib;
+    if (i === n) { bx = ax0; by = ay0; rb = r0; ib = 0; }
+    else {
+      ib = i * 8; bx = d[ib] - px; by = d[ib + 1] - py; rb = Math.hypot(bx, by);
+      if (rb < 1e-4) { out[0] = d[ib + 4]; out[1] = d[ib + 5]; out[2] = d[ib + 6]; out[3] = d[ib + 7]; return; }
+    }
+    const cr = ax * by - ay * bx, dt = ax * bx + ay * by, m = ra * rb;
+    if (Math.abs(cr) <= 1e-5 * m) {
+      if (dt < 0) {
+        const k = ra / (ra + rb);
+        out[0] = d[ia + 4] + (d[ib + 4] - d[ia + 4]) * k; out[1] = d[ia + 5] + (d[ib + 5] - d[ia + 5]) * k;
+        out[2] = d[ia + 6] + (d[ib + 6] - d[ia + 6]) * k; out[3] = d[ia + 7] + (d[ib + 7] - d[ia + 7]) * k;
+        return;
+      }
+    } else {
+      const t = (m - dt) / cr, wa = t / ra, wb = t / rb;
+      s0 += wa * d[ia + 4] + wb * d[ib + 4]; s1 += wa * d[ia + 5] + wb * d[ib + 5];
+      s2 += wa * d[ia + 6] + wb * d[ib + 6]; s3 += wa * d[ia + 7] + wb * d[ib + 7];
+      ws += wa + wb;
+    }
+    ax = bx; ay = by; ra = rb; ia = ib;
+  }
+  if (Math.abs(ws) > 1e-20) { s0 /= ws; s1 /= ws; s2 /= ws; s3 /= ws; } else { s0 = d[4]; s1 = d[5]; s2 = d[6]; s3 = d[7]; }
+  const al = Math.min(1, Math.max(0, s3));
+  out[0] = Math.min(al, Math.max(0, s0)); out[1] = Math.min(al, Math.max(0, s1)); out[2] = Math.min(al, Math.max(0, s2)); out[3] = al;
+}
+
 // ───────────────────────── shaders ─────────────────────────
 const K_COLOR = 0, K_TEX = 1, K_TINT = 2, K_QUAD = 3, K_LIN = 4, K_RAD = 5, K_COPY = 6, K_LOAD = 7;
 // the same three image shaders for imageSmoothingEnabled = false: they pick one exact pixel of the image
 const K_TEXN = 8, K_TINTN = 9, K_QUADN = 10;
+// draw_grad_poly(): the colour is blended from the colours of the points of a polygon (mean value coordinates)
+const K_POLYG = 11;
+const PG_W = 2048, PG_MAX = 1024;          // the points live in a one-row float texture: two texels per point
 
 const VERT_SRC = `#version 300 es
 precision highp float;
@@ -938,11 +990,52 @@ vec4 compositeAdv(vec4 s, vec4 b) {
 }
 `;
 
+const POLY_GLSL = `
+// colour at p (relative to the first point) from the points in uPG: texel 2i = position, texel 2i+1 = premultiplied colour.
+// Mean value coordinates: w_i = (tan(a_(i-1) / 2) + tan(a_i / 2)) / r_i, where a_i is the angle that edge i makes at p.
+// They are smooth inside any polygon, do not depend on how the polygon is cut into triangles, and continue smoothly past
+// the edges (pixels on the border are shaded from where their centre is).
+vec4 polyColor(vec2 p) {
+  int n = uPN;
+  vec2 a0 = texelFetch(uPG, ivec2(0, 0), 0).xy - p;
+  vec4 c0 = texelFetch(uPG, ivec2(1, 0), 0);
+  float r0 = length(a0);
+  if (r0 < 1e-4) return c0;
+  vec2 a = a0; vec4 ca = c0; float ra = r0;
+  vec4 acc = vec4(0.0); float ws = 0.0;
+  for (int i = 1; i <= n; i++) {
+    vec2 b; vec4 cb; float rb;
+    if (i == n) { b = a0; cb = c0; rb = r0; }
+    else {
+      b = texelFetch(uPG, ivec2(2 * i, 0), 0).xy - p;
+      cb = texelFetch(uPG, ivec2(2 * i + 1, 0), 0);
+      rb = length(b);
+      if (rb < 1e-4) return cb;
+    }
+    float cr = a.x * b.y - a.y * b.x;
+    float dt = dot(a, b);
+    float m = ra * rb;
+    if (abs(cr) <= 1e-5 * m) {
+      if (dt < 0.0) return mix(ca, cb, ra / (ra + rb));
+    } else {
+      float t = (m - dt) / cr;
+      acc += t * (ca / ra + cb / rb);
+      ws += t * (1.0 / ra + 1.0 / rb);
+    }
+    a = b; ca = cb; ra = rb;
+  }
+  vec4 c = abs(ws) > 1e-20 ? acc / ws : c0;
+  float al = clamp(c.a, 0.0, 1.0);
+  return vec4(clamp(c.rgb, 0.0, al), al);
+}
+`;
+
 function fragSrc(kind, quadTint, adv) {
   let s = '#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n';
   s += 'in vec3 vUV;\nin vec4 vCol;\nout vec4 oColor;\n';
   s += 'uniform sampler2D uTex;\nuniform sampler2D uBackdrop;\nuniform sampler2D uRamp;\n';
   s += 'uniform vec2 uTexSize;\nuniform vec4 uClamp;\nuniform vec3 uRow0;\nuniform vec3 uRow1;\nuniform vec4 uG0;\nuniform vec4 uG1;\n';
+  if (kind === K_POLYG) s += 'uniform sampler2D uPG;\nuniform int uPN;\n' + POLY_GLSL;
   if (adv) s += '#define BLEND_ID ' + adv + '\n' + BLEND_GLSL;
   s += `
 vec4 rampColor(float t) {
@@ -1018,6 +1111,8 @@ vec4 srcColor() {
   if (!ok) discard;
   float m = vUV.z > 0.5 ? texture(uTex, vUV.xy).a : 1.0;
   return rampColor(t) * vCol * m;\n`; break;
+    case K_POLYG:
+      s += '  return polyColor(userPos() - uG0.xy) * vCol;\n'; break;
     case K_COPY:
       s += `  vec4 t = texture(uTex, vUV.xy);
   return vec4(t.rgb * t.a, t.a);\n`; break;
@@ -1104,8 +1199,12 @@ class Renderer {
     this.progs = new Map();
     this.globalProgs = new Map();
     this.imgTex = new WeakMap();
+    this.gifFlag = new WeakMap();
     this.textCache = new Map();
     this.textPixels = 0;
+    this.atlasCache = new Map();        // text pictures that live in a shared atlas page: key -> entry
+    this.textPages = [];
+    this.atlasClock = 0;
     this.presentScheduled = false;
     this.vq = 1;                       // q written by tri()/quad(): 0 for plain gradients, 1 otherwise
     this._blendKey = null;
@@ -1119,7 +1218,7 @@ class Renderer {
     canvas.addEventListener('webglcontextlost', e => { e.preventDefault(); this.lost = true; }, false);
     canvas.addEventListener('webglcontextrestored', () => {
       this.epoch++; this.lost = false;
-      this.progs.clear(); this.globalProgs.clear(); this.textCache.clear(); this.textPixels = 0;
+      this.progs.clear(); this.globalProgs.clear(); this.textCache.clear(); this.textPixels = 0; this.atlasCache.clear(); this.textPages = []; this.pgTex = null; this.pgOwner = null;
       this.imgTex = new WeakMap(); this.msaaFbo = null; this.msaaW = this.msaaH = 0;
       this.active = null; this.layerT = null; this._blendKey = null; this._progCur = null; this.vbN = 0;
       this.postProgs = new Map();
@@ -1206,12 +1305,14 @@ class Renderer {
     const u = n => gl.getUniformLocation(prog, n);
     const p = {
       prog, uSize: u('uSize'), uTex: u('uTex'), uBackdrop: u('uBackdrop'), uRamp: u('uRamp'), uTexSize: u('uTexSize'),
-      uClamp: u('uClamp'), uRow0: u('uRow0'), uRow1: u('uRow1'), uG0: u('uG0'), uG1: u('uG1')
+      uClamp: u('uClamp'), uRow0: u('uRow0'), uRow1: u('uRow1'), uG0: u('uG0'), uG1: u('uG1'), uPG: u('uPG'), uPN: u('uPN'),
+      cW: -1, cH: -1, cTW: -1, cTH: -1, cC0: NaN, cC1: NaN, cC2: NaN, cC3: NaN        // the values last sent (see _sz, _ts, _cl)
     };
     gl.useProgram(prog);
     if (p.uTex) gl.uniform1i(p.uTex, 0);
     if (p.uBackdrop) gl.uniform1i(p.uBackdrop, 1);
     if (p.uRamp) gl.uniform1i(p.uRamp, 2);
+    if (p.uPG) gl.uniform1i(p.uPG, 3);
     this._progCur = prog;
     return p;
   }
@@ -1227,6 +1328,10 @@ class Renderer {
     return p;
   }
   _useProg(p) { if (this._progCur !== p.prog) { this.gl.useProgram(p.prog); this._progCur = p.prog; } }
+  // a uniform keeps its value in its program, so one that has not changed is not sent again (p must be the program in use)
+  _sz(p, w, h) { if (p.cW !== w || p.cH !== h) { p.cW = w; p.cH = h; this.gl.uniform2f(p.uSize, w, h); } }
+  _ts(p, w, h) { if (p.cTW !== w || p.cTH !== h) { p.cTW = w; p.cTH = h; this.gl.uniform2f(p.uTexSize, w, h); } }
+  _cl(p, a, b, c, d) { if (p.cC0 !== a || p.cC1 !== b || p.cC2 !== c || p.cC3 !== d) { p.cC0 = a; p.cC1 = b; p.cC2 = c; p.cC3 = d; this.gl.uniform4f(p.uClamp, a, b, c, d); } }
 
   // ── target resources ──
   _allocRes(T) {
@@ -1326,7 +1431,7 @@ class Renderer {
       gl.disable(gl.SCISSOR_TEST);
       const p = this._prog(K_LOAD, 0);
       this._useProg(p);
-      gl.uniform2f(p.uSize, 1, 1);
+      this._sz(p, 1, 1);
       this._setBlend('$none');
       this._bindTex(0, T.res.tex, false);
       gl.bindVertexArray(this.qvao);
@@ -1433,7 +1538,7 @@ class Renderer {
     const adv = ADV_IDS[J.op] || 0;
     J.adv = adv;
     this.vq = (J.kind === K_LIN || J.kind === K_RAD) && !J.mask ? 0 : 1;
-    J.imm = J.sten !== 0 || adv !== 0 || GLOBAL_OPS.has(J.op) || J.kind === K_LIN || J.kind === K_RAD || J.kind === K_COPY || J.kind === K_LOAD;
+    J.imm = J.sten !== 0 || adv !== 0 || GLOBAL_OPS.has(J.op) || J.kind === K_LIN || J.kind === K_RAD || J.kind === K_COPY || J.kind === K_LOAD || J.kind === K_POLYG;
     if (J.imm) { this.flush(); this.vbN = 0; J.c0 = -1; return; }
     const B = this.B, cl = J.clamp;
     const c0 = cl ? cl[0] : 0, c1 = cl ? cl[1] : 0, c2 = cl ? cl[2] : 1, c3 = cl ? cl[3] : 1;
@@ -1447,7 +1552,7 @@ class Renderer {
   // start describing a new drawing operation
   job(op) {
     const J = this.J;
-    J.op = op; J.sten = 0; J.tex = null; J.smooth = true; J.texW = 1; J.texH = 1; J.clamp = null; J.grad = null; J.mask = false;
+    J.op = op; J.sten = 0; J.tex = null; J.smooth = true; J.texW = 1; J.texH = 1; J.clamp = null; J.grad = null; J.pg = null; J.mask = false;
     J.bx0 = undefined; J.by0 = undefined; J.bx1 = undefined; J.by1 = undefined;
     return J;
   }
@@ -1468,9 +1573,9 @@ class Renderer {
     this.vbN = 0;
     const p = this._prog(B.kind, 0);
     this._useProg(p);
-    gl.uniform2f(p.uSize, T.w, T.h);
-    if (p.uTexSize) gl.uniform2f(p.uTexSize, B.texW, B.texH);
-    if (p.uClamp) gl.uniform4f(p.uClamp, B.cl0, B.cl1, B.cl2, B.cl3);
+    this._sz(p, T.w, T.h);
+    if (p.uTexSize) this._ts(p, B.texW, B.texH);
+    if (p.uClamp) this._cl(p, B.cl0, B.cl1, B.cl2, B.cl3);
     this._setBlend(B.op);
     if (B.tex) this._bindTex(0, B.tex, B.smooth);
     gl.drawArrays(gl.TRIANGLES, 0, n);
@@ -1479,9 +1584,16 @@ class Renderer {
 
   _jobUniforms(p, J, T) {
     const gl = this.gl;
-    gl.uniform2f(p.uSize, T.w, T.h);
-    if (p.uTexSize) gl.uniform2f(p.uTexSize, J.texW || 1, J.texH || 1);
-    if (p.uClamp) { const c = J.clamp; if (c) gl.uniform4f(p.uClamp, c[0], c[1], c[2], c[3]); else gl.uniform4f(p.uClamp, 0, 0, 1, 1); }
+    this._sz(p, T.w, T.h);
+    if (p.uTexSize) this._ts(p, J.texW || 1, J.texH || 1);
+    if (p.uClamp) { const c = J.clamp; if (c) this._cl(p, c[0], c[1], c[2], c[3]); else this._cl(p, 0, 0, 1, 1); }
+    if (J.pg && p.uPN) {
+      const inv = J.inv, pg = J.pg;
+      this._pgUpload(pg);
+      gl.uniform3f(p.uRow0, inv[0], inv[1], inv[2]); gl.uniform3f(p.uRow1, inv[3], inv[4], inv[5]);
+      gl.uniform4f(p.uG0, pg.ox, pg.oy, 0, 0);
+      gl.uniform1i(p.uPN, pg.n);
+    }
     if (J.grad && p.uG0) {
       const inv = J.inv, g = J.grad, row = this._rampRow(g);
       const v = (row + 0.5) / this.rampRows;
@@ -1496,6 +1608,24 @@ class Renderer {
         gl.uniform4f(p.uG1, q[2], q[5] - q[2], v, 0);
       }
     }
+  }
+  _pgUpload(pg) {
+    const gl = this.gl;
+    if (!this.pgTex || this.pgEpoch !== this.epoch) {
+      this.pgTex = gl.createTexture();
+      gl.activeTexture(gl.TEXTURE3);
+      gl.bindTexture(gl.TEXTURE_2D, this.pgTex);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, PG_W, 1);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.bindSampler(3, null);
+      this.pgEpoch = this.epoch; this.pgOwner = null;
+    }
+    if (this.pgOwner === pg) return;
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, this.pgTex);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, pg.n * 2, 1, gl.RGBA, gl.FLOAT, pg.data);
+    this.pgOwner = pg;
   }
   _rampRow(g) {
     if (g._row >= 0 && g._epoch === this.epoch && this.rampOwner[g._row] === g && !g._dirty) return g._row;
@@ -1539,7 +1669,7 @@ class Renderer {
       gl.stencilMask(0xff);
       gl.disable(gl.CULL_FACE);
       // pass 1: fill the stencil, no colour
-      this._useProg(cp); gl.uniform2f(cp.uSize, T.w, T.h);
+      this._useProg(cp); this._sz(cp, T.w, T.h);
       gl.colorMask(false, false, false, false);
       this._setBlend('$none');
       if (J.sten === 1) {
@@ -1582,7 +1712,7 @@ class Renderer {
     this.commit(L);
     const p = this._globalProg(J.op);
     this._useProg(p);
-    gl.uniform2f(p.uSize, 1, 1);
+    this._sz(p, 1, 1);
     this._setBlend('$none');
     this._bindTex(0, L.res.tex, false);
     this._bindTex(1, T.res.tex, false);
@@ -1846,10 +1976,16 @@ class Renderer {
     else { w = src.videoWidth || src.width; h = src.videoHeight || src.height; }
     if (!(w > 0 && h > 0)) return null;
     const isImg = typeof HTMLImageElement !== 'undefined' && src instanceof HTMLImageElement;
-    const animated = isImg && /\.gif($|[?#])|^data:image\/gif/i.test(src.currentSrc || src.src || '');
-    if (isImg && !animated) {
+    if (isImg) {      // a still image that has its texture already is answered first: only still images are put in imgTex
       const e = this.imgTex.get(src);
       if (e && e.w === w && e.h === h && e.epoch === this.epoch && e.src === src.currentSrc) return e;
+    }
+    let animated = false;
+    if (isImg) {      // the GIF test reads the whole address (megabytes for a data URL): once per image and address
+      const cs = src.currentSrc;
+      let f = this.gifFlag.get(src);
+      if (!f || f.s !== cs) { f = { s: cs, a: /\.gif($|[?#])|^data:image\/gif/i.test(cs || src.src || '') }; this.gifFlag.set(src, f); }
+      animated = f.a;
     }
     let tex;
     if (isImg && !animated) { tex = gl.createTexture(); }
@@ -2085,14 +2221,19 @@ function measureCtx(font, align, base) {
   return _measureCtx;
 }
 // normalised font string, or null when the browser rejects it (Canvas silently ignores bad fonts)
+const _fontNorm = new Map();
 function normalizeFont(v) {
+  const hit = _fontNorm.get(v);
+  if (hit !== undefined) return hit;        // (the measuring context keeps the font it has: _mFont still says which)
   const g = measureCtx('10px serif', 'start', 'alphabetic');
   g.font = '10px serif';
   g.font = v;
   const out = g.font;
   _mFont = out;
-  if (out === '10px serif' && !/^\s*10px\s+serif\s*$/i.test(v)) return null;
-  return out;
+  const r = out === '10px serif' && !/^\s*10px\s+serif\s*$/i.test(v) ? null : out;
+  if (_fontNorm.size > 400) _fontNorm.clear();
+  _fontNorm.set(v, r);
+  return r;
 }
 
 // interpolate=False text: the glyphs are rasterised at their own size (one text pixel per unit, 2 px of margin) and that picture is then drawn
@@ -2121,10 +2262,73 @@ function snapLocal(M, x, y, w, h) {
 
 Renderer.prototype.clearText = function () {
   const gl = this.gl;
-  if (this.lost) { this.textCache.clear(); this.textPixels = 0; return; }
+  if (this.lost) { this.textCache.clear(); this.textPixels = 0; this.atlasCache.clear(); this.textPages = []; return; }
   this.flush();
   for (const e of this.textCache.values()) gl.deleteTexture(e.tex);
   this.textCache.clear(); this.textPixels = 0;
+  for (const p of this.textPages) gl.deleteTexture(p.tex);
+  this.textPages = []; this.atlasCache.clear();
+};
+
+// a text picture that was made before (an entry carries its own size and anchor, so it need not be measured again), or null
+Renderer.prototype.textLookup = function (key) {
+  const a = this.atlasCache.get(key);
+  if (a) { a.page.use = ++this.atlasClock; return a; }
+  const e = this.textCache.get(key);
+  if (e) { this.textCache.delete(key); this.textCache.set(key, e); return e; }
+  return null;
+};
+
+// Text pictures of ordinary size share a few big textures (pages), so that different texts can go into one draw call.
+// A picture is copied to its own place on a page; when the pages are full the page that was used longest ago starts over.
+const ATLAS_W = 2048, ATLAS_H = 1024, ATLAS_PAGES = 3, ATLAS_MAXW = 480, ATLAS_MAXH = 256;
+function atlasAlloc(pg, w, h) {
+  const hq = (h + 7) & ~7;
+  for (const sh of pg.shelves) if (sh.h >= h && sh.h <= hq + 8 && sh.x + w <= ATLAS_W) { const x = sh.x; sh.x += w; return { x, y: sh.y }; }
+  if (pg.nextY + hq <= ATLAS_H) { const sh = { y: pg.nextY, h: hq, x: w }; pg.nextY += hq; pg.shelves.push(sh); return { x: 0, y: sh.y }; }
+  return null;
+}
+// get (or build) the entry for a run of text on an atlas page; null when the picture is too big for one (it gets a texture of its own then)
+Renderer.prototype.textAtlas = function (key, tw, th, draw) {
+  if (tw + 2 > ATLAS_MAXW || th + 2 > ATLAS_MAXH) return null;
+  const gl = this.gl;
+  if (!this.textCanvas) this.textCanvas = document.createElement('canvas');
+  const tc = this.textCanvas;
+  tc.width = tw; tc.height = th;
+  draw(tc.getContext('2d'));
+  const w = tw + 2, h = th + 2, pages = this.textPages;
+  let page = null, at = null;
+  for (let i = pages.length - 1; i >= 0 && !at; i--) { at = atlasAlloc(pages[i], w, h); if (at) page = pages[i]; }
+  if (!at) {
+    if (pages.length < ATLAS_PAGES) {
+      const tex = gl.createTexture();
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, ATLAS_W, ATLAS_H);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      page = { tex, shelves: [], nextY: 0, keys: [], use: 0 };
+      pages.push(page);
+    } else {
+      page = pages[0];
+      for (const p of pages) if (p.use < page.use) page = p;
+      this.flush();                                  // draws that are still waiting may use this page
+      for (const k of page.keys) this.atlasCache.delete(k);
+      page.keys.length = 0; page.shelves.length = 0; page.nextY = 0;
+    }
+    at = atlasAlloc(page, w, h);
+  }
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, page.tex);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, at.x + 1, at.y + 1, gl.RGBA, gl.UNSIGNED_BYTE, tc);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+  const e = { tex: page.tex, w: tw, h: th, ax: at.x + 1, ay: at.y + 1, aw: ATLAS_W, ah: ATLAS_H, page, ox: 0, oy: 0 };
+  page.use = ++this.atlasClock;
+  page.keys.push(key);
+  this.atlasCache.set(key, e);
+  return e;
 };
 
 // get (or build) the texture for a run of text; draw(g) paints it into a transparent 2D canvas of tw × th
@@ -2155,7 +2359,7 @@ Renderer.prototype.textTexture = function (key, tw, th, draw) {
   gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  e = { tex, w: tw, h: th };
+  e = { tex, w: tw, h: th, ax: 0, ay: 0, aw: tw, ah: th, page: null, ox: 0, oy: 0 };
   this.textCache.set(key, e);
   this.textPixels += tw * th;
   return e;
@@ -2232,8 +2436,8 @@ class Ctx2D {
   get canvas() { return this._canvas; }
 
   // ── state properties ──
-  get fillStyle() { const s = this._fs; return s instanceof Gradient ? s : cssOut(s.c); }
-  set fillStyle(v) { const s = toStyle(v); if (s) this._fs = s; }
+  get fillStyle() { const s = this._fs; return s instanceof Gradient || s instanceof PolyPaint ? s : cssOut(s.c); }
+  set fillStyle(v) { const s = v instanceof PolyPaint ? v : toStyle(v); if (s) this._fs = s; }
   get strokeStyle() { const s = this._ss; return s instanceof Gradient ? s : cssOut(s.c); }
   set strokeStyle(v) { const s = toStyle(v); if (s) this._ss = s; }
   get lineWidth() { return this._lw; }
@@ -2362,6 +2566,17 @@ class Ctx2D {
     if (style instanceof Gradient) {
       J.kind = style.kind === 'linear' ? K_LIN : K_RAD;
       J.grad = style;
+      J.col = packPremul(255, 255, 255, ga);
+      const M = this._m, det = M[0] * M[3] - M[1] * M[2];
+      if (!(Math.abs(det) > 1e-12)) return false;
+      const iv = this._inv;
+      iv[0] = M[3] / det; iv[1] = -M[2] / det; iv[2] = (M[2] * M[5] - M[3] * M[4]) / det;
+      iv[3] = -M[1] / det; iv[4] = M[0] / det; iv[5] = (M[1] * M[4] - M[0] * M[5]) / det;
+      J.inv = iv;
+      return true;
+    }
+    if (style instanceof PolyPaint) {
+      J.kind = K_POLYG; J.grad = null; J.pg = style;
       J.col = packPremul(255, 255, 255, ga);
       const M = this._m, det = M[0] * M[3] - M[1] * M[2];
       if (!(Math.abs(det) > 1e-12)) return false;
@@ -2520,41 +2735,53 @@ class Ctx2D {
     let DYi, fy;
     if (axis) { DYi = Math.floor(DY); fy = Math.round((DY - DYi) * 1000) / 1000; }
     else { const qy = Math.round(DY * 4) / 4; DYi = Math.floor(qy); fy = qy - DYi; }
-    const mt = measureCtx(this._font, this._ta, this._tb).measureText(str);
-    const left = mt.actualBoundingBoxLeft !== undefined ? mt.actualBoundingBoxLeft : 0;
-    const right = mt.actualBoundingBoxRight !== undefined ? mt.actualBoundingBoxRight : mt.width;
-    let asc = mt.actualBoundingBoxAscent, desc = mt.actualBoundingBoxDescent;
-    if (asc === undefined) { const px = parseFloat(this._font) || 10; asc = px; desc = px * 0.3; }
-    const half = stroke ? this._lw * (this._join === 'miter' ? Math.max(1, this._ml) : 1) * 0.5 : 0;
-    const ux0 = -left - half, ux1 = right + half, uy0 = -asc - half, uy1 = desc + half;
-    let mnx = Infinity, mxx = -Infinity, mny = Infinity, mxy = -Infinity;
-    for (let k = 0; k < 4; k++) {
-      const ux = k === 0 || k === 3 ? ux0 : ux1, uy = k < 2 ? uy0 : uy1;
-      const px = M[0] * ux + M[2] * uy, py = M[1] * ux + M[3] * uy;
-      if (px < mnx) mnx = px; if (px > mxx) mxx = px; if (py < mny) mny = py; if (py > mxy) mxy = py;
-    }
-    const pad = 2;
-    const ox = pad - Math.floor(mnx), oy = pad - Math.floor(mny);
-    const tw = Math.ceil(mxx) + ox + pad + 1, th = Math.ceil(mxy) + oy + pad + 1;
-    if (!(tw > 0 && th > 0) || tw > R.maxTex || th > R.maxTex) return;
     const font = this._font, ta = this._ta, tb = this._tb, lw = this._lw, jn = this._join, ml = this._ml;
-    const colorKey = solid ? style.c.join(',') : 'm';
-    const key = font + '\u0001' + ta + '\u0001' + tb + '\u0001' + M[0].toFixed(5) + ',' + M[1].toFixed(5) + ',' + M[2].toFixed(5) + ',' + M[3].toFixed(5) +
-      '\u0001' + fx + ',' + fy + '\u0001' + (stroke ? lw + ':' + jn + ':' + ml : '-') + '\u0001' + colorKey + '\u0001' + str;
-    const e = R.textTexture(key, tw, th, g => {
-      g.setTransform(M[0], M[1], M[2], M[3], ox + fx, oy + fy);
-      g.font = font; g.textAlign = ta; g.textBaseline = tb;
-      const css = solid ? style.css : '#ffffff';
-      if (stroke) { g.lineWidth = lw; g.lineJoin = jn; g.miterLimit = ml; g.strokeStyle = css; g.strokeText(str, 0, 0); }
-      else { g.fillStyle = css; g.fillText(str, 0, 0); }
-    });
+    const colorKey = solid ? (style.ck || (style.ck = style.c.join(','))) : 'm';
+    // (the part of the key that holds the font, the alignment and the matrix is rebuilt only when one of them changes)
+    let pre = this._tkP;
+    if (this._tkF !== font || this._tkA !== ta || this._tkB !== tb || this._tk0 !== M[0] || this._tk1 !== M[1] || this._tk2 !== M[2] || this._tk3 !== M[3]) {
+      pre = this._tkP = font + '\u0001' + ta + '\u0001' + tb + '\u0001' + M[0].toFixed(5) + ',' + M[1].toFixed(5) + ',' + M[2].toFixed(5) + ',' + M[3].toFixed(5) + '\u0001';
+      this._tkF = font; this._tkA = ta; this._tkB = tb; this._tk0 = M[0]; this._tk1 = M[1]; this._tk2 = M[2]; this._tk3 = M[3];
+    }
+    const key = pre + fx + ',' + fy + '\u0001' + (stroke ? lw + ':' + jn + ':' + ml : '-') + '\u0001' + colorKey + '\u0001' + str;
+    let e = R.textLookup(key);
+    if (!e) {      // a text that is new: measure it, and rasterise it with the browser's text engine
+      const mt = measureCtx(font, ta, tb).measureText(str);
+      const left = mt.actualBoundingBoxLeft !== undefined ? mt.actualBoundingBoxLeft : 0;
+      const right = mt.actualBoundingBoxRight !== undefined ? mt.actualBoundingBoxRight : mt.width;
+      let asc = mt.actualBoundingBoxAscent, desc = mt.actualBoundingBoxDescent;
+      if (asc === undefined) { const px = parseFloat(font) || 10; asc = px; desc = px * 0.3; }
+      const half = stroke ? lw * (jn === 'miter' ? Math.max(1, ml) : 1) * 0.5 : 0;
+      const ux0 = -left - half, ux1 = right + half, uy0 = -asc - half, uy1 = desc + half;
+      let mnx = Infinity, mxx = -Infinity, mny = Infinity, mxy = -Infinity;
+      for (let k = 0; k < 4; k++) {
+        const ux = k === 0 || k === 3 ? ux0 : ux1, uy = k < 2 ? uy0 : uy1;
+        const px = M[0] * ux + M[2] * uy, py = M[1] * ux + M[3] * uy;
+        if (px < mnx) mnx = px; if (px > mxx) mxx = px; if (py < mny) mny = py; if (py > mxy) mxy = py;
+      }
+      const pad = 2;
+      const ox = pad - Math.floor(mnx), oy = pad - Math.floor(mny);
+      const tw = Math.ceil(mxx) + ox + pad + 1, th = Math.ceil(mxy) + oy + pad + 1;
+      if (!(tw > 0 && th > 0) || tw > R.maxTex || th > R.maxTex) return;
+      const draw = g => {
+        g.setTransform(M[0], M[1], M[2], M[3], ox + fx, oy + fy);
+        g.font = font; g.textAlign = ta; g.textBaseline = tb;
+        const css = solid ? style.css : '#ffffff';
+        if (stroke) { g.lineWidth = lw; g.lineJoin = jn; g.miterLimit = ml; g.strokeStyle = css; g.strokeText(str, 0, 0); }
+        else { g.fillStyle = css; g.fillText(str, 0, 0); }
+      };
+      e = (solid && R.textAtlas(key, tw, th, draw)) || R.textTexture(key, tw, th, draw);
+      e.ox = ox; e.oy = oy;
+    }
+    const tw = e.w, th = e.h, ox = e.ox, oy = e.oy;
     // the texture maps 1:1 onto whole screen pixels
     const X0 = DXi - ox, Y0 = DYi - oy, X1 = X0 + tw, Y1 = Y0 + th;
-    J.tex = e.tex; J.texW = tw; J.texH = th; J.smooth = false;
+    J.tex = e.tex; J.texW = e.aw; J.texH = e.ah; J.smooth = false;
     if (solid) { J.kind = K_TEX; J.col = packPremul(255, 255, 255, this._ga); }
     else { J.mask = true; }
     R.begin();
-    R.quad5([X0, Y0, 0, 0, 1, X1, Y0, 1, 0, 1, X1, Y1, 1, 1, 1, X0, Y1, 0, 1, 1], J.col);
+    const u0 = e.ax / e.aw, v0 = e.ay / e.ah, u1 = (e.ax + tw) / e.aw, v1 = (e.ay + th) / e.ah;
+    R.quad5([X0, Y0, u0, v0, 1, X1, Y0, u1, v0, 1, X1, Y1, u1, v1, 1, X0, Y1, u0, v1, 1], J.col);
     R.end();
   }
 
@@ -2563,18 +2790,23 @@ class Ctx2D {
   _textNear(str, x, y, stroke, style, solid, J) {
     const R = this.R, M = this._m;
     const font = this._font, ta = this._ta, tb = this._tb, lw = this._lw, jn = this._join, ml = this._ml;
-    const sp = textSprite(font, ta, tb, str, stroke, lw, jn, ml);
-    const ox = sp.ox, oy = sp.oy, tw = sp.tw, th = sp.th;
-    if (!(tw > 0 && th > 0) || tw > R.maxTex || th > R.maxTex) return;
-    const colorKey = solid ? style.c.join(',') : 'm';
+    const colorKey = solid ? (style.ck || (style.ck = style.c.join(','))) : 'm';
     const key = 'N\u0001' + font + '\u0001' + ta + '\u0001' + tb + '\u0001' + (stroke ? lw + ':' + jn + ':' + ml : '-') + '\u0001' + colorKey + '\u0001' + str;
-    const e = R.textTexture(key, tw, th, g => {
-      g.setTransform(1, 0, 0, 1, ox, oy);
-      g.font = font; g.textAlign = ta; g.textBaseline = tb;
-      const css = solid ? style.css : '#ffffff';
-      if (stroke) { g.lineWidth = lw; g.lineJoin = jn; g.miterLimit = ml; g.strokeStyle = css; g.strokeText(str, 0, 0); }
-      else { g.fillStyle = css; g.fillText(str, 0, 0); }
-    });
+    let e = R.textLookup(key);
+    if (!e) {
+      const sp = textSprite(font, ta, tb, str, stroke, lw, jn, ml);
+      const ox = sp.ox, oy = sp.oy, tw = sp.tw, th = sp.th;
+      if (!(tw > 0 && th > 0) || tw > R.maxTex || th > R.maxTex) return;
+      e = R.textTexture(key, tw, th, g => {
+        g.setTransform(1, 0, 0, 1, ox, oy);
+        g.font = font; g.textAlign = ta; g.textBaseline = tb;
+        const css = solid ? style.css : '#ffffff';
+        if (stroke) { g.lineWidth = lw; g.lineJoin = jn; g.miterLimit = ml; g.strokeStyle = css; g.strokeText(str, 0, 0); }
+        else { g.fillStyle = css; g.fillText(str, 0, 0); }
+      });
+      e.ox = ox; e.oy = oy;
+    }
+    const ox = e.ox, oy = e.oy, tw = e.w, th = e.h;
     const r = snapLocal(M, x - ox, y - oy, tw, th);
     const x0 = r[0], y0 = r[1], x1 = x0 + r[2], y1 = y0 + r[3];
     const X = (a, b) => M[0] * a + M[2] * b + M[4], Y = (a, b) => M[1] * a + M[3] * b + M[5];
@@ -2655,6 +2887,25 @@ class Ctx2D {
     R.end();
   }
 
+  // draw_grad_poly(): a = [x, y, r, g, b, alpha] per point; fills the polygon with the colours of its points blended across it
+  bpPolyFill(a) {
+    const n = (a.length / 6) | 0;
+    if (n < 3 || n > PG_MAX) return;
+    const R = this.R; if (R.lost) return;
+    const keep = this._fs;
+    this.beginPath(); this.moveTo(a[0], a[1]);
+    for (let i = 1; i < n; i++) this.lineTo(a[6 * i], a[6 * i + 1]);
+    this.closePath();
+    if (R.polyOK) this._fs = new PolyPaint(a);
+    else {      // this GPU could not build the shader: one colour, the average of the points
+      let r = 0, g = 0, b = 0, al = 0;
+      for (let i = 0; i < n; i++) { const o = 6 * i, k = a[o + 5]; r += a[o + 2] * k; g += a[o + 3] * k; b += a[o + 4] * k; al += k; }
+      this._fs = al > 0 ? toStyle('rgba(' + Math.round(r / al) + ',' + Math.round(g / al) + ',' + Math.round(b / al) + ',' + (al / n) + ')') : BLACK;
+      if (al <= 0) return;
+    }
+    try { this.fill(); } finally { this._fs = keep; }
+  }
+
   // ── pixels ──
   getImageData(sx, sy, sw, sh) {
     if (this.R.lost) return new ImageData(Math.max(1, Math.abs(sw | 0)), Math.max(1, Math.abs(sh | 0)));
@@ -2726,6 +2977,8 @@ function buildRenderer(canvas, gl, noMSAA) {
   R.screen = new Target(R, canvas.width, canvas.height, true);
   for (let k = 0; k <= K_QUADN; k++) R._prog(k, 0);
   R._prog(K_COLOR, 1); R._prog(K_TEX, 9);
+  R.polyOK = true;
+  try { R._prog(K_POLYG, 0); } catch (e) { R.polyOK = false; R._progCur = null; }
   R._globalProg('destination-in');
   return R;
 }
@@ -2902,6 +3155,45 @@ function createCanvas2D(canvas) {
     qc.getContext('2d').putImageData(new ImageData(out, w, hh), 0, 0);
     g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.drawImage(qc, minX, minY); g.restore();
   }
+  // draw_grad_poly() on the Canvas 2D fallback: the colours are computed for every pixel under the polygon and drawn through the polygon as a clip
+  let polyCanvas = null;
+  function polyCPU(g, a) {
+    const n = (a.length / 6) | 0;
+    if (n < 3 || n > PG_MAX) return;
+    const m = g.getTransform(), det = m.a * m.d - m.b * m.c;
+    if (!(Math.abs(det) > 1e-12)) return;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (let i = 0; i < n; i++) {
+      const x = a[6 * i], y = a[6 * i + 1], X = m.a * x + m.c * y + m.e, Y = m.b * x + m.d * y + m.f;
+      if (X < x0) x0 = X; if (X > x1) x1 = X; if (Y < y0) y0 = Y; if (Y > y1) y1 = Y;
+    }
+    const cv = g.canvas;
+    const minX = Math.max(0, Math.floor(x0)), minY = Math.max(0, Math.floor(y0)), maxX = Math.min(cv.width, Math.ceil(x1)), maxY = Math.min(cv.height, Math.ceil(y1));
+    const w = maxX - minX, h = maxY - minY;
+    if (!(w > 0 && h > 0)) return;
+    const pg = new PolyPaint(a), out = new Uint8ClampedArray(w * h * 4), c = [0, 0, 0, 0];
+    const ia = m.d / det, ic = -m.c / det, ie = (m.c * m.f - m.d * m.e) / det, ib = -m.b / det, id = m.a / det, iff = (m.b * m.e - m.a * m.f) / det;
+    for (let py = 0; py < h; py++) {
+      const dy = minY + py + 0.5;
+      for (let px = 0; px < w; px++) {
+        const dx = minX + px + 0.5;
+        polyEval(pg.data, n, ia * dx + ic * dy + ie - pg.ox, ib * dx + id * dy + iff - pg.oy, c);
+        const al = c[3];
+        if (!(al > 0)) continue;
+        const o = (py * w + px) * 4;
+        out[o] = Math.round(255 * c[0] / al); out[o + 1] = Math.round(255 * c[1] / al); out[o + 2] = Math.round(255 * c[2] / al); out[o + 3] = Math.round(255 * al);
+      }
+    }
+    if (!polyCanvas) polyCanvas = document.createElement('canvas');
+    polyCanvas.width = w; polyCanvas.height = h;
+    polyCanvas.getContext('2d').putImageData(new ImageData(out, w, h), 0, 0);
+    g.save();
+    g.beginPath(); g.moveTo(a[0], a[1]);
+    for (let i = 1; i < n; i++) g.lineTo(a[6 * i], a[6 * i + 1]);
+    g.closePath(); g.clip();
+    g.setTransform(1, 0, 0, 1, 0, 0); g.drawImage(polyCanvas, minX, minY);
+    g.restore();
+  }
   // interpolate=False text on the Canvas 2D fallback: the same picture as the GPU renderer makes (own size, upright), drawn with smoothing off
   let nearCanvas = null;
   function nearText(g, str, x, y, stroke) {
@@ -2944,6 +3236,7 @@ function createCanvas2D(canvas) {
       } else this.drawImage(img, dx, dy, dw, dh);
     };
     g.bpDrawQuad = function (img, p, tint) { quadCPU(this, img, p, tint); };
+    g.bpPolyFill = function (a) { polyCPU(this, a); };
     g.bpPixel = function (x, y) {
       x = Math.floor(x); y = Math.floor(y);
       const d = this.getImageData(x, y, 1, 1).data;
@@ -2995,7 +3288,7 @@ function create(canvas, opts) {
   return be2;
 }
 
-return { create, parseColor, Gradient, Renderer, Target, Ctx2D, K: { K_COLOR, K_TEX, K_TINT, K_QUAD, K_LIN, K_RAD, K_COPY, K_LOAD, K_TEXN, K_TINTN, K_QUADN } };
+return { create, parseColor, Gradient, Renderer, Target, Ctx2D, PolyPaint, polyEval, K: { K_COLOR, K_TEX, K_TINT, K_QUAD, K_LIN, K_RAD, K_COPY, K_LOAD, K_TEXN, K_TINTN, K_QUADN, K_POLYG } };
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -4802,6 +5095,11 @@ window._py = {
     ctx.closePath();
     if(filled){ctx.fillStyle=c;ctx.fill();}else{ctx.strokeStyle=c;ctx.lineWidth=lw;ctx.stroke();}
   },
+  // draw_grad_poly(): a = [x, y, r, g, b, alpha] for every point
+  gpoly(a) {
+    const v=a&&a.toJs?a.toJs():Array.from(a||[]);
+    if(ctx.bpPolyFill)ctx.bpPolyFill(v);
+  },
   bezier(x1,y1,cx1,cy1,cx2,cy2,x2,y2,c,lw) {
     ctx.beginPath();ctx.moveTo(x1,y1);ctx.bezierCurveTo(cx1,cy1,cx2,cy2,x2,y2);
     ctx.strokeStyle=c;ctx.lineWidth=lw;ctx.stroke();
@@ -4815,6 +5113,18 @@ window._py = {
     ctx.font=sz+'px '+_bpFonts.css(f);ctx.fillStyle=c;ctx.textAlign=align;ctx.textBaseline=base;
     if(smooth===false){const k=ctx.imageSmoothingEnabled;ctx.imageSmoothingEnabled=false;try{ctx.fillText(t,x,y);}finally{ctx.imageSmoothingEnabled=k;}}
     else ctx.fillText(t,x,y);
+  },
+  // the same as save(); trans(x,y); rot(rad); scl(sx,sy); txt(0,0,...); restore() in one call (turned / stretched text)
+  txtt(x,y,rad,sx,sy,t,c,sz,f,align,base,smooth) {
+    ctx.save();
+    try{
+      ctx.translate(x,y);
+      if(rad)ctx.rotate(rad);
+      if(sx!==1||sy!==1)ctx.scale(sx,sy);
+      ctx.font=sz+'px '+_bpFonts.css(f);ctx.fillStyle=c;ctx.textAlign=align;ctx.textBaseline=base;
+      if(smooth===false){const k=ctx.imageSmoothingEnabled;ctx.imageSmoothingEnabled=false;try{ctx.fillText(t,0,0);}finally{ctx.imageSmoothingEnabled=k;}}
+      else ctx.fillText(t,0,0);
+    }finally{ctx.restore();}
   },
   txt2(x,y,t,fill,stroke,sz,f,align,base,slw,smooth) {
     ctx.font=sz+'px '+_bpFonts.css(f);ctx.textAlign=align;ctx.textBaseline=base;
@@ -5200,6 +5510,20 @@ def _do(color, fn):
         _py.alpha(prev)
     else:
         fn(c)
+
+_NUMT = (int, float)
+_CSS_CACHE = {}
+def _cs(c):
+    """The same as _css(c)[0] (the color as the drawing bridge wants it), but the common colors are looked up instead of formatted."""
+    k = c.__class__
+    if k is str: return c
+    if k is tuple:
+        r = _CSS_CACHE.get(c)
+        if r is None:
+            r = _css(c)[0]
+            if len(_CSS_CACHE) < 2048: _CSS_CACHE[c] = r
+        return r
+    return _style(c)[0]
 
 def _deg(a): return math.radians(float(a))   # degrees → radians for JS calls
 
@@ -5605,16 +5929,16 @@ def poly_in_circle(points, cx, cy, r):
     return False
 
 def draw_rect(x,y,w,h,color=WHITE,*,filled=True,line_width=1):
-    _do(color, lambda c: _py.rect(float(x),float(y),float(w),float(h),c,bool(filled),float(line_width)))
+    c=_cs(color); _py.rect(float(x),float(y),float(w),float(h),c,bool(filled),float(line_width))
 def draw_square(x,y,size,color=WHITE,**kw): draw_rect(x,y,size,size,color,**kw)
 def draw_circle(x,y,radius,color=WHITE,*,filled=True,line_width=1):
-    _do(color, lambda c: _py.circ(float(x),float(y),float(radius),c,bool(filled),float(line_width)))
+    c=_cs(color); _py.circ(float(x),float(y),float(radius),c,bool(filled),float(line_width))
 def draw_ellipse(x,y,rx,ry,color=WHITE,*,angle=0,filled=True,line_width=1):
-    _do(color, lambda c: _py.ellps(float(x),float(y),float(rx),float(ry),_deg(angle),c,bool(filled),float(line_width)))
+    c=_cs(color); _py.ellps(float(x),float(y),float(rx),float(ry),_deg(angle),c,bool(filled),float(line_width))
 def draw_arc(x,y,radius,start,end,color=WHITE,line_width=1):
-    _do(color, lambda c: _py.arc(float(x),float(y),float(radius),_deg(start),_deg(end),c,float(line_width)))
+    c=_cs(color); _py.arc(float(x),float(y),float(radius),_deg(start),_deg(end),c,float(line_width))
 def draw_line(x1,y1,x2,y2,color=WHITE,width=1):
-    _do(color, lambda c: _py.line(float(x1),float(y1),float(x2),float(y2),c,float(width)))
+    c=_cs(color); _py.line(float(x1),float(y1),float(x2),float(y2),c,float(width))
 def draw_lines(points,color=WHITE,width=1,closed=False,origin=(0,0)):
     pts=_pts(points)
     if pts and (origin[0]!=0 or origin[1]!=0):
@@ -5623,7 +5947,7 @@ def draw_lines(points,color=WHITE,width=1,closed=False,origin=(0,0)):
         ox,oy=_get_origin(origin)
         dx=bx+bw*ox;dy=by+bh*oy
         pts=[[p[0]-dx,p[1]-dy] for p in pts]
-    _do(color, lambda c: _py.lines(pts,c,float(width),bool(closed)))
+    c=_cs(color); _py.lines(pts,c,float(width),bool(closed))
 def draw_poly(points,color=WHITE,*,filled=True,line_width=1,origin=(0,0)):
     pts=_pts(points)
     if pts and (origin[0]!=0 or origin[1]!=0):
@@ -5632,11 +5956,57 @@ def draw_poly(points,color=WHITE,*,filled=True,line_width=1,origin=(0,0)):
         ox,oy=_get_origin(origin)
         dx=bx+bw*ox;dy=by+bh*oy
         pts=[[p[0]-dx,p[1]-dy] for p in pts]
-    _do(color, lambda c: _py.poly(pts,c,bool(filled),float(line_width)))
+    c=_cs(color); _py.poly(pts,c,bool(filled),float(line_width))
 def draw_bezier(x1,y1,cx1,cy1,cx2,cy2,x2,y2,color=WHITE,width=1):
-    _do(color, lambda c: _py.bezier(float(x1),float(y1),float(cx1),float(cy1),float(cx2),float(cy2),float(x2),float(y2),c,float(width)))
+    c=_cs(color); _py.bezier(float(x1),float(y1),float(cx1),float(cy1),float(cx2),float(cy2),float(x2),float(y2),c,float(width))
 def draw_quad_curve(x1,y1,cpx,cpy,x2,y2,color=WHITE,width=1):
-    _do(color, lambda c: _py.qcurve(float(x1),float(y1),float(cpx),float(cpy),float(x2),float(y2),c,float(width)))
+    c=_cs(color); _py.qcurve(float(x1),float(y1),float(cpx),float(cpy),float(x2),float(y2),c,float(width))
+def _gp_color(c):
+    """(r, g, b, alpha) of a color for draw_grad_poly(): r, g, b from 0 to 255, alpha from 0 to 1."""
+    if isinstance(c, Gradient):
+        raise TypeError('draw_grad_poly(): a point needs a plain color (a name, an (r, g, b) or an (r, g, b, a) tuple), not a gradient')
+    try:
+        v = _mix_rgba(c)
+    except ValueError:
+        raise ValueError('draw_grad_poly(): %r is not a color' % (c,)) from None
+    except TypeError:
+        raise TypeError('draw_grad_poly(): the color of a point is a name such as "red" or an (r, g, b) tuple, not ' + type(c).__name__) from None
+    if len(v) == 3: return float(v[0]), float(v[1]), float(v[2]), 1.0
+    if len(v) == 4: return float(v[0]), float(v[1]), float(v[2]), max(0.0, min(1.0, float(v[3]) / 255.0))
+    raise ValueError('draw_grad_poly(): a color is a name or an (r, g, b) or (r, g, b, a) tuple, not %r' % (c,))
+
+def draw_grad_poly(*points):
+    """Draw a polygon whose points each have their own color; the colors blend smoothly across the polygon.
+
+    Every point is (x, y, color). The color is a name such as "red" or an (r, g, b) or (r, g, b, a) tuple.
+    The points can be given one by one or as one list:  draw_grad_poly((x1, y1, c1), (x2, y2, c2), (x3, y3, c3))
+    or  draw_grad_poly([(x1, y1, c1), (x2, y2, c2), (x3, y3, c3)]).  At least 3 points, at most 1024.
+
+    Example:
+        draw_grad_poly((100, 50, "red"), (300, 80, "lime"), (200, 250, "blue"))
+    """
+    if len(points) == 1:
+        points = points[0]
+    flat = []
+    n = 0
+    for p in points:
+        if hasattr(p, 'toJs'): p = p.toJs()
+        try:
+            x, y, c = p
+        except (TypeError, ValueError):
+            raise ValueError('draw_grad_poly(): every point is (x, y, color), for example (100, 50, "red")') from None
+        x = float(x); y = float(y)
+        if not (math.isfinite(x) and math.isfinite(y)):
+            raise ValueError('draw_grad_poly(): the x and y of a point must be finite numbers')
+        r, g, b, a = _gp_color(c)
+        flat += (x, y, r, g, b, a)
+        n += 1
+    if n < 3:
+        raise ValueError('draw_grad_poly(): a polygon needs at least 3 points, got %d' % n)
+    if n > 1024:
+        raise ValueError('draw_grad_poly(): at most 1024 points, got %d' % n)
+    _py.gpoly(flat)
+
 class _TextFrame:
     """(internal) The frame that text is drawn in when it is turned, stretched or slanted around its anchor (ox, oy):
     screen = anchor + R(th) * diag(sx, sy) * [[1, k], [0, 1]] * local.   It carries a gradient from the screen into that frame."""
@@ -5662,6 +6032,16 @@ def draw_text(x,y,text,color=WHITE,size=16,font='monospace',*,align='left',basel
     x_scale and y_scale multiply the width and the height of the letters (size 16 with x_scale 2 is 32 wide), around (x, y).
     interpolate=True draws smooth text; interpolate=False draws the text at its own size and enlarges that picture with hard pixels.
     """
+    if stroke is None and angle.__class__ in _NUMT and not angle and not italic and x_scale.__class__ in _NUMT and y_scale.__class__ in _NUMT and x_scale == 1 and y_scale == 1 and line_spacing.__class__ in _NUMT:
+        _t=str(text)
+        if '\\n' not in _t:
+            c=_cs(color); _py.txt(float(x),float(y),_t,c,float(size),str(font),str(align),str(baseline),bool(interpolate)); return
+    if stroke is None and not italic and angle.__class__ in _NUMT and x_scale.__class__ in _NUMT and y_scale.__class__ in _NUMT and color.__class__ is not Gradient and x_scale and y_scale and (angle or x_scale != 1 or y_scale != 1) and x_scale-x_scale==0 and y_scale-y_scale==0 and angle-angle==0:
+        _t=str(text)
+        if '\\n' not in _t:
+            _fx=float(x); _fy=float(y)
+            if _fx-_fx==0 and _fy-_fy==0:
+                _py.txtt(_fx,_fy,_deg(angle) if angle else 0.0,float(x_scale),float(y_scale),_t,_cs(color),float(size),str(font),str(align),str(baseline),bool(interpolate)); return
     _font=str(font)
     _sx=float(x_scale); _sy=float(y_scale)
     if _sx==0 or _sy==0 or _sx!=_sx or _sy!=_sy or abs(_sx)==math.inf or abs(_sy)==math.inf: return
@@ -5705,7 +6085,7 @@ def draw_text(x,y,text,color=WHITE,size=16,font='monospace',*,align='left',basel
                 _py.txt(float(lx),float(ly),lines[i],c,float(size),_font,str(align),per_base,_smooth)
         _do(color,_dtxt)
     if needs_transform: _py.restore()
-def draw_pixel(x,y,color=WHITE): _do(color, lambda c: _py.pixel(int(x),int(y),c))
+def draw_pixel(x,y,color=WHITE): c=_cs(color); _py.pixel(int(x),int(y),c)
 def measure_text(text,size=16,font='monospace'):
     v=_py.mtxt(str(text),float(size),str(font))
     r=v.toJs() if hasattr(v,'toJs') else list(v); return tuple(r)
@@ -6416,8 +6796,9 @@ def draw_image(img, x, y, width=None, height=None, angle=0, origin=(0,0), tint=N
     """
     w = float(width)  if width  is not None else 0.0   # 0 = natural size
     h = float(height) if height is not None else 0.0
-    ox, oy = _get_origin(origin)
-    _py.img_draw(img._h, float(x), float(y), w, h, _deg(angle), ox, oy, _tint_arg(tint), bool(interpolate))
+    if origin.__class__ is tuple: ox = float(origin[0]); oy = float(origin[1])
+    else: ox, oy = _get_origin(origin)
+    _py.img_draw(img._h, float(x), float(y), w, h, 0.0 if angle.__class__ is int and angle == 0 else _deg(angle), ox, oy, None if tint is None else _tint_arg(tint), bool(interpolate))
 
 
 def _asset_info(name):
@@ -10960,9 +11341,11 @@ window._py={
   line(x1,y1,x2,y2,c,lw){ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.strokeStyle=c;ctx.lineWidth=lw;ctx.stroke();},
   lines(pts,c,lw,closed){const a=pts.toJs?pts.toJs():Array.from(pts);if(a.length<2)return;ctx.beginPath();const p0=a[0].toJs?a[0].toJs():Array.from(a[0]);ctx.moveTo(p0[0],p0[1]);for(let i=1;i<a.length;i++){const p=a[i].toJs?a[i].toJs():Array.from(a[i]);ctx.lineTo(p[0],p[1]);}if(closed)ctx.closePath();ctx.strokeStyle=c;ctx.lineWidth=lw;ctx.stroke();},
   poly(pts,c,f,lw){const a=pts.toJs?pts.toJs():Array.from(pts);if(a.length<2)return;ctx.beginPath();const p0=a[0].toJs?a[0].toJs():Array.from(a[0]);ctx.moveTo(p0[0],p0[1]);for(let i=1;i<a.length;i++){const p=a[i].toJs?a[i].toJs():Array.from(a[i]);ctx.lineTo(p[0],p[1]);}ctx.closePath();if(f){ctx.fillStyle=c;ctx.fill();}else{ctx.strokeStyle=c;ctx.lineWidth=lw;ctx.stroke();}},
+  gpoly(a){const v=a&&a.toJs?a.toJs():Array.from(a||[]);if(ctx.bpPolyFill)ctx.bpPolyFill(v);},
   bezier(x1,y1,cx1,cy1,cx2,cy2,x2,y2,c,lw){ctx.beginPath();ctx.moveTo(x1,y1);ctx.bezierCurveTo(cx1,cy1,cx2,cy2,x2,y2);ctx.strokeStyle=c;ctx.lineWidth=lw;ctx.stroke();},
   qcurve(x1,y1,cpx,cpy,x2,y2,c,lw){ctx.beginPath();ctx.moveTo(x1,y1);ctx.quadraticCurveTo(cpx,cpy,x2,y2);ctx.strokeStyle=c;ctx.lineWidth=lw;ctx.stroke();},
   txt(x,y,t,c,sz,f,align,base,smooth){ctx.font=sz+'px '+_bpFonts.css(f);ctx.fillStyle=c;ctx.textAlign=align;ctx.textBaseline=base;if(smooth===false){const k=ctx.imageSmoothingEnabled;ctx.imageSmoothingEnabled=false;try{ctx.fillText(t,x,y);}finally{ctx.imageSmoothingEnabled=k;}}else ctx.fillText(t,x,y);},
+  txtt(x,y,rad,sx,sy,t,c,sz,f,align,base,smooth){ctx.save();try{ctx.translate(x,y);if(rad)ctx.rotate(rad);if(sx!==1||sy!==1)ctx.scale(sx,sy);ctx.font=sz+'px '+_bpFonts.css(f);ctx.fillStyle=c;ctx.textAlign=align;ctx.textBaseline=base;if(smooth===false){const k=ctx.imageSmoothingEnabled;ctx.imageSmoothingEnabled=false;try{ctx.fillText(t,0,0);}finally{ctx.imageSmoothingEnabled=k;}}else ctx.fillText(t,0,0);}finally{ctx.restore();}},
   txt2(x,y,t,fill,stroke,sz,f,align,base,slw,smooth){ctx.font=sz+'px '+_bpFonts.css(f);ctx.textAlign=align;ctx.textBaseline=base;const k=ctx.imageSmoothingEnabled;if(smooth===false)ctx.imageSmoothingEnabled=false;try{if(stroke){ctx.strokeStyle=stroke;ctx.lineWidth=slw;ctx.strokeText(t,x,y);}ctx.fillStyle=fill;ctx.fillText(t,x,y);}finally{ctx.imageSmoothingEnabled=k;}},
   mtxt(t,sz,f){ctx.font=sz+'px '+_bpFonts.css(f);const m=ctx.measureText(String(t));return[m.width,(m.actualBoundingBoxAscent||sz)+(m.actualBoundingBoxDescent||0)];},
   pixel(x,y,c){ctx.fillStyle=c;ctx.fillRect(x,y,1,1);},
@@ -13431,6 +13814,7 @@ def update():
         <div class="wiki-member" onclick="openWikiPage('draw_line')"><div class="wiki-member-name">draw_line()</div><div class="wiki-member-desc">Draw a straight line between two points.</div></div>
         <div class="wiki-member" onclick="openWikiPage('draw_lines')"><div class="wiki-member-name">draw_lines()</div><div class="wiki-member-desc">Draw a polyline through multiple points.</div></div>
         <div class="wiki-member" onclick="openWikiPage('draw_poly')"><div class="wiki-member-name">draw_poly()</div><div class="wiki-member-desc">Draw a filled or outlined polygon.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('draw_grad_poly')"><div class="wiki-member-name">draw_grad_poly()</div><div class="wiki-member-desc">Draw a polygon whose points blend their colors.</div></div>
         <div class="wiki-member" onclick="openWikiPage('draw_bezier')"><div class="wiki-member-name">draw_bezier()</div><div class="wiki-member-desc">Draw a cubic Bézier curve.</div></div>
         <div class="wiki-member" onclick="openWikiPage('draw_quad_curve')"><div class="wiki-member-name">draw_quad_curve()</div><div class="wiki-member-desc">Draw a quadratic Bézier curve.</div></div>
         <div class="wiki-member" onclick="openWikiPage('draw_text')"><div class="wiki-member-name">draw_text()</div><div class="wiki-member-desc">Render text on the canvas.</div></div>
@@ -13671,7 +14055,88 @@ def update():
       </div>
 
       <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('draw_grad_poly')">draw_grad_poly()</div>
         <div class="wiki-ref" onclick="openWikiPage('regular_poly')">regular_poly()</div>
+      </div>
+    `
+  },
+
+  "draw_grad_poly": {
+    title: "draw_grad_poly()",
+    category: "Graphics",
+    type: "function",
+    desc: "Draws a filled polygon in which every point has its own color. The colors blend smoothly across the whole polygon.",
+    signature: `<span class="ws-fn">draw_grad_poly</span><span class="ws-pun">(*</span><span class="ws-param">points</span><span class="ws-pun">)</span>`,
+    body: `
+      <table class="wiki-param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>*points</td><td>(x, y, color)</td><td>The corners of the polygon, in order around its edge. Every point is a tuple of its <code>x</code>, its <code>y</code> and its <code>color</code>: a name such as <code>"red"</code>, <code>"#ff8800"</code>, an <code>(r, g, b)</code> tuple or an <code>(r, g, b, a)</code> tuple. Give the points one by one, or as one list. At least 3 and at most 1024 points.</td></tr>
+      </table>
+
+      <p class="wiki-p">Each point colors the polygon around itself, and the colors flow into each other between the points: right on a point you see exactly its color, halfway between two points you see the mix of the two. The blend is smooth over the whole inside of the polygon, also for polygons with four or more points, so there is no visible seam along a diagonal. A polygon whose points all have the same color is the same as <code>draw_poly()</code>.</p>
+
+      <div class="wiki-example">
+        <div class="wiki-example-title">A triangle that fades from red to green to blue</div>
+<pre>
+def update():
+    clear("black")
+    draw_grad_poly((W()/2, 60, "red"),
+                   (W() - 80, H() - 60, "lime"),
+                   (80, H() - 60, "blue"))
+</pre>
+      </div>
+
+      <h2 class="wiki-h2">Four colors, one square</h2>
+      <p class="wiki-p">Pass the points as a list when you build them in a loop or keep them in a variable.</p>
+      <div class="wiki-example">
+        <div class="wiki-example-title">A sky from dark blue to orange</div>
+<pre>
+def update():
+    top = (20, 20, 80)
+    bottom = (255, 140, 60)
+    draw_grad_poly([(0, 0, top), (W(), 0, top),
+                    (W(), H(), bottom), (0, H(), bottom)])
+</pre>
+      </div>
+
+      <h2 class="wiki-h2">Fading out with transparent points</h2>
+      <p class="wiki-p">The color of a point can have an alpha value, <code>(r, g, b, a)</code>. The polygon fades from solid to see-through in between, and the see-through side does not tint the colors: a point with alpha 0 simply shows what is behind it. This makes soft light beams, shadows and glows.</p>
+      <div class="wiki-example">
+        <div class="wiki-example-title">A beam of light</div>
+<pre>
+def update():
+    clear(rgb(10, 10, 30))
+    cx = W() / 2
+    draw_grad_poly((cx - 20, 40, (255, 255, 160, 255)),
+                   (cx + 20, 40, (255, 255, 160, 255)),
+                   (cx + 140, H() - 20, (255, 255, 160, 0)),
+                   (cx - 140, H() - 20, (255, 255, 160, 0)))
+</pre>
+      </div>
+
+      <h2 class="wiki-h2">Any shape</h2>
+      <p class="wiki-p">The polygon can be concave too. Like every drawing function it follows <code>set_alpha()</code>, <code>set_blend()</code> and the transformations (<code>translate()</code>, <code>rotate()</code>, <code>scale_ctx()</code>).</p>
+      <div class="wiki-example">
+        <div class="wiki-example-title">A rainbow arrow</div>
+<pre>
+arrow = [(0, -50, "red"), (20, -20, "orange"), (10, -20, "yellow"),
+         (10, 50, "lime"), (-10, 50, "cyan"), (-10, -20, "blue"),
+         (-20, -20, "magenta")]
+
+def update():
+    clear("black")
+    cx, cy = W() / 2, H() / 2
+    draw_grad_poly([(cx + x * 3, cy + y * 3, c) for x, y, c in arrow])
+</pre>
+      </div>
+
+      <div class="wiki-note"><b>Note:</b> The color of a point is a plain color. A gradient (<code>linear_gradient()</code>, <code>radial_gradient()</code>) is not accepted here and raises an error: the colors of the points already make the gradient. A polygon needs at least 3 points and at most 1024.</div>
+
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('draw_poly')">draw_poly()</div>
+        <div class="wiki-ref" onclick="openWikiPage('gradients')">Gradients</div>
+        <div class="wiki-ref" onclick="openWikiPage('set_alpha_fn')">set_alpha()</div>
+        <div class="wiki-ref" onclick="openWikiPage('set_blend_fn')">set_blend()</div>
       </div>
     `
   },
@@ -14134,7 +14599,7 @@ def update():
         <tr><td>*stops</td><td>(position, color)</td><td>The stops, as for <code>linear_gradient()</code>.</td></tr>
       </table>
       <h2 class="wiki-h2">Use it like a color</h2>
-      <p class="wiki-p">A gradient is accepted everywhere a color is: <code>clear()</code>, <code>draw_rect()</code>, <code>draw_square()</code>, <code>draw_circle()</code>, <code>draw_ellipse()</code>, <code>draw_arc()</code>, <code>draw_line()</code>, <code>draw_lines()</code>, <code>draw_poly()</code>, <code>draw_bezier()</code>, <code>draw_quad_curve()</code>, <code>draw_pixel()</code>, <code>draw_text()</code> (the text and its stroke), the <code>tint</code> of <code>draw_image()</code> and <code>draw_image_quad()</code>, and the color of a <code>Surface</code> or <code>Surface.clear()</code>.</p>
+      <p class="wiki-p">A gradient is accepted everywhere a color is: <code>clear()</code>, <code>draw_rect()</code>, <code>draw_square()</code>, <code>draw_circle()</code>, <code>draw_ellipse()</code>, <code>draw_arc()</code>, <code>draw_line()</code>, <code>draw_lines()</code>, <code>draw_poly()</code>, <code>draw_bezier()</code>, <code>draw_quad_curve()</code>, <code>draw_pixel()</code>, <code>draw_text()</code> (the text and its stroke), the <code>tint</code> of <code>draw_image()</code> and <code>draw_image_quad()</code>, and the color of a <code>Surface</code> or <code>Surface.clear()</code>. The one exception is <code>draw_grad_poly()</code>: the points of that polygon take plain colors, and the colors blend across the polygon by themselves.</p>
       <div class="wiki-example">
         <div class="wiki-example-title">A gradient is a color</div>
 <pre>
