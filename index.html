@@ -244,6 +244,37 @@ kbd{
 }
 #editor::selection{background:var(--sel);}
 
+/* ── AUTOCOMPLETE POPUP ── */
+#ac-pop{
+  position:fixed;left:0;top:0;z-index:3100;display:none;flex-direction:column;
+  min-width:230px;max-width:min(480px,calc(100vw - 12px));width:max-content;
+  background:var(--bg3);border:1px solid var(--bdr3);border-radius:7px;overflow:hidden;
+  box-shadow:0 10px 30px #000c,0 2px 6px #0008;
+  color:var(--txt);-webkit-user-select:none;user-select:none;
+}
+#ac-pop.show{display:flex;}
+#ac-pop .ac-list{overflow-y:auto;overscroll-behavior:contain;padding:3px;max-height:216px;scrollbar-width:thin;scrollbar-color:var(--bg4) transparent;}
+#ac-pop .ac-row{display:flex;align-items:center;gap:8px;min-height:22px;padding:1px 8px 1px 4px;border-radius:4px;cursor:pointer;white-space:nowrap;}
+#ac-pop .ac-row:hover{background:var(--bg4);}
+#ac-pop .ac-row.sel{background:var(--sel);}
+#ac-pop .ac-ic{flex:none;width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;border-radius:4px;background:var(--bg);color:var(--txt2);font:700 10.5px/1 var(--font-ui);}
+#ac-pop .ac-lb{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;font:calc(var(--ed-fs) - .5px)/1.5 var(--font-code);}
+#ac-pop .ac-lb b{font-weight:700;color:var(--blue);}
+#ac-pop .ac-dt{flex:none;max-width:190px;overflow:hidden;text-overflow:ellipsis;color:var(--txt2);font:11px/1.4 var(--font-ui);}
+#ac-pop .ac-k-function,#ac-pop .ac-k-method{color:var(--sy-fn);}
+#ac-pop .ac-k-class,#ac-pop .ac-k-module,#ac-pop .ac-k-exception{color:var(--sy-cls);}
+#ac-pop .ac-k-variable,#ac-pop .ac-k-param,#ac-pop .ac-k-property,#ac-pop .ac-k-attribute{color:var(--sy-self);}
+#ac-pop .ac-k-constant{color:var(--sy-num);}
+#ac-pop .ac-k-keyword{color:var(--sy-kw);}
+#ac-pop .ac-k-file{color:var(--sy-str);}
+#ac-pop .ac-detail{border-top:1px solid var(--bdr);background:var(--bg);padding:7px 10px;max-height:132px;overflow:hidden;font:12px/1.5 var(--font-ui);}
+#ac-pop .ac-sig{font:calc(var(--ed-fs) - 1px)/1.5 var(--font-code);white-space:pre-wrap;word-break:break-word;color:var(--txt);}
+#ac-pop .ac-sig .ht-kind{color:var(--txt2);}
+#ac-pop .ac-sig .ht-param{color:var(--sy-self);}
+#ac-pop .ac-doc{margin-top:4px;color:var(--txt2);}
+#ac-pop .ac-doc code{font:11.5px var(--font-code);color:var(--txt);}
+@media (pointer:coarse){#ac-pop .ac-row{min-height:34px;}#ac-pop .ac-ic{width:22px;height:22px;}}
+
 /* ── HOVER TOOLTIP (functions / methods / classes) ── */
 #hover-tip{
   position:fixed;left:0;top:0;z-index:3000;display:none;flex-direction:column;
@@ -342,6 +373,12 @@ kbd{
 }
 #asset-bar-title{font:600 10px var(--font-ui);color:var(--txt3);text-transform:uppercase;letter-spacing:.6px;}
 #asset-bar-hint{font:10px var(--font-ui);color:var(--txt3);margin-left:auto;}
+.asset-add{background:var(--bg3);border:1px solid var(--blue);border-radius:5px;color:var(--blue);font:600 11px var(--font-ui);padding:4px 11px;cursor:pointer;white-space:nowrap;transition:background .12s;-webkit-tap-highlight-color:transparent;}
+.asset-add:hover{background:var(--bg4);}
+.asset-add:active{transform:translateY(1px);}
+.asset-add-big{margin:14px 0 4px;font-size:13px;padding:10px 22px;}
+.hint-tap{display:none;}
+@media (pointer:coarse){.hint-drag{display:none;}.hint-tap{display:inline;}.asset-add{min-height:38px;padding:7px 15px;font-size:12px;}#asset-bar{flex-wrap:wrap;padding:6px 12px;}}
 #asset-grid{
   flex:1;overflow-y:auto;padding:12px;
   display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));
@@ -642,8 +679,10 @@ body.no-lnums .set-prev-ln{display:none;}
   <div class="tab-view" id="assets-tab">
     <div id="asset-bar">
       <span id="asset-bar-title">Assets</span>
-      <span id="asset-bar-hint">Drag &amp; drop images, audio, fonts, text or JSON anywhere — click an asset to copy its Python usage</span>
+      <button type="button" id="asset-add" class="asset-add" title="Choose image, audio, font, text, JSON, .py or .bpy files from this device">＋ Add files</button>
+      <span id="asset-bar-hint"><span class="hint-drag">Drag &amp; drop images, audio, fonts, text or JSON anywhere — click an asset to copy its Python usage</span><span class="hint-tap">Tap an asset to copy its Python usage</span></span>
     </div>
+    <input type="file" id="asset-inp" multiple style="display:none"/>
     <div id="asset-grid"></div>
   </div>
 
@@ -858,6 +897,7 @@ class PolyPaint {
   constructor(a) {
     const n = (a.length / 6) | 0;
     this.n = n; this.ox = +a[0]; this.oy = +a[1];
+    this.tex = null; this.tx = 0; this.ty = 0;       // where the renderer put the points (GPU)
     const d = this.data = new Float32Array(n * 8);
     for (let i = 0; i < n; i++) {
       const o = i * 6, al = +a[o + 5];
@@ -907,7 +947,7 @@ const K_COLOR = 0, K_TEX = 1, K_TINT = 2, K_QUAD = 3, K_LIN = 4, K_RAD = 5, K_CO
 const K_TEXN = 8, K_TINTN = 9, K_QUADN = 10;
 // draw_grad_poly(): the colour is blended from the colours of the points of a polygon (mean value coordinates)
 const K_POLYG = 11;
-const PG_W = 2048, PG_MAX = 1024;          // the points live in a one-row float texture: two texels per point
+const PG_W = 2048, PG_H = 128, PG_MAX = 1024;   // the points live in a float texture: two texels per point, every polygon in a place of its own (a row holds PG_W texels)
 
 const VERT_SRC = `#version 300 es
 precision highp float;
@@ -991,14 +1031,14 @@ vec4 compositeAdv(vec4 s, vec4 b) {
 `;
 
 const POLY_GLSL = `
-// colour at p (relative to the first point) from the points in uPG: texel 2i = position, texel 2i+1 = premultiplied colour.
+// colour at p (relative to the first point) from the points in uPG, which start at texel uPO: texel 2i = position, texel 2i+1 = premultiplied colour.
 // Mean value coordinates: w_i = (tan(a_(i-1) / 2) + tan(a_i / 2)) / r_i, where a_i is the angle that edge i makes at p.
 // They are smooth inside any polygon, do not depend on how the polygon is cut into triangles, and continue smoothly past
 // the edges (pixels on the border are shaded from where their centre is).
 vec4 polyColor(vec2 p) {
   int n = uPN;
-  vec2 a0 = texelFetch(uPG, ivec2(0, 0), 0).xy - p;
-  vec4 c0 = texelFetch(uPG, ivec2(1, 0), 0);
+  vec2 a0 = texelFetch(uPG, uPO, 0).xy - p;
+  vec4 c0 = texelFetch(uPG, uPO + ivec2(1, 0), 0);
   float r0 = length(a0);
   if (r0 < 1e-4) return c0;
   vec2 a = a0; vec4 ca = c0; float ra = r0;
@@ -1007,8 +1047,8 @@ vec4 polyColor(vec2 p) {
     vec2 b; vec4 cb; float rb;
     if (i == n) { b = a0; cb = c0; rb = r0; }
     else {
-      b = texelFetch(uPG, ivec2(2 * i, 0), 0).xy - p;
-      cb = texelFetch(uPG, ivec2(2 * i + 1, 0), 0);
+      b = texelFetch(uPG, uPO + ivec2(2 * i, 0), 0).xy - p;
+      cb = texelFetch(uPG, uPO + ivec2(2 * i + 1, 0), 0);
       rb = length(b);
       if (rb < 1e-4) return cb;
     }
@@ -1035,7 +1075,7 @@ function fragSrc(kind, quadTint, adv) {
   s += 'in vec3 vUV;\nin vec4 vCol;\nout vec4 oColor;\n';
   s += 'uniform sampler2D uTex;\nuniform sampler2D uBackdrop;\nuniform sampler2D uRamp;\n';
   s += 'uniform vec2 uTexSize;\nuniform vec4 uClamp;\nuniform vec3 uRow0;\nuniform vec3 uRow1;\nuniform vec4 uG0;\nuniform vec4 uG1;\n';
-  if (kind === K_POLYG) s += 'uniform sampler2D uPG;\nuniform int uPN;\n' + POLY_GLSL;
+  if (kind === K_POLYG) s += 'uniform sampler2D uPG;\nuniform int uPN;\nuniform ivec2 uPO;\n' + POLY_GLSL;
   if (adv) s += '#define BLEND_ID ' + adv + '\n' + BLEND_GLSL;
   s += `
 vec4 rampColor(float t) {
@@ -1062,8 +1102,8 @@ vec4 srcColor() {
     case K_QUAD:      // perspective-mapped image: vUV is an affine function of the screen position (u*q, v*q, q)
       s += `  if (abs(vUV.z) < 1e-9) discard;
   vec2 uv = vUV.xy / vUV.z;
-  if (uv.x < 0.0 || uv.y < 0.0 || uv.x > uTexSize.x - 1.0 || uv.y > uTexSize.y - 1.0) discard;
-  vec4 t = texture(uTex, (uv + 0.5) / uTexSize);
+  if (uv.x < 0.0 || uv.y < 0.0 || uv.x > uTexSize.x || uv.y > uTexSize.y) discard;
+  vec4 t = texture(uTex, uv / uTexSize);
   return vec4(t.rgb * vCol.rgb, t.a) * vCol.a;\n`; break;
     case K_TEXN:      // nearest pixel: the texel index is rounded the same way everywhere (the 0.001 settles a position exactly on the border of two pixels)
       s += `  vec2 tp = floor(vUV.xy / vUV.z * uTexSize + 0.001);
@@ -1218,7 +1258,7 @@ class Renderer {
     canvas.addEventListener('webglcontextlost', e => { e.preventDefault(); this.lost = true; }, false);
     canvas.addEventListener('webglcontextrestored', () => {
       this.epoch++; this.lost = false;
-      this.progs.clear(); this.globalProgs.clear(); this.textCache.clear(); this.textPixels = 0; this.atlasCache.clear(); this.textPages = []; this.pgTex = null; this.pgOwner = null;
+      this.progs.clear(); this.globalProgs.clear(); this.textCache.clear(); this.textPixels = 0; this.atlasCache.clear(); this.textPages = []; this.pgTex = null; this.pgX = 0; this.pgY = 0;
       this.imgTex = new WeakMap(); this.msaaFbo = null; this.msaaW = this.msaaH = 0;
       this.active = null; this.layerT = null; this._blendKey = null; this._progCur = null; this.vbN = 0;
       this.postProgs = new Map();
@@ -1305,7 +1345,7 @@ class Renderer {
     const u = n => gl.getUniformLocation(prog, n);
     const p = {
       prog, uSize: u('uSize'), uTex: u('uTex'), uBackdrop: u('uBackdrop'), uRamp: u('uRamp'), uTexSize: u('uTexSize'),
-      uClamp: u('uClamp'), uRow0: u('uRow0'), uRow1: u('uRow1'), uG0: u('uG0'), uG1: u('uG1'), uPG: u('uPG'), uPN: u('uPN'),
+      uClamp: u('uClamp'), uRow0: u('uRow0'), uRow1: u('uRow1'), uG0: u('uG0'), uG1: u('uG1'), uPG: u('uPG'), uPN: u('uPN'), uPO: u('uPO'),
       cW: -1, cH: -1, cTW: -1, cTH: -1, cC0: NaN, cC1: NaN, cC2: NaN, cC3: NaN        // the values last sent (see _sz, _ts, _cl)
     };
     gl.useProgram(prog);
@@ -1593,6 +1633,7 @@ class Renderer {
       gl.uniform3f(p.uRow0, inv[0], inv[1], inv[2]); gl.uniform3f(p.uRow1, inv[3], inv[4], inv[5]);
       gl.uniform4f(p.uG0, pg.ox, pg.oy, 0, 0);
       gl.uniform1i(p.uPN, pg.n);
+      gl.uniform2i(p.uPO, pg.tx, pg.ty);
     }
     if (J.grad && p.uG0) {
       const inv = J.inv, g = J.grad, row = this._rampRow(g);
@@ -1609,23 +1650,28 @@ class Renderer {
       }
     }
   }
+  // The points of a polygon are written once, into a place nobody has used yet (the places are used in turn), and the draw reads
+  // them from there. No draw ever depends on a place being rewritten between two draws.
   _pgUpload(pg) {
     const gl = this.gl;
     if (!this.pgTex || this.pgEpoch !== this.epoch) {
       this.pgTex = gl.createTexture();
       gl.activeTexture(gl.TEXTURE3);
       gl.bindTexture(gl.TEXTURE_2D, this.pgTex);
-      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, PG_W, 1);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, PG_W, PG_H);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       gl.bindSampler(3, null);
-      this.pgEpoch = this.epoch; this.pgOwner = null;
+      this.pgEpoch = this.epoch; this.pgX = 0; this.pgY = 0;
     }
-    if (this.pgOwner === pg) return;
+    if (pg.tex === this.pgTex) return;                       // already there (the cover pass of a stencil fill)
+    const need = pg.n * 2;
+    if (this.pgX + need > PG_W) { this.pgX = 0; this.pgY = (this.pgY + 1) % PG_H; }
     gl.activeTexture(gl.TEXTURE3);
     gl.bindTexture(gl.TEXTURE_2D, this.pgTex);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, pg.n * 2, 1, gl.RGBA, gl.FLOAT, pg.data);
-    this.pgOwner = pg;
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, this.pgX, this.pgY, need, 1, gl.RGBA, gl.FLOAT, pg.data);
+    pg.tex = this.pgTex; pg.tx = this.pgX; pg.ty = this.pgY;
+    this.pgX += need;
   }
   _rampRow(g) {
     if (g._row >= 0 && g._epoch === this.epoch && this.rampOwner[g._row] === g && !g._dirty) return g._row;
@@ -3138,9 +3184,10 @@ function createCanvas2D(canvas) {
           for (let ch = 0; ch < 4; ch++) out[no + ch] = (tint && ch < 3) ? D[ni + ch] * tint[ch] / 255 : D[ni + ch];
           continue;
         }
-        if (u < 0 || v < 0 || u > sw - 1 || v > sh - 1) continue;
-        const x0 = Math.floor(u), y0 = Math.floor(v), x1 = Math.min(x0 + 1, sw - 1), y1 = Math.min(y0 + 1, sh - 1);
-        const tx = u - x0, ty = v - y0, c0 = 1 - tx, c1 = tx, d0 = 1 - ty, d1 = ty;
+        if (u < 0 || v < 0 || u > sw || v > sh) continue;                 // the quad covers the image from its outer edges, like draw_image
+        const fu = Math.min(sw - 1, Math.max(0, u - 0.5)), fv = Math.min(sh - 1, Math.max(0, v - 0.5));      // bilinear between pixel centres; the border pixels repeat outwards
+        const x0 = Math.floor(fu), y0 = Math.floor(fv), x1 = Math.min(x0 + 1, sw - 1), y1 = Math.min(y0 + 1, sh - 1);
+        const tx = fu - x0, ty = fv - y0, c0 = 1 - tx, c1 = tx, d0 = 1 - ty, d1 = ty;
         const i00 = (y0 * sw + x0) * 4, i10 = (y0 * sw + x1) * 4, i01 = (y1 * sw + x0) * 4, i11 = (y1 * sw + x1) * 4;
         const o = (py * w + px) * 4;
         for (let ch = 0; ch < 4; ch++) {
@@ -3156,7 +3203,6 @@ function createCanvas2D(canvas) {
     g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.drawImage(qc, minX, minY); g.restore();
   }
   // draw_grad_poly() on the Canvas 2D fallback: the colours are computed for every pixel under the polygon and drawn through the polygon as a clip
-  let polyCanvas = null;
   function polyCPU(g, a) {
     const n = (a.length / 6) | 0;
     if (n < 3 || n > PG_MAX) return;
@@ -3184,7 +3230,7 @@ function createCanvas2D(canvas) {
         out[o] = Math.round(255 * c[0] / al); out[o + 1] = Math.round(255 * c[1] / al); out[o + 2] = Math.round(255 * c[2] / al); out[o + 3] = Math.round(255 * al);
       }
     }
-    if (!polyCanvas) polyCanvas = document.createElement('canvas');
+    const polyCanvas = document.createElement('canvas');          // one for every polygon: a drawing that is still waiting never sees the next polygon's colours
     polyCanvas.width = w; polyCanvas.height = h;
     polyCanvas.getContext('2d').putImageData(new ImageData(out, w, h), 0, 0);
     g.save();
@@ -3311,7 +3357,7 @@ const _SET_DEFAULTS = Object.freeze({
   tabSize: 4, fontCode: 'plex', fontCodeCustom: '', fontSize: 13, lineHeight: 1.6, fontUi: 'plex',
   lineNumbers: true, syntax: true,
   autoBrackets: true, autoQuotes: true, autoIndent: true,
-  tooltips: true, tooltipDelay: 300,
+  autocomplete: true, tooltips: true, tooltipDelay: 300,
   conFontSize: 12, clearConsole: true,
   fullscreen: false,        // lasts until the page is closed: a browser only starts fullscreen after a click, so this is never saved
 });
@@ -3449,7 +3495,7 @@ function _bpValidateSettings(raw) {
   const d = _SET_DEFAULTS, o = Object.assign({}, d, { colors: {} });
   if (!raw || typeof raw !== 'object') return o;
   const bool = k => { if (typeof raw[k] === 'boolean') o[k] = raw[k]; };
-  ['lineNumbers', 'syntax', 'autoBrackets', 'autoQuotes', 'autoIndent', 'tooltips', 'clearConsole'].forEach(bool);
+  ['lineNumbers', 'syntax', 'autoBrackets', 'autoQuotes', 'autoIndent', 'autocomplete', 'tooltips', 'clearConsole'].forEach(bool);
   if (typeof raw.theme === 'string' && _SET_THEMES.some(t => t.id === raw.theme)) o.theme = raw.theme;
   if (raw.colors && typeof raw.colors === 'object') for (const k of Object.keys(raw.colors)) if (_SET_COLOR_KEYS.has(k) && _setHexParse(raw.colors[k])) o.colors[k] = _setHex(_setHexParse(raw.colors[k]));
   o.tabSize = Math.round(_setClampNum(raw.tabSize, 1, 8, d.tabSize));
@@ -3789,7 +3835,7 @@ function _addAsset(file) {
     const isText = !isFont && (isLib || (file.type || '').startsWith('text/') || file.type === 'application/json' || lowerName.endsWith('.txt') || lowerName.endsWith('.json'));
     reader.onload = ev => {
       const raw = ev.target.result;
-      const type = isLib ? 'lib' : isFont ? 'font' : (lowerName.endsWith('.json') || file.type === 'application/json' ? 'json' : isText ? 'text' : (file.type || '').startsWith('image/') ? 'image' : 'audio');
+      const type = isLib ? 'lib' : isFont ? 'font' : (lowerName.endsWith('.json') || file.type === 'application/json' ? 'json' : isText ? 'text' : (file.type || '').startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg|avif|ico)$/.test(lowerName) ? 'image' : 'audio');
       const rec = (type === 'text' || type === 'json' || type === 'lib') ? { url: String(raw), type, text: String(raw) } : { url: String(raw), type };
       _bpAssets.set(file.name, rec);
       try { localStorage.setItem('bpa:' + file.name, JSON.stringify(rec)); } catch(e) {}
@@ -3823,7 +3869,7 @@ function _renderAssets() {
   const grid = document.getElementById('asset-grid');
   if (!grid) return;
   if (_bpAssets.size === 0) {
-    grid.innerHTML = '<div id="asset-empty">No assets yet.<br><br>Drag &amp; drop image, audio, font, text or JSON files<br>anywhere on the page to add them.<br><br>Then use <code>Image("name.png")</code>, <code>Sound("name.mp3")</code>, <code>draw_text(..., font="name.ttf")</code>, <code>read_txt("name.txt")</code>, or <code>read_json("name.json")</code> in your code.<br><br>You can also import .py or .bpy files, just drag &amp; drop them on the page and use <code>include("name.bpy")</code><br>to run whatever code is in the file. All variables and functions are kept.</div>';
+    grid.innerHTML = '<div id="asset-empty">No assets yet.<br><button type="button" class="asset-add asset-add-big" data-add>＋ Add files</button><br><span class="hint-drag">Or drag &amp; drop image, audio, font, text or JSON files<br>anywhere on the page.</span><span class="hint-tap">Choose image, audio, font, text or JSON files from this device.</span><br><br>Then use <code>Image("name.png")</code>, <code>Sound("name.mp3")</code>, <code>draw_text(..., font="name.ttf")</code>, <code>read_txt("name.txt")</code>, or <code>read_json("name.json")</code> in your code.<br><br>You can also import .py or .bpy files: add them the same way (or drag &amp; drop them on the page on a computer) and use <code>include("name.bpy")</code><br>to run whatever code is in the file. All variables and functions are kept.</div>';
     return;
   }
   grid.innerHTML = '';
@@ -3868,20 +3914,42 @@ function _renderAssets() {
   }
 }
 
+// Which files the Assets tab takes: by type, or by name when the device gives no type (a phone often doesn't).
+function _assetFileOK(f) {
+  const t = (f.type || '').toLowerCase(), n = (f.name || '').toLowerCase();
+  return t.startsWith('image/') || t.startsWith('audio/') || t.startsWith('text/') || t.startsWith('font/') || t === 'application/json'
+    || /\.(txt|json|bpy|py|ttf|otf|woff2?|png|jpe?g|gif|webp|bmp|svg|avif|ico|mp3|wav|ogg|oga|opus|m4a|aac|flac|weba)$/.test(n);
+}
+async function _bpAddAssetFiles(list) {
+  const all = Array.from(list || []), files = all.filter(_assetFileOK), skipped = all.length - files.length;
+  for (const f of files) await _addAsset(f);
+  if (files.length > 0) { switchTab('assets'); window.appendConsole('Added ' + files.length + ' asset(s).', 'ok'); }
+  if (skipped > 0) window.appendConsole('Skipped ' + skipped + ' file(s): only images, audio, fonts, text, JSON, .py and .bpy files can be added.', 'warn');
+}
+// the "Add files" button: the same as dropping the files on the page
+function _bpPickAssets() {
+  const inp = document.getElementById('asset-inp');
+  if (!inp) return;
+  inp.value = '';                                    // choosing the same file twice must still fire "change"
+  inp.click();
+}
 document.addEventListener('dragover', e => { e.preventDefault(); document.body.classList.add('dropping'); });
 document.addEventListener('dragleave', e => { if (!e.relatedTarget || !document.body.contains(e.relatedTarget)) document.body.classList.remove('dropping'); });
 document.addEventListener('drop', async e => {
   e.preventDefault();
   document.body.classList.remove('dropping');
-  const files = Array.from(e.dataTransfer.files).filter(f => { const t = (f.type || '').toLowerCase(); const n = (f.name || '').toLowerCase(); return t.startsWith('image/') || t.startsWith('audio/') || t.startsWith('text/') || t.startsWith('font/') || t === 'application/json' || n.endsWith('.txt') || n.endsWith('.json') || n.endsWith('.bpy') || n.endsWith('.py') || /\.(ttf|otf|woff2?)$/.test(n); });
-  for (const f of files) await _addAsset(f);
-  if (files.length > 0) { switchTab('assets'); window.appendConsole('Added ' + files.length + ' asset(s).', 'ok'); }
+  await _bpAddAssetFiles(e.dataTransfer.files);
 });
+document.getElementById('asset-add').addEventListener('click', _bpPickAssets);
+document.getElementById('asset-grid').addEventListener('click', e => { if (e.target.closest && e.target.closest('[data-add]')) _bpPickAssets(); });
+document.getElementById('asset-inp').addEventListener('change', async e => { const f = Array.from(e.target.files || []); e.target.value = ''; await _bpAddAssetFiles(f); });
 
 // ══════════════════════════════════════════════════════════════
 //  Tab switch
 // ══════════════════════════════════════════════════════════════
+function _acHide() { try { _AC.hide(); } catch (e) {} }
 function switchTab(name) {
+  _acHide();
   document.querySelectorAll('.tab-view').forEach(e => e.classList.remove('active'));
   document.querySelectorAll('.tab-btn').forEach(e => e.classList.remove('active'));
   document.getElementById(name + '-tab').classList.add('active');
@@ -4206,6 +4274,7 @@ function _commitActiveCode() {
 }
 
 function _loadActiveIntoEditor() {
+  _acHide();
   const t = _getTab(_activeTab) || _tabs[0];
   $ed.value = t.code;
   syncEditor();
@@ -4468,6 +4537,7 @@ $ed.addEventListener('keydown', e => {
   const ss  = $ed.selectionStart;
   const se  = $ed.selectionEnd;
   const sel = ss !== se;
+  if (_AC.key(e)) return;                         // autocomplete: arrows, Tab, Enter and Esc while its list is open
 
   // ── Ctrl+Enter → run
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
@@ -7017,7 +7087,7 @@ def include(name):
         include("mylib.bpy")
         include("utils.py")
 
-    The file must be in the Assets tab first (drag & drop or the Import button).
+    The file must be in the Assets tab first (use the Add files button, or drag & drop).
     """
     import ast as _ast
     info = _asset_info(str(name))
@@ -9762,7 +9832,7 @@ def _frame():
 //  Everything written in the tabs is read from the source itself; BowPy's API and Python's built-ins are looked
 //  up in the Python runtime (_hv, defined by _HV_PY) and completed with the wiki pages.
 // ══════════════════════════════════════════════════════════════
-const _HV_PY = "import inspect as _hv_inspect, builtins as _hv_builtins, importlib as _hv_importlib, json as _hv_json, re as _hv_re\n\n# What the editor may show tooltips for: everything the BowPy prelude put in the program's namespace (captured now,\n# before any user code runs, so a program that re-defines a name cannot change the documentation of the original),\n# plus Python's built-ins.\n_HV_OBJS = {_k: _v for _k, _v in list(globals().items()) if not _k.startswith('_')}\n_HV_TYPES = ['str', 'list', 'dict', 'set', 'tuple', 'int', 'float', 'bool', 'bytes', 'frozenset', 'bytearray', 'complex', 'range']\n_HV_BLOCK = {'this', 'antigravity', 'turtle', 'tkinter', 'idlelib', 'webbrowser', 'pydoc', 'pdb', 'code', 'curses', 'readline', 'site', 'sitecustomize', 'usercustomize'}\n_HV_CACHE = {}\n\n\ndef _hv_clean_default(text):\n    text = _hv_re.sub(r\"<function (\\w+) at 0x[0-9a-fA-F]+>\", r\"\\1\", text)\n    text = _hv_re.sub(r\"<built-in function (\\w+)>\", r\"\\1\", text)\n    text = _hv_re.sub(r\"<class '([\\w.]+)'>\", r\"\\1\", text)\n    text = _hv_re.sub(r\"<([\\w.]+) object at 0x[0-9a-fA-F]+>\", r\"\\1(...)\", text)\n    return text\n\n\ndef _hv_root(root, imports):\n    \"\"\"The object a dotted name starts from: an import of the program, a BowPy name or a built-in.\"\"\"\n    spec = imports.get(root)\n    if spec:\n        modname, _, attr = spec.partition(':')\n        if modname.split('.')[0] in _HV_BLOCK:\n            return None\n        mod = _hv_importlib.import_module(modname)\n        return getattr(mod, attr) if attr else mod\n    if root in _HV_OBJS:\n        return _HV_OBJS[root]\n    if hasattr(_hv_builtins, root):\n        return getattr(_hv_builtins, root)\n    return None\n\n\ndef _hv_member(obj, name):\n    \"\"\"(raw attribute, owner class or None) without running descriptors.\"\"\"\n    if _hv_inspect.isclass(obj):\n        for k in obj.__mro__:\n            if name in k.__dict__:\n                return k.__dict__[name], k\n        return None, None\n    try:\n        return _hv_inspect.getattr_static(obj, name), None\n    except AttributeError:\n        return None, None\n\n\ndef _hv_lead_sigs(doc, names):\n    \"\"\"Overloads that built-ins write as the first lines of their docstring, e.g. 'max(iterable, *[, key=func]) -> value'\n    or 'D.update([E, ]**F) -> None.  Update D from ...' (the receiver prefix is dropped).\"\"\"\n    lines = doc.split('\\n')\n    sigs = []\n    i = 0\n    while i < len(lines):\n        ln = lines[i].strip()\n        m = None\n        for n in names:\n            m = _hv_re.match(r'^(?:\\w+\\.)?' + _hv_re.escape(n) + r'(\\([^)]*\\)(?:\\s*->\\s*[^.\\s]+(?: object)?)?)\\.?\\s*(.*)$', ln)\n            if m:\n                sigs.append(n + m[1])\n                if m[2]:                     # a description that starts on the same line stays in the doc\n                    lines[i] = m[2]\n                    i -= 1\n                break\n        if not m:\n            break\n        i += 1\n    rest = '\\n'.join(lines[i:]).strip('\\n')\n    return sigs, rest\n\n\ndef _hv_describe(raw, name, owner):\n    kind = None\n    deco = None\n    obj = raw\n    if isinstance(raw, staticmethod):\n        deco, obj = 'static', raw.__func__\n    elif isinstance(raw, classmethod):\n        deco, obj = 'class', raw.__func__\n    elif isinstance(raw, property):\n        kind, obj = 'property', raw.fget\n    if kind is None:\n        if _hv_inspect.ismodule(raw):\n            kind = 'module'\n        elif _hv_inspect.isclass(raw):\n            kind = 'class'\n        elif callable(obj):\n            kind = 'method' if owner is not None else 'function'\n        else:\n            return None\n    if kind == 'module':\n        name = getattr(raw, '__name__', name)\n    out = {'kind': kind, 'name': name, 'owner': owner.__name__ if owner is not None else None, 'deco': deco,\n           'sig': None, 'sigs': None, 'doc': None, 'origin': None}\n\n    # documentation (not inherited for classes)\n    if kind == 'class' or kind == 'module':\n        rawdoc = getattr(raw, '__doc__', None)\n    else:\n        rawdoc = getattr(obj, '__doc__', None)\n    doc = _hv_inspect.cleandoc(rawdoc) if isinstance(rawdoc, str) and rawdoc.strip() else None\n\n    # signature\n    if kind in ('function', 'method', 'class'):\n        target = obj\n        sig = None\n        try:\n            sig = _hv_inspect.signature(target)\n        except (ValueError, TypeError):\n            sig = None\n        if sig is not None:\n            params = list(sig.parameters.values())\n            if kind == 'method' and deco != 'static' and params:\n                params = params[1:]\n            try:\n                text = str(sig.replace(parameters=params))\n            except Exception:\n                text = str(sig)\n            out['sig'] = _hv_clean_default(text)\n        elif doc:\n            sigs, rest = _hv_lead_sigs(doc, [name, owner.__name__ if owner is not None else name])\n            if sigs:\n                out['sigs'] = sigs\n                doc = rest or None\n        if out['sig'] is None and not out['sigs']:\n            out['sig'] = '(...)'\n        elif doc and kind == 'class' and out['sig'] is not None:\n            # drop a leading 'Name(...)' line that only repeats the signature\n            first = doc.split('\\n', 1)[0].strip()\n            if first.startswith(name + '(') and '\\n' in doc:\n                doc = doc.split('\\n', 1)[1].strip('\\n') or None\n    out['doc'] = doc\n\n    # where it comes from\n    modname = getattr(obj if kind != 'module' else raw, '__module__', None)\n    if kind == 'module':\n        modname = getattr(raw, '__name__', name)\n        out['origin'] = modname\n    else:\n        if modname is None and owner is not None:\n            modname = getattr(owner, '__module__', None)\n        if modname == '__main__':\n            out['origin'] = 'BowPy'\n        elif modname == 'builtins':\n            out['origin'] = 'built-in'\n        else:\n            out['origin'] = modname\n    return out\n\n\ndef _hv_lookup(req):\n    imports = req.get('imports') or {}\n    obj = _hv_root(req['root'], imports)\n    if obj is None:\n        return None\n    name = req['root']\n    owner = None\n    if (req.get('chain') or req.get('name')) and type(obj).__name__ == '_RandomFn':\n        obj = globals().get('_rnd', obj)\n    for step in req.get('chain') or []:\n        raw, own = _hv_member(obj, step)\n        if raw is None:\n            return None\n        obj, name, owner = raw, step, own\n    member = req.get('name')\n    if member:\n        raw, own = _hv_member(obj, member)\n        if raw is None:\n            return None\n        return _hv_describe(raw, member, own)          # found on a class: a method; found on a module: a function\n    return _hv_describe(obj, name, owner)\n\n\ndef _hv_candidates(member):\n    \"\"\"Names of the known classes (BowPy, then built-in types) that have an attribute called `member`.\"\"\"\n    names = []\n    for k, v in _HV_OBJS.items():\n        if _hv_inspect.isclass(v) and getattr(v, '__module__', '') == '__main__' and hasattr(v, member):\n            names.append(k)\n    for t in _HV_TYPES:\n        if hasattr(getattr(_hv_builtins, t), member):\n            names.append(t)\n    return names\n\n\ndef _hv(req_json):\n    \"\"\"Entry point from the editor: a JSON request in, a JSON answer ('' when there is nothing to show) out.\"\"\"\n    hit = _HV_CACHE.get(req_json)\n    if hit is not None:\n        return hit\n    try:\n        req = _hv_json.loads(req_json)\n        if 'cand' in req:\n            out = _hv_candidates(req['cand'])\n        else:\n            out = _hv_lookup(req)\n        res = _hv_json.dumps(out) if out else ''\n    except Exception:\n        res = ''\n    if len(_HV_CACHE) > 4000:\n        _HV_CACHE.clear()\n    _HV_CACHE[req_json] = res\n    return res\n";
+const _HV_PY = "import inspect as _hv_inspect, builtins as _hv_builtins, importlib as _hv_importlib, json as _hv_json, re as _hv_re\n\n# What the editor may show tooltips for: everything the BowPy prelude put in the program's namespace (captured now,\n# before any user code runs, so a program that re-defines a name cannot change the documentation of the original),\n# plus Python's built-ins.\n_HV_OBJS = {_k: _v for _k, _v in list(globals().items()) if not _k.startswith('_')}\n_HV_TYPES = ['str', 'list', 'dict', 'set', 'tuple', 'int', 'float', 'bool', 'bytes', 'frozenset', 'bytearray', 'complex', 'range']\n_HV_BLOCK = {'this', 'antigravity', 'turtle', 'tkinter', 'idlelib', 'webbrowser', 'pydoc', 'pdb', 'code', 'curses', 'readline', 'site', 'sitecustomize', 'usercustomize'}\n_HV_CACHE = {}\n\n\ndef _hv_clean_default(text):\n    text = _hv_re.sub(r\"<function (\\w+) at 0x[0-9a-fA-F]+>\", r\"\\1\", text)\n    text = _hv_re.sub(r\"<built-in function (\\w+)>\", r\"\\1\", text)\n    text = _hv_re.sub(r\"<class '([\\w.]+)'>\", r\"\\1\", text)\n    text = _hv_re.sub(r\"<([\\w.]+) object at 0x[0-9a-fA-F]+>\", r\"\\1(...)\", text)\n    return text\n\n\ndef _hv_root(root, imports):\n    \"\"\"The object a dotted name starts from: an import of the program, a BowPy name or a built-in.\"\"\"\n    spec = imports.get(root)\n    if spec:\n        modname, _, attr = spec.partition(':')\n        if modname.split('.')[0] in _HV_BLOCK:\n            return None\n        mod = _hv_importlib.import_module(modname)\n        return getattr(mod, attr) if attr else mod\n    if root in _HV_OBJS:\n        return _HV_OBJS[root]\n    if hasattr(_hv_builtins, root):\n        return getattr(_hv_builtins, root)\n    return None\n\n\ndef _hv_member(obj, name):\n    \"\"\"(raw attribute, owner class or None) without running descriptors.\"\"\"\n    if _hv_inspect.isclass(obj):\n        for k in obj.__mro__:\n            if name in k.__dict__:\n                return k.__dict__[name], k\n        return None, None\n    try:\n        return _hv_inspect.getattr_static(obj, name), None\n    except AttributeError:\n        return None, None\n\n\ndef _hv_lead_sigs(doc, names):\n    \"\"\"Overloads that built-ins write as the first lines of their docstring, e.g. 'max(iterable, *[, key=func]) -> value'\n    or 'D.update([E, ]**F) -> None.  Update D from ...' (the receiver prefix is dropped).\"\"\"\n    lines = doc.split('\\n')\n    sigs = []\n    i = 0\n    while i < len(lines):\n        ln = lines[i].strip()\n        m = None\n        for n in names:\n            m = _hv_re.match(r'^(?:\\w+\\.)?' + _hv_re.escape(n) + r'(\\([^)]*\\)(?:\\s*->\\s*[^.\\s]+(?: object)?)?)\\.?\\s*(.*)$', ln)\n            if m:\n                sigs.append(n + m[1])\n                if m[2]:                     # a description that starts on the same line stays in the doc\n                    lines[i] = m[2]\n                    i -= 1\n                break\n        if not m:\n            break\n        i += 1\n    rest = '\\n'.join(lines[i:]).strip('\\n')\n    return sigs, rest\n\n\ndef _hv_describe(raw, name, owner):\n    kind = None\n    deco = None\n    obj = raw\n    if isinstance(raw, staticmethod):\n        deco, obj = 'static', raw.__func__\n    elif isinstance(raw, classmethod):\n        deco, obj = 'class', raw.__func__\n    elif isinstance(raw, property):\n        kind, obj = 'property', raw.fget\n    if kind is None:\n        if _hv_inspect.ismodule(raw):\n            kind = 'module'\n        elif _hv_inspect.isclass(raw):\n            kind = 'class'\n        elif callable(obj):\n            kind = 'method' if owner is not None else 'function'\n        else:\n            return None\n    if kind == 'module':\n        name = getattr(raw, '__name__', name)\n    out = {'kind': kind, 'name': name, 'owner': owner.__name__ if owner is not None else None, 'deco': deco,\n           'sig': None, 'sigs': None, 'doc': None, 'origin': None}\n\n    # documentation (not inherited for classes)\n    if kind == 'class' or kind == 'module':\n        rawdoc = getattr(raw, '__doc__', None)\n    else:\n        rawdoc = getattr(obj, '__doc__', None)\n    doc = _hv_inspect.cleandoc(rawdoc) if isinstance(rawdoc, str) and rawdoc.strip() else None\n\n    # signature\n    if kind in ('function', 'method', 'class'):\n        target = obj\n        sig = None\n        try:\n            sig = _hv_inspect.signature(target)\n        except (ValueError, TypeError):\n            sig = None\n        if sig is not None:\n            params = list(sig.parameters.values())\n            if kind == 'method' and deco != 'static' and params:\n                params = params[1:]\n            try:\n                text = str(sig.replace(parameters=params))\n            except Exception:\n                text = str(sig)\n            out['sig'] = _hv_clean_default(text)\n        elif doc:\n            sigs, rest = _hv_lead_sigs(doc, [name, owner.__name__ if owner is not None else name])\n            if sigs:\n                out['sigs'] = sigs\n                doc = rest or None\n        if out['sig'] is None and not out['sigs']:\n            out['sig'] = '(...)'\n        elif doc and kind == 'class' and out['sig'] is not None:\n            # drop a leading 'Name(...)' line that only repeats the signature\n            first = doc.split('\\n', 1)[0].strip()\n            if first.startswith(name + '(') and '\\n' in doc:\n                doc = doc.split('\\n', 1)[1].strip('\\n') or None\n    out['doc'] = doc\n\n    # where it comes from\n    modname = getattr(obj if kind != 'module' else raw, '__module__', None)\n    if kind == 'module':\n        modname = getattr(raw, '__name__', name)\n        out['origin'] = modname\n    else:\n        if modname is None and owner is not None:\n            modname = getattr(owner, '__module__', None)\n        if modname == '__main__':\n            out['origin'] = 'BowPy'\n        elif modname == 'builtins':\n            out['origin'] = 'built-in'\n        else:\n            out['origin'] = modname\n    return out\n\n\ndef _hv_lookup(req):\n    imports = req.get('imports') or {}\n    obj = _hv_root(req['root'], imports)\n    if obj is None:\n        return None\n    name = req['root']\n    owner = None\n    if (req.get('chain') or req.get('name')) and type(obj).__name__ == '_RandomFn':\n        obj = globals().get('_rnd', obj)\n    for step in req.get('chain') or []:\n        raw, own = _hv_member(obj, step)\n        if raw is None:\n            return None\n        obj, name, owner = raw, step, own\n    member = req.get('name')\n    if member:\n        raw, own = _hv_member(obj, member)\n        if raw is None:\n            return None\n        return _hv_describe(raw, member, own)          # found on a class: a method; found on a module: a function\n    return _hv_describe(obj, name, owner)\n\n\ndef _hv_candidates(member):\n    \"\"\"Names of the known classes (BowPy, then built-in types) that have an attribute called `member`.\"\"\"\n    names = []\n    for k, v in _HV_OBJS.items():\n        if _hv_inspect.isclass(v) and getattr(v, '__module__', '') == '__main__' and hasattr(v, member):\n            names.append(k)\n    for t in _HV_TYPES:\n        if hasattr(getattr(_hv_builtins, t), member):\n            names.append(t)\n    return names\n\n\ndef _hv_kind(raw, in_class=False):\n    if isinstance(raw, property):\n        return 'property'\n    if isinstance(raw, (staticmethod, classmethod)):\n        return 'method'\n    if _hv_inspect.ismodule(raw):\n        return 'module'\n    if _hv_inspect.isclass(raw):\n        return 'exception' if issubclass(raw, BaseException) else 'class'\n    if callable(raw):\n        return 'method' if in_class else 'function'\n    return 'attribute' if in_class else 'constant'\n\n\ndef _hv_names():\n    \"\"\"Every name a program can use without importing it: BowPy's API first, then Python's built-ins. [name, kind, origin]\"\"\"\n    out = []\n    seen = set(('js', 'sys', 'copyright', 'credits', 'license'))        # plumbing and banner text: nothing a game program is meant to reach for\n    for k, v in _HV_OBJS.items():\n        if k in seen:\n            continue\n        seen.add(k)\n        out.append([k, _hv_kind(v), 'BowPy'])\n    for k in dir(_hv_builtins):\n        if k.startswith('_') or k in seen:\n            continue\n        out.append([k, _hv_kind(getattr(_hv_builtins, k)), 'built-in'])\n    return out\n\n\ndef _hv_init_attrs(cls):\n    \"\"\"Names that a class's __init__ stores on the instance (self.x = ...), read from its bytecode.\"\"\"\n    out = []\n    try:\n        import dis as _hv_dis\n        for k in getattr(cls, '__mro__', ())[:8]:\n            if k is object:\n                continue\n            code = getattr(k.__dict__.get('__init__'), '__code__', None)\n            if code is None:\n                continue\n            for ins in _hv_dis.get_instructions(code):\n                if ins.opname == 'STORE_ATTR' and isinstance(ins.argval, str) and ins.argval not in out:\n                    out.append(ins.argval)\n    except Exception:\n        pass\n    return out\n\n\ndef _hv_members(req):\n    \"\"\"The attributes of a class, instance or module that the program can reach with a dot. [name, kind, owner class]\"\"\"\n    obj = _hv_root(req['root'], req.get('imports') or {})\n    if obj is None:\n        return None\n    if type(obj).__name__ == '_RandomFn':\n        obj = globals().get('_rnd', obj)\n    for step in req.get('chain') or []:\n        raw, own = _hv_member(obj, step)\n        if raw is None:\n            return None\n        obj = raw\n    priv = bool(req.get('priv'))\n    is_mod = _hv_inspect.ismodule(obj)\n    extra = _hv_init_attrs(obj) if _hv_inspect.isclass(obj) else []\n    names = getattr(obj, '__all__', None) if is_mod else None\n    names = list(names) if names else dir(obj)\n    out = []\n    for n in names:\n        if not isinstance(n, str) or (n.startswith('_') and not priv):\n            continue\n        raw, own = _hv_member(obj, n)\n        if raw is None:\n            continue\n        out.append([n, _hv_kind(raw, not is_mod), own.__name__ if own is not None else None])\n        if len(out) >= 800:\n            break\n    have = set(r[0] for r in out)\n    for n in extra:\n        if n not in have and (priv or not n.startswith('_')):\n            out.append([n, 'attribute', obj.__name__])\n    return out\n\n\ndef _hv_modules():\n    \"\"\"Names the program can import (the ones this Python really has).\"\"\"\n    import sys as _hv_sys\n    import importlib.util as _hv_util\n    out = []\n    for n in sorted(getattr(_hv_sys, 'stdlib_module_names', ())):\n        if n.startswith('_') or n in _HV_BLOCK:\n            continue\n        try:\n            if _hv_util.find_spec(n) is None:\n                continue\n        except Exception:\n            continue\n        out.append(n)\n    return out\n\n\ndef _hv(req_json):\n    \"\"\"Entry point from the editor: a JSON request in, a JSON answer ('' when there is nothing to show) out.\"\"\"\n    hit = _HV_CACHE.get(req_json)\n    if hit is not None:\n        return hit\n    try:\n        req = _hv_json.loads(req_json)\n        if 'cand' in req:\n            out = _hv_candidates(req['cand'])\n        elif 'names' in req:\n            out = _hv_names()\n        elif 'members' in req:\n            out = _hv_members(dict(req, root=req['members']))\n        elif 'modules' in req:\n            out = _hv_modules()\n        else:\n            out = _hv_lookup(req)\n        res = _hv_json.dumps(out) if out else ''\n    except Exception:\n        res = ''\n    if len(_HV_CACHE) > 4000:\n        _HV_CACHE.clear()\n    _HV_CACHE[req_json] = res\n    return res\n";
 let _hvReady = false;
 
 const _HV = (() => {
@@ -10818,8 +10888,691 @@ const _HV = (() => {
   }
   init();
 
+  // ───────────────────────── autocomplete ─────────────────────────
+  // complete(pos, {manual}) -> { from, to, items, mode } | null          (the popup in _AC shows what comes back)
+  // An item: { label, kind, prio, detail?, insert?, note?, sig?, lazy?, hits? }   `lazy()` gives the info shown in the detail panel.
+  // Where the suggestions come from: the program itself (names it binds, its classes and their attributes, its other tabs),
+  // BowPy's API and Python's built-ins (looked up in the runtime, see _HV_PY), the wiki for argument documentation.
+  const AC_MAX = 120;
+  const AC_KEYWORDS = [...KEYWORDS_CTRL].filter(k => !['case', 'match', 'async', 'await'].includes(k));
+  const AC_BLEND = ['source-over', 'source-in', 'source-out', 'source-atop', 'destination-over', 'destination-in', 'destination-out', 'destination-atop',
+    'lighter', 'copy', 'xor', 'multiply', 'screen', 'overlay', 'darken', 'lighten', 'color-dodge', 'color-burn', 'hard-light', 'soft-light',
+    'difference', 'exclusion', 'hue', 'saturation', 'color', 'luminosity'];
+  const AC_ALIGN = ['left', 'center', 'right'];
+  const AC_BASELINE = ['top', 'hanging', 'middle', 'alphabetic', 'ideographic', 'bottom'];
+  const AC_FAMILIES = ['monospace', 'sans-serif', 'serif', 'cursive', 'fantasy', 'system-ui'];
+  const AC_ASSET_CALLS = { Image: 'image', Sound: 'audio', read_json: 'json', read_txt: 'text', read_txt_lines: 'text' };
+
+  let acNames = null, acMods = null;
+  function acRuntimeNames() {
+    if (acNames) return acNames;
+    const r = py({ names: 1 });
+    if (Array.isArray(r) && r.length) { acNames = r.map(x => ({ n: x[0], k: x[1], o: x[2] })); return acNames; }
+    // the Python runtime is not ready yet: the wiki knows BowPy's functions and classes, the editor knows Python's built-ins
+    const out = [];
+    try {
+      if (!wikiIdx) wikiIdx = buildWikiIndex();
+      for (const n of wikiIdx.fn.keys()) out.push({ n, k: 'function', o: 'BowPy' });
+      for (const n of wikiIdx.cls.keys()) out.push({ n, k: 'class', o: 'BowPy' });
+    } catch (e) {}
+    for (const n of BUILTINS) if (!n.startsWith('_')) out.push({ n, k: 'function', o: 'built-in' });
+    for (const n of KEYWORDS_TYPE) out.push({ n, k: /Error|Exception/.test(n) ? 'exception' : 'class', o: 'built-in' });
+    return out;
+  }
+  function acModuleNames(ctx) {
+    if (!acMods) { const r = py({ modules: 1 }); if (Array.isArray(r) && r.length) acMods = r; }
+    const out = [], seen = new Set();
+    for (const t of ctx.tabs) if (!t.main && t.name !== ctx.tab.name && !seen.has(t.base)) { seen.add(t.base); out.push({ label: t.base, kind: 'module', prio: 1, detail: t.name }); }
+    for (const [name, rec] of _bpAssets) if (rec.type === 'lib') { const b = name.replace(/\.(bpy|py)$/i, ''); if (!seen.has(b)) { seen.add(b); out.push({ label: b, kind: 'module', prio: 1, detail: name }); } }
+    for (const n of (acMods || ['math', 'random', 'time', 'json', 'itertools', 'collections', 'functools', 're', 'string', 'dataclasses', 'typing', 'enum', 'copy', 'heapq', 'bisect', 'statistics', 'fractions', 'decimal'])) if (!seen.has(n)) { seen.add(n); out.push({ label: n, kind: 'module', prio: 2, detail: 'Python' }); }
+    return out;
+  }
+
+  // ── positions and text ──
+  function acOffsetToPos(sc, off) {
+    let rem = off;
+    for (let li = 0; li < sc.lines.length; li++) {
+      const n = sc.lines[li].length;
+      if (rem <= n) return { li, col: rem };
+      rem -= n + 1;
+    }
+    const last = sc.lines.length - 1;
+    return { li: last, col: sc.lines[last].length };
+  }
+  function acPosToOffset(sc, li, col) { let o = 0; for (let k = 0; k < li; k++) o += sc.lines[k].length + 1; return o + col; }
+  // line k up to `end`, strings and comments blanked (same length, so columns stay valid)
+  function acLineCode(sc, k, end) {
+    const L = sc.lines[k], n = Math.min(end == null ? L.length : end, L.length);
+    let s = L.slice(0, n);
+    for (const r of sc.marks[k]) {
+      const a = r[0], b = Math.min(r[1], n);
+      if (b > a) s = s.slice(0, a) + (r[2] === 'c' ? ' ' : '\u0001').repeat(b - a) + s.slice(b);
+    }
+    return s;
+  }
+  function acText(sc, k0, k1, end) { const out = []; for (let k = k0; k <= k1; k++) out.push(acLineCode(sc, k, k === k1 ? end : undefined)); return out.join('\n'); }
+  // the string or comment the caret is in (null: plain code)
+  function acStringAt(sc, li, col) {
+    const L = sc.lines[li], marks = sc.marks[li];
+    for (let i = 0; i < marks.length; i++) {
+      const r = marks[i];
+      if (r[2] === 'c') { if (col > r[0]) return { type: 'c' }; continue; }
+      const a = r[0];
+      if (sc.inTri[li] && i === 0) {                           // the end of a triple-quoted string that began on an earlier line
+        const open = li + 1 < sc.lines.length && sc.inTri[li + 1];
+        if (col <= r[1] - (open ? 0 : 3)) return { type: 'tri' };
+        continue;
+      }
+      const q = L[a];
+      if (L[a + 1] === q && L[a + 2] === q) {                  // opening of a triple-quoted string
+        const close = L.indexOf(q + q + q, a + 3);
+        if (col >= a + 3 && (close === -1 || col <= close)) return { type: 'tri' };
+        continue;
+      }
+      const closed = r[1] - 1 > a && L[r[1] - 1] === q;
+      if (col > a && col <= (closed ? r[1] - 1 : r[1])) return { type: 's', a, q };
+    }
+    return null;
+  }
+
+  // ── ranking ──
+  // how well `prefix` fits `label`: a tier (5 exact, 4 starts with it, 3 a word inside starts with it, 2 appears inside, 1 the letters
+  // come in order at word starts: drc -> draw_circle) and a finer score inside the tier
+  function acMatch(label, prefix) {
+    if (!prefix) return { tier: 3, score: 1, hits: null };
+    const l = label.replace(/=$/, ''), p = prefix;
+    if (l === p) return { tier: 5, score: 1000, hits: [0, p.length] };
+    if (l.startsWith(p)) return { tier: 4, score: 1000 - Math.min(l.length - p.length, 100) * 0.5, hits: [0, p.length] };
+    const ll = l.toLowerCase(), pl = p.toLowerCase();
+    if (ll.startsWith(pl)) return { tier: 4, score: 900 - Math.min(l.length - p.length, 100) * 0.5, hits: [0, p.length] };
+    const bnd = (i) => i === 0 || !/[a-z0-9]/i.test(l[i - 1]) || (l[i - 1] === l[i - 1].toLowerCase() && l[i] !== l[i].toLowerCase() && l[i] === l[i].toUpperCase());
+    if (p.length >= 2) {
+      let at = ll.indexOf(pl), best = null;
+      while (at > 0) {
+        if (bnd(at)) { best = at; break; }
+        if (!best && p.length >= 3) best = -at;                              // inside a word: only for 3+ letters
+        at = ll.indexOf(pl, at + 1);
+      }
+      if (best !== null) return best > 0 ? { tier: 3, score: 600 - best * 2, hits: [best, best + p.length] } : { tier: 2, score: 400 + best * 2, hits: [-best, -best + p.length] };
+    }
+    if (p.length >= 3 && l.length <= 48) {                                   // each letter is next to the one before it or starts a word
+      const hits = [];
+      const go = (j, i, prev) => {
+        if (j === pl.length) return true;
+        for (let k = i; k < ll.length; k++) {
+          if (ll[k] === pl[j] && (k === prev + 1 || bnd(k))) { hits.push(k); if (go(j + 1, k + 1, k)) return true; hits.pop(); }
+        }
+        return false;
+      };
+      if (go(0, 0, -1)) return { tier: 1, score: 200 - (hits[hits.length - 1] - hits[0]), hits: { list: hits.slice() } };
+    }
+    return null;
+  }
+  function acRank(cands, prefix) {
+    const out = [];
+    for (const c of cands) {
+      const m = acMatch(c.label, prefix);
+      if (!m) continue;
+      c.tier = m.tier; c.score = m.score; c.hits = m.hits; out.push(c);
+    }
+    const byName = (a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' });
+    const inOrder = (a, b) => a.ord != null && b.ord != null ? a.ord - b.ord : byName(a, b);     // fixed lists (left, center, right) keep their own order
+    out.sort(prefix
+      ? (a, b) => b.tier - a.tier || a.prio - b.prio || b.score - a.score || a.label.length - b.label.length || inOrder(a, b)
+      : (a, b) => a.prio - b.prio || inOrder(a, b));
+    return out.slice(0, AC_MAX);
+  }
+
+  // ── what the program binds ──
+  function acOwners(P) {
+    if (P.acOwner) return P.acOwner;
+    const owner = new Array(P.lines.length).fill(null), hdr = new Set();
+    const syms = P.syms.slice().sort((a, b) => a.line - b.line);
+    for (const s of syms) {
+      for (let k = s.line; k <= s.hdrEnd; k++) hdr.add(k);
+      for (let k = s.hdrEnd + 1; k <= s.end && k < owner.length; k++) owner[k] = s;      // inner symbols come later and overwrite
+    }
+    P.acOwner = owner; P.acHdr = hdr;
+    return owner;
+  }
+  // targets of the '=' signs of a (blanked) statement: everything before the last top-level '='
+  function acAssignTargets(c) {
+    const cuts = []; let depth = 0;
+    for (let i = 0; i < c.length; i++) {
+      const ch = c[i];
+      if (ch === '(' || ch === '[' || ch === '{') depth++;
+      else if (ch === ')' || ch === ']' || ch === '}') depth--;
+      else if (ch === '=' && depth === 0) {
+        if (c[i + 1] === '=') { i++; continue; }
+        if ('!<>+-*/%&|^@:'.includes(c[i - 1] || '')) continue;
+        cuts.push(i);
+      }
+    }
+    const segs = []; let last = 0;
+    for (const i of cuts) { segs.push(c.slice(last, i)); last = i + 1; }
+    return segs;
+  }
+  function acBindings(P) {
+    if (P.acBinds) return P.acBinds;
+    const owner = acOwners(P), out = [];
+    for (let k = 0; k < P.lines.length; k++) {
+      if (P.acHdr.has(k)) continue;
+      const c = acLineCode(P.sc, k);
+      if (!/\S/.test(c)) continue;
+      const scope = owner[k] || null;
+      const add = (name, kind) => { if (name && !KEYWORDS_CTRL.has(name)) out.push({ name, kind, line: k, scope }); };
+      let m;
+      if ((m = /^\s*import\s+(.+)$/.exec(c))) {
+        for (const part of m[1].split(',')) { const mm = /^\s*([\w.]+)(?:\s+as\s+(\w+))?\s*$/.exec(part); if (mm) add(mm[2] || mm[1].split('.')[0], 'module'); }
+        continue;
+      }
+      if ((m = /^\s*from\s+[\w.]+\s+import\s+\(?\s*(.+?)\)?\s*$/.exec(c))) {
+        for (const part of m[1].split(',')) { const mm = /^\s*(\w+)(?:\s+as\s+(\w+))?\s*$/.exec(part); if (mm) add(mm[2] || mm[1], 'variable'); }
+        continue;
+      }
+      for (const f of c.matchAll(/\bfor\s+([\w\s,()*]+?)\s+in\b/g)) for (const t of f[1].match(/[A-Za-z_]\w*/g) || []) add(t, 'variable');
+      if (/^\s*(?:with|except)\b/.test(c)) for (const a of c.matchAll(/\bas\s+([A-Za-z_]\w*)/g)) add(a[1], 'variable');
+      for (const w of c.matchAll(/\(\s*([A-Za-z_]\w*)\s*:=/g)) add(w[1], 'variable');
+      for (const tgt of acAssignTargets(c)) {
+        const t = tgt.split(':')[0];
+        if (/^[\s\w,()*]+$/.test(t)) for (const n of t.match(/[A-Za-z_]\w*/g) || []) add(n, 'variable');
+      }
+    }
+    P.acBinds = out;
+    return out;
+  }
+  // the symbols whose names are visible at the line: the module, the enclosing functions and, right inside a class body, the class
+  function acScopes(P, li) {
+    const set = new Set([null]);
+    let s = enclosing(P, li), first = true;
+    while (s) {
+      if (!s.isClass || first) set.add(s);
+      first = false;
+      s = enclosing(P, s.line);
+    }
+    return set;
+  }
+  function acLocals(ctx, li) {
+    const P = ctx.P, scopes = acScopes(P, li), items = new Map();
+    const put = (name, kind, extra) => { if (!items.has(name)) items.set(name, Object.assign({ label: name, kind, prio: 1 }, extra)); };
+    for (const s of scopes) {
+      if (!s || s.isClass) continue;
+      for (const p of splitTop(s.params)) { const m = /^\*{0,2}([A-Za-z_]\w*)/.exec(p); if (m) put(m[1], 'param', { detail: 'parameter' }); }
+    }
+    for (const s of P.syms) {
+      if (s.parent && !(scopes.has(s.parent) && !s.parent.isClass)) continue;
+      put(s.name, s.isClass ? 'class' : 'function', { detail: s.isClass ? 'class' : userSig(s, false), lazy: () => userInfo(s, ctx.tab, false) });
+    }
+    for (const b of acBindings(P)) if (scopes.has(b.scope)) put(b.name, b.kind, { detail: b.kind === 'module' ? 'module' : 'variable' });
+    return [...items.values()];
+  }
+
+  // ── members after a dot ──
+  const acIsPrivate = (n, priv) => !priv && n.startsWith('_');
+  function acPyMembers(t, priv) {
+    const imp = t.imp || {}, chain = t.chain || [];
+    const r = py({ members: t.root, chain, imports: imp, priv: !!priv });
+    if (!Array.isArray(r)) return [];
+    return r.map(x => ({ label: x[0], kind: x[1], prio: 2, detail: x[2] || (t.root.length < 14 ? t.root : ''),
+      lazy: () => addWiki(pyInfo({ root: t.root, chain, name: x[0], imports: imp })) }));
+  }
+  function acUserMembers(cls, tab, ctx, seen, priv) {
+    if (seen.has(cls)) return [];
+    seen.add(cls);
+    const P = parse(tab.code), out = [], names = new Set();
+    const add = (item) => { if (!names.has(item.label) && !acIsPrivate(item.label, priv)) { names.add(item.label); out.push(item); } };
+    for (const s of P.syms) if (s.parent === cls) {
+      add({ label: s.name, kind: s.isClass ? 'class' : s.kind === 'property' ? 'property' : 'method', prio: 1, detail: cls.name, lazy: () => userInfo(s, tab, false) });
+    }
+    let body = -1;
+    for (let k = cls.hdrEnd + 1; k <= cls.end && k < P.lines.length; k++) {
+      const c = acLineCode(P.sc, k);
+      if (!/\S/.test(c)) continue;
+      if (body < 0) body = indentOf(c);
+      const targets = acAssignTargets(c);
+      if (!targets.length) continue;
+      const lhs = targets.join('=');
+      for (const m of lhs.matchAll(/\bself\.([A-Za-z_]\w*)/g)) add({ label: m[1], kind: 'attribute', prio: 1, detail: cls.name });
+      if (indentOf(c) === body) { const t = targets[0].split(':')[0]; if (/^[\s\w,]+$/.test(t)) for (const n of t.match(/[A-Za-z_]\w*/g) || []) add({ label: n, kind: 'attribute', prio: 1, detail: cls.name }); }
+    }
+    for (const b of splitTop(cls.params)) {                       // inherited members
+      const bn = b.replace(/^.*=/, '').trim();
+      if (!/^[A-Za-z_][\w.]*$/.test(bn)) continue;
+      const sub = { ...ctx, P, tab, line: cls.line }, segs = bn.split('.');
+      let t = typeOfName(segs[0], sub, 1, true);
+      for (let i = 1; i < segs.length && t.t !== 'unknown'; i++) t = classMember(t, segs[i], ctx);
+      if (t.t === 'userclass') for (const it of acUserMembers(t.cls, t.tab, ctx, seen, priv)) add(it);
+      else if (t.t === 'py') for (const it of acPyMembers(t, priv)) add(it);
+    }
+    return out;
+  }
+  function acTabMembers(tab, priv) {
+    const P = parse(tab.code), out = [], names = new Set();
+    for (const s of P.syms) if (!s.parent && !names.has(s.name) && !acIsPrivate(s.name, priv)) {
+      names.add(s.name);
+      out.push({ label: s.name, kind: s.isClass ? 'class' : 'function', prio: 1, detail: tab.name, lazy: () => userInfo(s, tab, false) });
+    }
+    for (let k = 0; k < P.lines.length; k++) {
+      if (P.sc.inTri[k]) continue;
+      const m = /^([A-Za-z_]\w*)\s*(?::[^=]+?)?\s*=(?!=)/.exec(acLineCode(P.sc, k));
+      if (m && !names.has(m[1]) && !acIsPrivate(m[1], priv)) { names.add(m[1]); out.push({ label: m[1], kind: 'variable', prio: 1, detail: tab.name }); }
+    }
+    return out;
+  }
+  // receiver of unknown type: the words that follow a dot somewhere in the program
+  function acWordMembers(ctx, priv) {
+    const count = new Map();
+    for (const tab of ctx.tabs) {
+      const P = parse(tab.code);
+      for (let k = 0; k < P.lines.length; k++) {
+        const c = acLineCode(P.sc, k);
+        if (c.indexOf('.') === -1) continue;
+        for (const m of c.matchAll(/\.\s*([A-Za-z_]\w*)/g)) if (!acIsPrivate(m[1], priv)) count.set(m[1], (count.get(m[1]) || 0) + 1);
+      }
+    }
+    return [...count.keys()].map(n => ({ label: n, kind: 'attribute', prio: 3, detail: 'in your code' }));
+  }
+  function acReceiverType(ctx, li, L, dotIdx) {
+    const rec = receiverBefore(L, dotIdx);
+    let t = UNK;
+    if (!rec) return t;
+    if (rec.lit === 'str') return { t: 'py', root: 'str', chain: [] };
+    if (rec.lit) return typeOfLiteral(rec.text) || UNK;
+    if (rec.segs && rec.segs.length) {
+      const c = { ...ctx, line: li }, first = rec.segs[0];
+      t = first.index ? UNK : typeOfName(first.id, c, 0);
+      if (first.call) t = callReturn(t, null, c, 1, first.id);
+      for (let i = 1; i < rec.segs.length && t.t !== 'unknown'; i++) {
+        const sg = rec.segs[i];
+        if (sg.index) { t = UNK; break; }
+        t = sg.call ? callReturn(t, sg.id, c, 1, null) : attrType(t, sg.id, c, 1);
+      }
+    }
+    return t;
+  }
+
+  // ── calls: argument names, and the strings an argument takes ──
+  // the innermost unclosed '(' of (blanked) text: { at, name, nameStart, args } — null when the caret is not directly inside a call
+  function acOpenCall(text) {
+    let depth = 0;
+    for (let i = text.length - 1; i >= 0; i--) {
+      const c = text[i];
+      if (c === ')' || c === ']' || c === '}') depth++;
+      else if (c === '(' || c === '[' || c === '{') {
+        if (depth > 0) { depth--; continue; }
+        if (c !== '(') return null;
+        const pre = text.slice(0, i), m = /([A-Za-z_]\w*)\s*$/.exec(pre);
+        if (!m || KEYWORDS_CTRL.has(m[1]) || /\b(?:def|class)\s+\w+\s*$/.test(pre)) return { at: i, name: null, nameStart: -1, args: text.slice(i + 1) };
+        return { at: i, name: m[1], nameStart: m.index, args: text.slice(i + 1) };
+      }
+    }
+    return null;
+  }
+  const acArgSplit = (args) => {            // top-level pieces of an argument list (the last one is the argument being written)
+    const out = []; let depth = 0, cur = '';
+    for (const ch of args) {
+      if (ch === '(' || ch === '[' || ch === '{') depth++;
+      else if (ch === ')' || ch === ']' || ch === '}') depth--;
+      if (ch === ',' && depth === 0) { out.push(cur); cur = ''; continue; }
+      cur += ch;
+    }
+    out.push(cur);
+    return out;
+  };
+  const acLocate = (li0, text, idx) => { const before = text.slice(0, idx), nl = before.lastIndexOf('\n'); return { li: li0 + (before.split('\n').length - 1), col: idx - (nl + 1) }; };
+  // names of the parameters of a signature text "(a, b=1, *, c)": { name, def, pos }, pos = index when it can be given by position
+  function acSigParams(sig) {
+    if (!sig || sig[0] !== '(') return [];
+    let depth = 0, close = -1;
+    for (let i = 0; i < sig.length; i++) { const c = sig[i]; if (c === '(' || c === '[' || c === '{') depth++; else if (c === ')' || c === ']' || c === '}') { depth--; if (depth === 0) { close = i; break; } } }
+    if (close < 0) return [];
+    const out = []; let kwOnly = false, n = 0;
+    for (const p of splitTop(sig.slice(1, close))) {
+      if (p === '/') { for (const o of out) o.posOnly = true; continue; }
+      if (p === '*' || /^\*[A-Za-z_]/.test(p)) { kwOnly = true; continue; }
+      if (p.startsWith('**')) continue;
+      const m = /^([A-Za-z_]\w*)\s*(?::\s*([^=]+?))?\s*(?:=\s*(.*))?$/.exec(p);
+      if (!m) continue;
+      out.push({ name: m[1], def: m[3] == null ? null : m[3], posOnly: false, pos: kwOnly ? -1 : n });
+      if (!kwOnly) n++;
+    }
+    return out;
+  }
+  function acKwargItems(ctx, call, li0, text, prefix) {
+    if (!call || !call.name) return [];
+    const parts = acArgSplit(call.args);
+    if (parts[parts.length - 1].trim() !== '') return [];                 // not at the start of an argument
+    let info = null;
+    try { const at = acLocate(li0, text, call.nameStart); info = resolve(at.li, at.col, at.col + call.name.length); } catch (e) { info = null; }
+    if (!info || !info.sig || info.sigs) return [];
+    const params = acSigParams(info.sig);
+    if (!params.length) return [];
+    const used = new Set(), done = parts.slice(0, -1);
+    let npos = 0;
+    for (const p of done) { const m = /^\s*([A-Za-z_]\w*)\s*=(?!=)/.exec(p); if (m) used.add(m[1]); else if (p.trim()) npos++; }
+    const wiki = new Map((info.params || []).map(p => [p.name.replace(/^\*+/, ''), p]));
+    const out = [];
+    for (const p of params) {
+      if (p.posOnly || used.has(p.name) || (p.pos >= 0 && p.pos < npos)) continue;
+      const w = wiki.get(p.name);
+      out.push({ label: p.name + '=', kind: 'param', prio: 0, detail: p.def != null ? '= ' + (p.def.length > 18 ? p.def.slice(0, 17) + '…' : p.def) : 'required',
+        note: w ? (w.type ? w.type + ' — ' : '') + w.desc : '', sig: p.name + (p.def != null ? '=' + p.def : '') });
+    }
+    return out;
+  }
+  function acStringOptions(sc, li, a) {
+    const text = acText(sc, Math.max(0, li - 12), li, a);
+    const kw = /(?:^|[(,\s])([A-Za-z_]\w*)\s*=\s*$/.exec(text);
+    const call = acOpenCall(text);
+    const assets = (type) => { const out = []; for (const [name, rec] of _bpAssets) if (!type || rec.type === type) out.push({ label: name, kind: 'file', prio: 1, ord: out.length, detail: rec.type, note: rec.type + ' asset' }); return out; };
+    const plain = (list, what) => list.map((v, i) => ({ label: v, kind: 'constant', prio: 1, ord: 100 + i, detail: what }));
+    const argIndex = call ? acArgSplit(call.args).length - 1 : -1;
+    const name = call && call.name;
+    if (kw) {
+      if (kw[1] === 'font') return assets('font').concat(plain(AC_FAMILIES, 'font family'));
+      if (kw[1] === 'align') return plain(AC_ALIGN, 'align');
+      if (kw[1] === 'baseline') return plain(AC_BASELINE, 'baseline');
+      if (kw[1] === 'mode' && name === 'set_blend') return plain(AC_BLEND, 'blend mode');
+      return null;
+    }
+    if (name === 'set_blend' && argIndex === 0) return plain(AC_BLEND, 'blend mode');
+    if (name === 'draw_text' && argIndex === 5) return assets('font').concat(plain(AC_FAMILIES, 'font family'));
+    if (name && AC_ASSET_CALLS[name] && argIndex === 0) return assets(AC_ASSET_CALLS[name]);
+    return null;
+  }
+
+  // ── the entry point ──
+  function complete(pos, opts) {
+    const manual = !!(opts && opts.manual);
+    const code = $ed.value, sc = scan(code);
+    const { li, col } = acOffsetToPos(sc, pos);
+    const L = sc.lines[li];
+    const st = acStringAt(sc, li, col);
+    if (st && (st.type === 'c' || st.type === 'tri')) return null;
+    let ctx0 = null;
+    const getCtx = () => ctx0 || (ctx0 = makeCtx(li));
+    if (st) {                                                       // inside a string: file names and fixed choices only
+      const typed = L.slice(st.a + 1, col);
+      if (/[\\]/.test(typed)) return null;
+      const list = acStringOptions(sc, li, st.a);
+      if (!list || !list.length) return null;
+      const from = acPosToOffset(sc, li, st.a + 1);
+      return { from, to: pos, mode: 'string', items: acRank(list, typed) };
+    }
+    const before = L.slice(0, col);
+    const m = /([A-Za-z_]\w*)$/.exec(before);
+    const prefix = m ? m[1] : '';
+    const start = col - prefix.length;
+    if (start > 0 && /\w/.test(before[start - 1])) return null;     // 12ab: part of a number
+    const rest = /^\w*/.exec(L.slice(col))[0];
+    if (rest && !manual) return null;                               // in the middle of a word
+    const from = acPosToOffset(sc, li, start), to = pos + rest.length;
+    const head = before.slice(0, start);
+    const importLine = /^\s*(?:import|from)\s/.test(head);
+    if (!manual && prefix.length < 2 && !head.endsWith('.') && !importLine) return null;
+    const ctx = getCtx();
+    const res = (mode, items) => items && items.length ? { from, to, mode, items: acRank(items, prefix) } : null;
+    let mm;
+    // import lines
+    if ((mm = /^\s*from\s+([\w.]+)\s+import\s+\(?\s*(?:\w+(?:\s+as\s+\w+)?\s*,\s*)*$/.exec(head))) {
+      if (!prefix && !manual) return null;
+      const tabMod = ctx.tabs.find(t => !t.main && t.base === mm[1]);
+      const segs = mm[1].split('.');
+      return res('import', tabMod ? acTabMembers(tabMod, prefix.startsWith('_')) : acPyMembers({ root: segs[0], chain: segs.slice(1), imp: { [segs[0]]: segs[0] } }, prefix.startsWith('_')));
+    }
+    if (/^\s*import\s+(?:[\w.]+(?:\s+as\s+\w+)?\s*,\s*)*$/.test(head) || /^\s*from\s+$/.test(head)) {
+      if (!prefix && !manual) return null;
+      return res('module', acModuleNames(ctx));
+    }
+    // places where a new name is being written
+    if (/^\s*(?:async\s+)?(?:def|class)\s+$/.test(head) || /\bas\s+$/.test(head)) return null;
+    if (/\blambda\s+(?:[\w*]+\s*(?:=[^,:]*)?,\s*)*$/.test(head)) return null;
+    const fm = /\bfor\s+([\w\s,()*]*)$/.exec(head);
+    if (fm && !/\bin\b/.test(fm[1])) return null;
+    const dh = /^\s*(?:async\s+)?def\s+\w+\s*\((.*)$/.exec(head);
+    if (dh) {
+      let depth = 0; for (const ch of dh[1]) { if ('([{'.includes(ch)) depth++; else if (')]}'.includes(ch)) depth--; }
+      if (depth === 0 && /[(,*]\s*$/.test(head)) return null;
+    }
+    // after a dot
+    if (head.endsWith('.') && !head.endsWith('..')) {
+      if (/(^|[^\w.])\d[\d_]*$/.test(head.slice(0, -1))) return null;      // 1.5
+      const t = acReceiverType(ctx, li, L, head.length - 1), priv = prefix.startsWith('_');
+      let items;
+      if (t.t === 'user' || t.t === 'userclass') items = acUserMembers(t.cls, t.tab, ctx, new Set(), priv);
+      else if (t.t === 'tabmod') items = acTabMembers(t.tab, priv);
+      else if (t.t === 'py') items = acPyMembers(t, priv);
+      else items = acWordMembers(ctx, priv);
+      return res('member', items);
+    }
+    // a plain name
+    if (prefix.length < 2 && !manual) return null;
+    const k0 = Math.max(0, li - 12), text = acText(sc, k0, li, start);
+    const items = [];
+    const call = acOpenCall(text);
+    if (call) for (const it of acKwargItems(ctx, call, k0, text, prefix)) items.push(it);
+    const seen = new Set(items.map(i => i.label));
+    for (const it of acLocals(ctx, li)) if (!seen.has(it.label)) { seen.add(it.label); items.push(it); }
+    for (const t of ctx.tabs) if (!t.main && t.name !== ctx.tab.name && !seen.has(t.base)) { seen.add(t.base); items.push({ label: t.base, kind: 'module', prio: 1, detail: 'tab ' + t.name }); }     // every other code tab is a module you can use by name
+    for (const r of acRuntimeNames()) {
+      if (seen.has(r.n) || (r.n.startsWith('_') && !prefix.startsWith('_'))) continue;
+      seen.add(r.n);
+      items.push({ label: r.n, kind: r.k, prio: r.k === 'exception' ? 3.5 : 2, detail: r.o === 'BowPy' ? 'BowPy' : 'built-in',
+        lazy: () => addWiki(pyInfo({ root: r.n, imports: {} })) });
+    }
+    for (const k of AC_KEYWORDS) if (!seen.has(k)) items.push({ label: k, kind: 'keyword', prio: 5, detail: 'keyword' });
+    return res('name', items);
+  }
+  // what the popup shows next to the selected item: { sig, doc } as HTML
+  function completeDetail(it) {
+    if (!it) return null;
+    if (it.info === undefined) { try { it.info = it.lazy ? it.lazy() : null; } catch (e) { it.info = null; } }
+    const info = it.info;
+    let sig = '', doc = '';
+    if (info) {
+      try { sig = signatureHtml(info); } catch (e) { sig = ''; }
+      const text = info.doc || '';
+      if (text) {
+        const para = text.replace(/\r/g, '').split(/\n\s*\n/)[0].replace(/\s+/g, ' ').trim();
+        doc = inlineMd(para.length > 280 ? para.slice(0, 277).trimEnd() + '…' : para);
+      }
+    }
+    if (!sig && it.sig) sig = highlightLine(it.sig).replace(/\n$/, '');
+    if (!doc && it.note) doc = inlineMd(it.note.length > 280 ? it.note.slice(0, 277).trimEnd() + '…' : it.note);
+    return sig || doc ? { sig, doc } : null;
+  }
+  function caretXY(pos) {
+    const sc = scan($ed.value), p = acOffsetToPos(sc, pos), m = metrics(), r = $ed.getBoundingClientRect(), L = sc.lines[p.li] || '';
+    return { x: r.left + m.pl + visualOf(L, p.col, m.tab) * m.cw - $ed.scrollLeft, top: r.top + m.pt + p.li * m.lh - $ed.scrollTop, lh: m.lh };
+  }
+
   return { setEnabled(v) { enabled = !!v; if (!enabled) hide(); }, setDelay(ms) { DELAY = Math.max(0, +ms || 0); }, resetMetrics() { met = null; },
-    py, resolve, scan, parse, hide, show, run, hitTest, wordAtPos, metrics, render, info: (li, col) => { const w = wordAtPos(li, col); return w ? resolve(w.li, w.s, w.e) : null; } };
+    py, resolve, scan, parse, hide, show, run, hitTest, wordAtPos, metrics, render, complete, detail: completeDetail, caretXY, info: (li, col) => { const w = wordAtPos(li, col); return w ? resolve(w.li, w.s, w.e) : null; } };
+})();
+
+// ══════════════════════════════════════════════════════════════
+//  Autocomplete: the popup under the text cursor (the suggestions come from _HV.complete)
+//  Typing opens it, ↑ ↓ choose, Tab or Enter accept, Esc closes, Ctrl+Space opens it by hand. Switched on and off in Settings.
+// ══════════════════════════════════════════════════════════════
+const _AC = (() => {
+  'use strict';
+  const BADGE = { function: 'ƒ', method: 'ƒ', class: 'C', exception: 'E', variable: 'v', param: 'p', property: 'p', attribute: 'a',
+    constant: 'c', module: 'M', keyword: 'k', file: '▤' };
+  let enabled = true, shown = false, items = [], sel = 0, sess = null, box = null, list = null, detail = null;
+  let timer = 0, pendingKind = null, accepting = false;
+
+  function ensure() {
+    if (box) return;
+    box = document.createElement('div');
+    box.id = 'ac-pop';
+    box.setAttribute('role', 'listbox');
+    list = document.createElement('div'); list.className = 'ac-list';
+    detail = document.createElement('div'); detail.className = 'ac-detail';
+    box.appendChild(list); box.appendChild(detail);
+    box.addEventListener('mousedown', e => e.preventDefault());           // the editor keeps the focus (and a phone its keyboard)
+    list.addEventListener('click', e => { const r = e.target.closest('.ac-row'); if (r) accept(+r.dataset.i); });
+    document.body.appendChild(box);
+  }
+  function labelHtml(it) {
+    const t = it.label, h = it.hits;
+    if (!h) return esc(t);
+    const on = new Set();
+    if (Array.isArray(h)) for (let i = h[0]; i < h[1]; i++) on.add(i); else for (const i of h.list) on.add(i);
+    let out = '', open = false;
+    for (let i = 0; i < t.length; i++) {
+      const b = on.has(i);
+      if (b && !open) { out += '<b>'; open = true; } else if (!b && open) { out += '</b>'; open = false; }
+      out += esc(t[i]);
+    }
+    return out + (open ? '</b>' : '');
+  }
+  function renderList() {
+    let h = '';
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      h += '<div class="ac-row' + (i === sel ? ' sel' : '') + '" role="option" data-i="' + i + '"><span class="ac-ic ac-k-' + it.kind + '">' + (BADGE[it.kind] || '·') + '</span>'
+        + '<span class="ac-lb">' + labelHtml(it) + '</span>' + (it.detail ? '<span class="ac-dt">' + esc(String(it.detail)) + '</span>' : '') + '</div>';
+    }
+    list.innerHTML = h;
+  }
+  function renderDetail() {
+    const d = items[sel] ? _HV.detail(items[sel]) : null;
+    detail.innerHTML = d ? (d.sig ? '<div class="ac-sig">' + d.sig + '</div>' : '') + (d.doc ? '<div class="ac-doc">' + d.doc + '</div>' : '') : '';
+    detail.style.display = d ? '' : 'none';
+  }
+  function place() {
+    if (!shown || !sess) return;
+    const p = _HV.caretXY(sess.from), er = $ed.getBoundingClientRect();
+    if (p.top + p.lh < er.top || p.top > er.bottom) { hide(); return; }       // the line was scrolled out of sight
+    const vv = window.visualViewport;
+    const vx = vv ? vv.offsetLeft : 0, vy = vv ? vv.offsetTop : 0, vw = vv ? vv.width : innerWidth, vh = vv ? vv.height : innerHeight;
+    list.style.maxHeight = Math.max(72, Math.min(216, Math.round(vh * 0.34))) + 'px';
+    box.style.left = '0px'; box.style.top = '0px';
+    const bw = box.offsetWidth, bh = box.offsetHeight;
+    const x = Math.max(vx + 6, Math.min(p.x - 30, vx + vw - bw - 6));
+    let y = p.top + p.lh + 3;
+    if (y + bh > vy + vh - 6) {                                                // no room below: above the line, else as high as fits
+      const above = p.top - bh - 3;
+      y = above >= vy + 6 ? above : Math.max(vy + 6, vy + vh - bh - 6);
+    }
+    box.style.left = Math.round(x) + 'px'; box.style.top = Math.round(y) + 'px';
+  }
+  function show() {
+    ensure();
+    renderList(); renderDetail();
+    box.classList.add('show');
+    shown = true;
+    place();
+  }
+  function hide() {
+    clearTimeout(timer); pendingKind = null;
+    if (!shown) return;
+    shown = false; items = []; sess = null;
+    if (box) box.classList.remove('show');
+  }
+  function select(i) {
+    if (!items.length) return;
+    sel = (i + items.length) % items.length;
+    const rows = list.children;
+    for (let k = 0; k < rows.length; k++) rows[k].classList.toggle('sel', k === sel);
+    const r = rows[sel];
+    if (r) { const t = r.offsetTop, b = t + r.offsetHeight; if (t < list.scrollTop) list.scrollTop = t - 3; else if (b > list.scrollTop + list.clientHeight) list.scrollTop = b - list.clientHeight + 3; }
+    renderDetail();
+    place();
+  }
+  // the selected suggestion is exactly what is already typed: Enter and Tab then do their normal job
+  function exact() {
+    const it = items[sel];
+    return !!it && it.insert == null && $ed.value.slice(sess.from, sess.to) === it.label;
+  }
+  function accept(i) {
+    const it = items[i];
+    if (!it || !sess) return;
+    const { from, to } = sess, text = it.insert != null ? it.insert : it.label;
+    hide();
+    accepting = true;
+    try {
+      $ed.focus();
+      $ed.setSelectionRange(from, to);
+      let ok = false;
+      try { ok = document.execCommand('insertText', false, text); } catch (e) { ok = false; }     // keeps Ctrl+Z working
+      if (!ok || $ed.value.slice(from, from + text.length) !== text) {
+        $ed.value = $ed.value.slice(0, from) + text + $ed.value.slice($ed.selectionEnd > to ? $ed.selectionEnd : to);
+        $ed.setSelectionRange(from + text.length, from + text.length);
+        $ed.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    } finally { accepting = false; }
+  }
+  function update(kind) {
+    if (!enabled || !$ed.offsetParent || document.activeElement !== $ed) { hide(); return; }
+    if ($ed.selectionStart !== $ed.selectionEnd) { hide(); return; }
+    if (kind === 'delete' && !shown) return;
+    let res = null;
+    try { res = _HV.complete($ed.selectionStart, { manual: kind === 'manual' }); } catch (err) { if (window.console) console.warn('[autocomplete]', err); }
+    if (!res || !res.items.length) { hide(); return; }
+    const typed = $ed.value.slice(res.from, res.to);
+    if (res.items.length === 1 && res.items[0].insert == null && res.items[0].label === typed) { hide(); return; }       // nothing left to complete
+    const keep = shown && items[sel] ? items[sel].label : null;
+    items = res.items;
+    sess = { from: res.from, to: res.to, mode: res.mode };
+    sel = keep ? Math.max(0, items.findIndex(x => x.label === keep)) : 0;
+    show();
+    const row = list.children[sel];
+    if (row) list.scrollTop = Math.max(0, row.offsetTop - 3);
+  }
+  function schedule(kind) {
+    if (kind === 'manual' || pendingKind !== 'manual') pendingKind = kind;
+    clearTimeout(timer);
+    timer = setTimeout(() => { const k = pendingKind; pendingKind = null; update(k); }, 0);
+  }
+  // called first by the editor's keydown handler; true = the key was used here
+  function key(e) {
+    if (!enabled || e.isComposing) return false;
+    const plain = !e.ctrlKey && !e.metaKey && !e.altKey;
+    if (!shown) {
+      if (e.ctrlKey && !e.altKey && !e.metaKey && (e.code === 'Space' || e.key === ' ')) { e.preventDefault(); update('manual'); return true; }
+      if (e.key.length === 1 && plain) schedule('type');                       // also covers the characters the editor inserts itself (quotes, brackets)
+      return false;
+    }
+    switch (e.key) {
+      case 'ArrowDown': e.preventDefault(); select(sel + 1); return true;
+      case 'ArrowUp': e.preventDefault(); select(sel - 1); return true;
+      case 'PageDown': e.preventDefault(); select(Math.min(items.length - 1, sel + 8)); return true;
+      case 'PageUp': e.preventDefault(); select(Math.max(0, sel - 8)); return true;
+      case 'Tab': case 'Enter':
+        if (!plain || e.shiftKey || exact()) { hide(); return false; }
+        e.preventDefault(); accept(sel); return true;
+      case 'Escape': e.preventDefault(); e.stopPropagation(); hide(); return true;
+      case 'ArrowLeft': case 'ArrowRight': case 'Home': case 'End': hide(); return false;
+      case 'Shift': case 'Control': case 'Alt': case 'Meta': case 'CapsLock': return false;
+    }
+    if (e.ctrlKey && !e.altKey && !e.metaKey && (e.code === 'Space' || e.key === ' ')) { e.preventDefault(); update('manual'); return true; }
+    if (e.key.length === 1 && plain) {
+      if (/[\w.]/.test(e.key)) schedule('type'); else { hide(); schedule('type'); }       // punctuation ends the word (a quote may start a string)
+    }
+    return false;
+  }
+  function init() {
+    $ed.addEventListener('input', e => {
+      if (accepting || !enabled) return;
+      const t = e.inputType || '';
+      if (t === 'insertText' || t === 'insertCompositionText') schedule('type');
+      else if (t.startsWith('deleteContent')) schedule('delete');
+      else hide();
+    });
+    $ed.addEventListener('blur', hide);
+    $ed.addEventListener('pointerdown', hide);
+    $ed.addEventListener('scroll', place);
+    window.addEventListener('resize', place);
+    if (window.visualViewport) { window.visualViewport.addEventListener('resize', place); window.visualViewport.addEventListener('scroll', place); }
+  }
+  init();
+  return {
+    setEnabled(v) { enabled = !!v; if (!enabled) hide(); },
+    isEnabled: () => enabled,
+    hide, key, update, accept, select,
+    state: () => ({ shown, items: items.map(i => ({ label: i.label, kind: i.kind, detail: i.detail })), sel, from: sess && sess.from, to: sess && sess.to }),
+  };
 })();
 
 // ══════════════════════════════════════════════════════════════
@@ -17673,6 +18426,7 @@ function _bpApplySettings() {
   document.body.classList.toggle('no-lnums', !_bpSet.lineNumbers);
   syncEditor();                                   // syntax colouring, tab width and line height of the code
   _wikiColorize();                                // and the code in the wiki
+  _AC.setEnabled(_bpSet.autocomplete);
   _HV.setEnabled(_bpSet.tooltips);
   _HV.setDelay(_bpSet.tooltipDelay);
   _HV.resetMetrics();
@@ -17876,6 +18630,7 @@ function _setBuildUI() {
   _setRow(c, 'autoBrackets', 'Auto-close brackets', 'Typing ( [ or { adds the closing one too, typing the closing one skips over it, and selected text is wrapped.', _setToggle('autoBrackets'));
   _setRow(c, 'autoQuotes', 'Auto-close quotes', 'Typing " or \' adds the closing quote too, and selected text is wrapped.', _setToggle('autoQuotes'));
   _setRow(c, 'autoIndent', 'Smart indentation', 'Enter keeps the indentation and adds a level after a colon or an open bracket. Backspace removes a whole indent.', _setToggle('autoIndent'));
+  _setRow(c, 'autocomplete', 'Autocomplete', 'Suggests names while you type: your own variables and functions, BowPy and Python names, methods after a dot, argument names inside a call and file names of the Assets tab inside quotes. Tab or Enter accepts, Esc closes, Ctrl+Space opens the list by hand.', _setToggle('autocomplete'));
   _setRow(c, 'tooltips', 'Hover tooltips', 'Hover a function, method or class in the editor to see its signature and documentation.', _setToggle('tooltips'));
   _setRow(c, 'tooltipDelay', 'Tooltip delay', 'How long the pointer has to rest on a word before the tooltip appears.', _setRange('tooltipDelay', 0, 1500, 50, v => v + ' ms'));
 
@@ -17942,7 +18697,7 @@ function _setColorInput(k, value, commit) {
 
 // controls show what _bpSet says
 function _setRefresh() {
-  for (const k of ['fullscreen', 'lineNumbers', 'syntax', 'autoBrackets', 'autoQuotes', 'autoIndent', 'tooltips', 'clearConsole']) { const i = _setUI.ctl[k]; if (i) i.checked = !!_bpSet[k]; }
+  for (const k of ['fullscreen', 'lineNumbers', 'syntax', 'autoBrackets', 'autoQuotes', 'autoIndent', 'autocomplete', 'tooltips', 'clearConsole']) { const i = _setUI.ctl[k]; if (i) i.checked = !!_bpSet[k]; }
   for (const k of ['fontSize', 'lineHeight', 'tooltipDelay', 'conFontSize']) {
     const i = _setUI.ctl[k]; if (i) { i.value = _bpSet[k]; i._val.textContent = i._fmt(_bpSet[k]); }
   }
