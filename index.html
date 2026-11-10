@@ -5113,7 +5113,28 @@ function _bpHostFactory() {
   }));
   // the state the browser is in right now (fullscreen() returns the state that was asked for)
   const isFullscreen = () => !!fsEl();
-  return { clipWrite, clipRead, parseColor, fullscreen, isFullscreen, fsStop, fsExit, fsHooks, _clip: clip, _fs: fsx };
+  // ── saving an Image as a file ──
+  // The data URL to store for an Image saved under `name`: { url }, or { err: 'notready' | 'blocked' }.
+  // An image that already is a data URL of the type the name asks for is stored exactly as it is (no re-encoding, so nothing is lost);
+  // anything else is drawn onto a canvas and encoded as .png, .jpg/.jpeg or .webp.
+  const IMG_MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp' };
+  function imageToDataURL(img, name) {
+    const ext = (/\.([A-Za-z0-9]+)$/.exec(String(name)) || [])[1] || '';
+    const mime = IMG_MIME[ext.toLowerCase()] || 'image/png';
+    const head = 'data:' + mime + ';base64,';
+    const src = img && typeof img.src === 'string' ? img.src : '';
+    if (src.length > head.length && src.startsWith(head)) return { url: src };
+    if (!img || !img.complete || !img.naturalWidth || !img.naturalHeight) return { err: 'notready' };
+    try {
+      const c = document.createElement('canvas');
+      c.width = img.naturalWidth; c.height = img.naturalHeight;
+      const g = c.getContext('2d');
+      if (mime === 'image/jpeg') { g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); }      // JPEG has no transparency
+      g.drawImage(img, 0, 0);
+      return { url: c.toDataURL(mime, 0.92) };
+    } catch (e) { return { err: 'blocked' }; }
+  }
+  return { clipWrite, clipRead, parseColor, imageToDataURL, fullscreen, isFullscreen, fsStop, fsExit, fsHooks, _clip: clip, _fs: fsx };
 }
 
 const _bpHost = _bpHostFactory();
@@ -5498,6 +5519,22 @@ window._py = {
     try { localStorage.removeItem('bpa:' + n); } catch(e) {}
     _renderAssets();
   },
+  // save_image(): the picture becomes an image asset (Assets tab + the copy kept in the browser)
+  img_save(img, name) {
+    const n = String(name);
+    const r = _bpHost.imageToDataURL(img, n);
+    if (r.err) return r.err;                                   // 'notready' | 'blocked'
+    const rec = { url: r.url, type: 'image' };
+    _bpAssets.set(n, rec);
+    let kept = true;
+    try { localStorage.setItem('bpa:' + n, JSON.stringify(rec)); }
+    catch (e) { kept = false; try { localStorage.removeItem('bpa:' + n); } catch (e2) {} }   // never leave an older copy behind to come back after a reload
+    if (!kept) window.appendConsole('save_image(): the browser has no room left to keep "' + n + '"; it stays in the Assets tab until the page is reloaded.', 'warn');
+    _renderAssets();
+    return kept ? 'ok' : 'memory';
+  },
+  // file_exists(): in the editor a file exists when the Assets tab has it
+  file_exists(name) { return _bpAssets.has(String(name)); },
 };
 
 // ══════════════════════════════════════════════════════════════
@@ -6962,22 +6999,68 @@ def erase(name):
         raise ValueError(f"erase(): filename must end in .txt or .json, got {_nm!r}")
     _py.file_erase(_nm)
 
+_IMG_FILE_EXTS = ('.png', '.jpg', '.jpeg', '.webp')
+
 def burn(name):
-    """Permanently delete a .txt or .json file.
+    """Permanently delete a .txt or .json file, or an image saved with save_image().
 
     In the IDE the asset is removed from the Assets panel and localStorage.
     In an exported HTML the file is removed from the browser cache.
 
-    name must end in .txt or .json.
+    name must end in .txt, .json, .png, .jpg, .jpeg or .webp.
 
     Example:
         burn("log.txt")
         # log.txt no longer exists; read_txt("log.txt") would raise FileNotFoundError
     """
     _nm = str(name)
-    if not (_nm.endswith('.txt') or _nm.endswith('.json')):
-        raise ValueError(f"burn(): filename must end in .txt or .json, got {_nm!r}")
+    if not (_nm.endswith('.txt') or _nm.endswith('.json') or _nm.lower().endswith(_IMG_FILE_EXTS)):
+        raise ValueError(f"burn(): filename must end in .txt, .json, .png, .jpg, .jpeg or .webp, got {_nm!r}")
     _py.file_burn(_nm)
+
+def file_exists(name):
+    """Return True if a file with this name exists.
+
+    In the editor it checks the Assets tab (every kind of asset counts).
+    In an exported game it checks the files that were built into the game and the
+    browser cache (the files the game stored there with write() and save_image()).
+    A file removed with burn() no longer exists.
+
+    Example:
+        if file_exists("save.json"):
+            data = read_json("save.json")
+    """
+    return bool(_py.file_exists(str(name)))
+
+def save_image(img, name):
+    """Store an Image as a file called name, so it is still there after a restart.
+
+    In the editor the image appears in the Assets tab; in an exported game it is
+    kept in the browser cache.  Load it again with Image(name).  An existing
+    file with the same name is replaced.
+
+    name must end in .png, .jpg, .jpeg or .webp; that decides the file type.
+    (JPEG has no transparency: transparent areas become white.)
+
+    Returns True when the image was stored, False when the browser had no room
+    to keep it (it is then only available until the page is closed).
+    Raises RuntimeError if the image is not ready yet.
+
+    Example:
+        save_image(Image.from_screen((0, 0), (W(), H())), "shot.png")
+        shot = Image("shot.png")
+    """
+    _nm = str(name)
+    if not _nm.lower().endswith(_IMG_FILE_EXTS):
+        raise ValueError(f"save_image(): filename must end in .png, .jpg, .jpeg or .webp, got {_nm!r}")
+    if not isinstance(img, Image):
+        raise TypeError(f"save_image(): img must be an Image (Image.from_screen() captures the canvas), got {type(img).__name__}")
+    r = str(_py.img_save(img._h, _nm))
+    if r == 'notready':
+        raise RuntimeError("save_image(): the image is not ready yet (wait for img.ready). An Image.from_screen() image only lasts for the frame that captured it, unless keep=True.")
+    if r == 'blocked':
+        raise RuntimeError("save_image(): the browser does not let the program read the pixels of this image")
+    return r == 'ok'
 
 def draw_image_quad(img, p1, p2, p3, p4, tint=None, interpolate=True):
     """Draw an Image onto a 4-point quadrilateral using projective mapping.
@@ -10901,7 +10984,7 @@ const _HV = (() => {
   const AC_ALIGN = ['left', 'center', 'right'];
   const AC_BASELINE = ['top', 'hanging', 'middle', 'alphabetic', 'ideographic', 'bottom'];
   const AC_FAMILIES = ['monospace', 'sans-serif', 'serif', 'cursive', 'fantasy', 'system-ui'];
-  const AC_ASSET_CALLS = { Image: 'image', Sound: 'audio', read_json: 'json', read_txt: 'text', read_txt_lines: 'text' };
+  const AC_ASSET_CALLS = { Image: 'image', Sound: 'audio', read_json: 'json', read_txt: 'text', read_txt_lines: 'text', file_exists: 'any' };
 
   let acNames = null, acMods = null;
   function acRuntimeNames() {
@@ -11264,7 +11347,7 @@ const _HV = (() => {
     const text = acText(sc, Math.max(0, li - 12), li, a);
     const kw = /(?:^|[(,\s])([A-Za-z_]\w*)\s*=\s*$/.exec(text);
     const call = acOpenCall(text);
-    const assets = (type) => { const out = []; for (const [name, rec] of _bpAssets) if (!type || rec.type === type) out.push({ label: name, kind: 'file', prio: 1, ord: out.length, detail: rec.type, note: rec.type + ' asset' }); return out; };
+    const assets = (type) => { const out = []; for (const [name, rec] of _bpAssets) if (!type || type === 'any' || rec.type === type) out.push({ label: name, kind: 'file', prio: 1, ord: out.length, detail: rec.type, note: rec.type + ' asset' }); return out; };
     const plain = (list, what) => list.map((v, i) => ({ label: v, kind: 'constant', prio: 1, ord: 100 + i, detail: what }));
     const argIndex = call ? acArgSplit(call.args).length - 1 : -1;
     const name = call && call.name;
@@ -11278,6 +11361,7 @@ const _HV = (() => {
     if (name === 'set_blend' && argIndex === 0) return plain(AC_BLEND, 'blend mode');
     if (name === 'draw_text' && argIndex === 5) return assets('font').concat(plain(AC_FAMILIES, 'font family'));
     if (name && AC_ASSET_CALLS[name] && argIndex === 0) return assets(AC_ASSET_CALLS[name]);
+    if (name === 'save_image' && argIndex === 1) return assets('image');
     return null;
   }
 
@@ -12000,6 +12084,8 @@ const _bpFonts=_bpFontFactory(function(m){console.warn(m);},function(){try{BE.cl
 _bpFonts.sync(Object.entries(_builtAssets));
 function _bpIsMobile(){try{const n=navigator;if(n.userAgentData&&n.userAgentData.mobile===true)return true;const ua=n.userAgent||'';if(/Android|iPhone|iPad|iPod|Windows Phone|IEMobile|BlackBerry|BB10|Opera Mini|webOS|Silk|Kindle|Mobile/i.test(ua))return true;if(/Macintosh/i.test(ua)&&(n.maxTouchPoints||0)>1)return true;if(window.matchMedia&&matchMedia('(pointer: coarse)').matches&&matchMedia('(hover: none)').matches)return true;}catch(e){}return false;}
 function _assetRecord(name){const v=_builtAssets[String(name)];return v&&typeof v==='object'?v:(v?{url:v,type:(String(v).startsWith('data:image')?'image':String(v).startsWith('data:audio')?'audio':'text'),text:String(v)}:null);}
+const _bpSavedImgs=new Map();
+function _bpSavedImage(n){n=String(n);if(_bpSavedImgs.has(n))return _bpSavedImgs.get(n);try{const v=localStorage.getItem('bpi:'+n);if(v!==null)return v;}catch(e){}return null;}
 function _assetText(name){const a=_assetRecord(name);return a?a.text!=null?String(a.text):(a.url!=null?String(a.url):null):null;}
 function fitCanvas(){$canvas.width=window.innerWidth;$canvas.height=window.innerHeight;}
 window.addEventListener('resize',fitCanvas);fitCanvas();
@@ -12117,7 +12203,7 @@ window._py={
   fullscreen(t){return _bpHost.fullscreen(t);},
   is_fs(){return _bpHost.isFullscreen();},
   galpha(){return ctx.globalAlpha;},screen_pos(x,y){if(x!==undefined&&y!==undefined){screenX=Number(x)||0;screenY=Number(y)||0;}return[screenX,screenY];},screen_rot(angle,ox,oy){if(angle!==undefined){screenRot=Number(angle)||0;if(ox!==undefined&&oy!==undefined){screenRotOx=Number(ox)||0;screenRotOy=Number(oy)||0;}}return[screenRot,screenRotOx,screenRotOy];},
-  img_create(url){const stored=_builtAssets[String(url)];const img=new window.Image();img.crossOrigin='anonymous';img.src=stored?(typeof stored==='object'?String(stored.url):stored):String(url);return img;},
+  img_create(url){const _sv=_bpSavedImage(url);let _burnt=false;try{_burnt=localStorage.getItem('bpb:'+String(url))==='1';}catch(e){}const stored=_burnt?null:_builtAssets[String(url)];const img=new window.Image();img.crossOrigin='anonymous';img.src=_sv!==null?_sv:stored?(typeof stored==='object'?String(stored.url):stored):String(url);return img;},
   img_draw(img,x,y,w,h,angle,ox,oy,tint,smooth){if(!img||!img.complete||!img.naturalWidth)return;const flipX=w<0;const flipY=h<0;let iw=(w===0)?img.naturalWidth:Math.abs(w);let ih=(h===0)?img.naturalHeight:Math.abs(h);let px=-iw*ox;let py=-ih*oy;const isGrad=!!tint&&typeof tint==='object';const tintRGB=(!isGrad&&tint!==undefined&&tint!==null&&tint!==""&&tint!=="none")?_bpColorToRGB(tint):null;const gm=isGrad?ctx.getTransform():null;ctx.save();ctx.imageSmoothingEnabled=smooth!==false;ctx.translate(x,y);ctx.rotate(angle);if(flipX||flipY)ctx.scale(flipX?-1:1,flipY?-1:1);if(smooth===false){const sn=_bpSnapRect(ctx.getTransform(),px,py,iw,ih);px=sn[0];py=sn[1];iw=sn[2];ih=sn[3];}if(isGrad){const m=ctx.getTransform();const cs=[[px,py],[px+iw,py],[px+iw,py+ih],[px,py+ih]].map(q=>[m.a*q[0]+m.c*q[1]+m.e,m.b*q[0]+m.d*q[1]+m.f]);_bpGradTint(cs,tint,gm,(g,dx,dy)=>{g.setTransform(m.a,m.b,m.c,m.d,m.e-dx,m.f-dy);g.bpDrawImage(img,px,py,iw,ih,null);});}else{ctx.bpDrawImage(img,px,py,iw,ih,tintRGB);}ctx.restore();},
   get_canvas_data(){return Array.from(ctx.getImageData(0,0,_bpTargetCanvas.width,_bpTargetCanvas.height).data);},canvas_size(){return [_bpTargetCanvas.width,_bpTargetCanvas.height];},
   put_canvas_data(dp){let u8;try{const raw=(dp&&typeof dp.toJs==='function')?dp.toJs():dp;if(raw instanceof Uint8Array||raw instanceof Uint8ClampedArray){u8=(raw instanceof Uint8ClampedArray)?raw:new Uint8ClampedArray(raw.buffer,raw.byteOffset,raw.byteLength);}else if(raw instanceof ArrayBuffer){u8=new Uint8ClampedArray(raw);}else{u8=new Uint8ClampedArray(Array.isArray(raw)?raw:Array.from(raw));}}catch(_){u8=new Uint8ClampedArray(Array.from(dp));}ctx.putImageData(new ImageData(u8,_bpTargetCanvas.width,_bpTargetCanvas.height),0,0);},img_draw_quad(img,pts,tint,smooth){if(!img||!img.complete||!img.naturalWidth)return;const rawPts=pts&&pts.toJs?pts.toJs():Array.from(pts||[]);if(rawPts.length!==4)return;const m=ctx.getTransform();const p=rawPts.map(pt=>{const q=pt&&pt.toJs?pt.toJs():Array.from(pt);const x=Number(q[0]),y=Number(q[1]);return[m.a*x+m.c*y+m.e,m.b*x+m.d*y+m.f];});const keepSmooth=ctx.imageSmoothingEnabled;ctx.imageSmoothingEnabled=smooth!==false;try{if(tint&&typeof tint==='object'){_bpGradTint(p,tint,m,(g,dx,dy)=>{g.setTransform(1,0,0,1,0,0);g.bpDrawQuad(img,p.map(q=>[q[0]-dx,q[1]-dy]),null);});return;}ctx.bpDrawQuad(img,p,_bpColorToRGB(tint));}finally{ctx.imageSmoothingEnabled=keepSmooth;}},
@@ -12128,7 +12214,7 @@ window._py={
   snd_stop(n){if(n&&n.src)try{n.src.stop(0);}catch(e){}},
   snd_vol(n,v){if(n&&n.gain)n.gain.gain.value=v;},
   snd_rate(n,r){if(n&&n.src)n.src.playbackRate.value=r;},
-  snd_ready(h){return!!(h&&h.buf);},asset_get(name){const _n=String(name);try{if(localStorage.getItem('bpb:'+_n)==='1')return null;}catch(e){}try{const _w=localStorage.getItem('bpw:'+_n);if(_w!==null){const _t=_n.endsWith('.json')?'json':'text';return{url:_w,type:_t,text:_w};}}catch(e){}return _assetRecord(_n);},asset_text(name){const a=window._py.asset_get(name);return a&&(a.type==='text'||a.type==='json'||a.type==='lib')?a.text!=null?String(a.text):(a.url!=null?String(a.url):null):null;},asset_json(name){return window._py.asset_text(name);},asset_register_bulk(jsonStr){try{const obj=JSON.parse(String(jsonStr));for(const[name,raw]of Object.entries(obj)){if(_builtAssets[name])continue;if(raw&&typeof raw==='object'&&raw.url){_builtAssets[name]=raw;}else if(typeof raw==='string'){const ln=name.toLowerCase();const type=raw.startsWith('data:image')?'image':raw.startsWith('data:audio')?'audio':(ln.endsWith('.bpy')||ln.endsWith('.py'))?'lib':/\.(ttf|otf|woff2?)$/.test(ln)?'font':'text';_builtAssets[name]={url:raw,type,text:(type==='text'||type==='lib'||type==='json')?raw:undefined};}}_bpFonts.sync(Object.entries(_builtAssets));}catch(e){}},file_write(name,content){const _n=String(name);let _cur='';try{if(localStorage.getItem('bpb:'+_n)==='1')localStorage.removeItem('bpb:'+_n);const _s=localStorage.getItem('bpw:'+_n);if(_s!==null){_cur=_s;}else{const _b=_builtAssets[_n];if(_b&&_b.text!=null)_cur=String(_b.text);}}catch(e){}try{localStorage.setItem('bpw:'+_n,_cur+String(content));}catch(e){}},file_erase(name){const _n=String(name);try{localStorage.setItem('bpw:'+_n,'');localStorage.removeItem('bpb:'+_n);}catch(e){}},file_burn(name){const _n=String(name);try{localStorage.removeItem('bpw:'+_n);if(_builtAssets[_n])localStorage.setItem('bpb:'+_n,'1');}catch(e){}},
+  snd_ready(h){return!!(h&&h.buf);},asset_get(name){const _n=String(name);{const _si=_bpSavedImage(_n);if(_si!==null)return{url:_si,type:'image'};}try{if(localStorage.getItem('bpb:'+_n)==='1')return null;}catch(e){}try{const _w=localStorage.getItem('bpw:'+_n);if(_w!==null){const _t=_n.endsWith('.json')?'json':'text';return{url:_w,type:_t,text:_w};}}catch(e){}return _assetRecord(_n);},asset_text(name){const a=window._py.asset_get(name);return a&&(a.type==='text'||a.type==='json'||a.type==='lib')?a.text!=null?String(a.text):(a.url!=null?String(a.url):null):null;},asset_json(name){return window._py.asset_text(name);},asset_register_bulk(jsonStr){try{const obj=JSON.parse(String(jsonStr));for(const[name,raw]of Object.entries(obj)){if(_builtAssets[name])continue;if(raw&&typeof raw==='object'&&raw.url){_builtAssets[name]=raw;}else if(typeof raw==='string'){const ln=name.toLowerCase();const type=raw.startsWith('data:image')?'image':raw.startsWith('data:audio')?'audio':(ln.endsWith('.bpy')||ln.endsWith('.py'))?'lib':/\.(ttf|otf|woff2?)$/.test(ln)?'font':'text';_builtAssets[name]={url:raw,type,text:(type==='text'||type==='lib'||type==='json')?raw:undefined};}}_bpFonts.sync(Object.entries(_builtAssets));}catch(e){}},file_write(name,content){const _n=String(name);let _cur='';try{if(localStorage.getItem('bpb:'+_n)==='1')localStorage.removeItem('bpb:'+_n);const _s=localStorage.getItem('bpw:'+_n);if(_s!==null){_cur=_s;}else{const _b=_builtAssets[_n];if(_b&&_b.text!=null)_cur=String(_b.text);}}catch(e){}try{localStorage.setItem('bpw:'+_n,_cur+String(content));}catch(e){}},file_erase(name){const _n=String(name);try{localStorage.setItem('bpw:'+_n,'');localStorage.removeItem('bpb:'+_n);}catch(e){}},file_burn(name){const _n=String(name);_bpSavedImgs.delete(_n);try{localStorage.removeItem('bpw:'+_n);localStorage.removeItem('bpi:'+_n);if(_builtAssets[_n])localStorage.setItem('bpb:'+_n,'1');}catch(e){}},img_save(img,name){const _n=String(name);const r=_bpHost.imageToDataURL(img,_n);if(r.err)return r.err;_bpSavedImgs.set(_n,r.url);try{localStorage.removeItem('bpb:'+_n);}catch(e){}let kept=true;try{localStorage.setItem('bpi:'+_n,r.url);}catch(e){kept=false;try{localStorage.removeItem('bpi:'+_n);}catch(e2){}}return kept?'ok':'memory';},file_exists(name){const _n=String(name);if(_bpSavedImgs.has(_n))return true;try{if(localStorage.getItem('bpi:'+_n)!==null)return true;if(localStorage.getItem('bpb:'+_n)==='1')return false;if(localStorage.getItem('bpw:'+_n)!==null)return true;}catch(e){}return Object.prototype.hasOwnProperty.call(_builtAssets,_n);},
   wu(){return 0;},wd(){return 0;},
   keys_held(){return Array.from(keysHeld);},keys_pressed(){return Array.from(keysPress);},keys_released(){return Array.from(keysRel);},
   btns_held(){return[];},btns_pressed(){return[];},btns_released(){return[];},
@@ -14596,6 +14682,7 @@ def update():
         <div class="wiki-member" onclick="openWikiPage('Image')"><div class="wiki-member-name">Image</div><div class="wiki-member-desc">Load and manage image assets.</div></div>
         <div class="wiki-member" onclick="openWikiPage('draw_image')"><div class="wiki-member-name">draw_image()</div><div class="wiki-member-desc">Draw an image onto the canvas.</div></div>
         <div class="wiki-member" onclick="openWikiPage('draw_image_quad')"><div class="wiki-member-name">draw_image_quad()</div><div class="wiki-member-desc">Draw an image mapped onto a quadrilateral.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('save_image_fn')"><div class="wiki-member-name">save_image()</div><div class="wiki-member-desc">Store an image as a file in the Assets tab or the browser cache.</div></div>
       </div>
     `
   },
@@ -15680,6 +15767,7 @@ def update():
       <div class="wiki-ref-list">
         <div class="wiki-ref" onclick="openWikiPage('draw_image')">draw_image()</div>
         <div class="wiki-ref" onclick="openWikiPage('draw_image_quad')">draw_image_quad()</div>
+        <div class="wiki-ref" onclick="openWikiPage('save_image_fn')">save_image()</div>
       </div>
     `
   },
@@ -15812,6 +15900,61 @@ def update():
       <div class="wiki-ref-list">
         <div class="wiki-ref" onclick="openWikiPage('draw_image')">draw_image()</div>
         <div class="wiki-ref" onclick="openWikiPage('draw_surface_fn')">draw_surface()</div>
+      </div>
+    `
+  },
+
+  "save_image_fn": {
+    title: "save_image()",
+    category: "Graphics",
+    type: "function",
+    desc: "Stores an Image as a file with the given name. In the editor it appears in the Assets tab; in an exported game it is kept in the browser cache. Load it again with Image(name).",
+    signature: `<span class="ws-fn">save_image</span><span class="ws-pun">(</span><span class="ws-param">img</span><span class="ws-pun">: </span><span class="ws-cls">Image</span><span class="ws-pun">,</span> <span class="ws-param">name</span><span class="ws-pun">: str) →</span> <span class="ws-cls">bool</span>`,
+    body: `
+      <p class="wiki-p">Saves the pixels of an Image under <code>name</code>, so the picture is still there after the program restarts or the page reloads. Use it for screenshots (<code>Image.from_screen()</code>), pictures the player drew, or anything else you generate. If a file with that name already exists it is replaced.</p>
+
+      <p class="wiki-p">The file type comes from the name: <code>.png</code> (lossless, keeps transparency), <code>.jpg</code> / <code>.jpeg</code> (smaller, but no transparency: transparent areas become white) or <code>.webp</code>.</p>
+
+      <h2 class="wiki-h2">Behaviour by context</h2>
+      <table class="wiki-param-table">
+        <tr><th>Context</th><th>What happens</th></tr>
+        <tr><td>IDE</td><td>The image is added to the Assets tab (and kept in localStorage, like an uploaded file). It can be used with <code>Image(name)</code> straight away, and it is built into exported games like any other asset.</td></tr>
+        <tr><td>Exported HTML</td><td>The image is kept in the browser cache (<code>localStorage</code>), so every player has their own copy. <code>Image(name)</code> finds it, and it takes the place of an image with the same name that was built into the game.</td></tr>
+      </table>
+
+      <h2 class="wiki-h2">Parameters</h2>
+      <table class="wiki-param-table">
+        <tr><th>Name</th><th>Type</th><th>Description</th></tr>
+        <tr><td>img</td><td>Image</td><td>The image to save. It must be ready (<code>img.ready</code>), except for an <code>Image.from_screen()</code> picture, which can be saved right away. Without <code>keep=True</code> such a picture only lasts for the frame that captured it.</td></tr>
+        <tr><td>name</td><td>str</td><td>Filename. Must end in <code>.png</code>, <code>.jpg</code>, <code>.jpeg</code> or <code>.webp</code>.</td></tr>
+      </table>
+
+      <p class="wiki-p"><b>Returns</b> <code>True</code> when the image was stored. It returns <code>False</code> when the browser had no room left to keep it; the image is then only available until the page is closed.</p>
+
+      <div class="wiki-example">
+        <div class="wiki-example-title">Take a screenshot and show it again next time</div>
+<pre>
+shot = Image("shot.png") if file_exists("shot.png") else None
+
+def update():
+    global shot
+    clear("navy")
+    draw_circle(mouse_x(), mouse_y(), 40, "gold")
+    if key_pressed("s"):
+        save_image(Image.from_screen((0, 0), (W(), H())), "shot.png")
+        shot = Image("shot.png")
+    if shot is not None and shot.ready:
+        draw_image(shot, 20, 20, 160, 120)
+</pre>
+      </div>
+
+      <div class="wiki-note"><b>Note:</b> An <code>Image</code> you made earlier from the same name keeps showing the old picture. Create a new <code>Image(name)</code> to load the saved one. Browsers only keep a few megabytes per site, so large screenshots add up quickly; use <code>.jpg</code> or save a smaller region. Use <code>burn()</code> to delete a saved image.</div>
+
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('Image')">Image</div>
+        <div class="wiki-ref" onclick="openWikiPage('file_exists_fn')">file_exists()</div>
+        <div class="wiki-ref" onclick="openWikiPage('burn_fn')">burn()</div>
+        <div class="wiki-ref" onclick="openWikiPage('draw_image')">draw_image()</div>
       </div>
     `
   },
@@ -17774,6 +17917,7 @@ def update():
         <div class="wiki-member" onclick="openWikiPage('write_fn')"><div class="wiki-member-name">write()</div><div class="wiki-member-desc">Write or append text to a .txt/.json file. Creates the file if it does not exist.</div></div>
         <div class="wiki-member" onclick="openWikiPage('erase_fn')"><div class="wiki-member-name">erase()</div><div class="wiki-member-desc">Wipe all contents from a file, leaving it empty but still present.</div></div>
         <div class="wiki-member" onclick="openWikiPage('burn_fn')"><div class="wiki-member-name">burn()</div><div class="wiki-member-desc">Permanently delete a file from assets or the browser cache.</div></div>
+        <div class="wiki-member" onclick="openWikiPage('file_exists_fn')"><div class="wiki-member-name">file_exists()</div><div class="wiki-member-desc">Check whether a file exists in the Assets tab (editor) or in the built game and its browser cache.</div></div>
       </div>
 
       <div class="wiki-note"><b>Tip:</b> <code>read_txt()</code> accepts both <code>.txt</code> and <code>.json</code> files, and <code>read_json()</code> can parse either extension — as long as the content is valid JSON. Use <code>to_json()</code> to convert Python data to a JSON string before writing it.</div>
@@ -18040,10 +18184,10 @@ def update():
     title: "burn()",
     category: "Text & JSON",
     type: "function",
-    desc: "Permanently deletes a .txt or .json file. In the IDE it is removed from the Assets panel; in an exported HTML it is removed from the browser cache.",
+    desc: "Permanently deletes a .txt or .json file, or an image saved with save_image(). In the IDE it is removed from the Assets panel; in an exported HTML it is removed from the browser cache.",
     signature: `<span class="ws-fn">burn</span><span class="ws-pun">(</span><span class="ws-param">name</span><span class="ws-pun">: str)</span>`,
     body: `
-      <p class="wiki-p"><code>name</code> must end in <code>.txt</code> or <code>.json</code>. Unlike <code>erase()</code>, which leaves an empty file, <code>burn()</code> removes the file entirely. Attempting to <code>read_txt()</code> a burned file will raise <code>FileNotFoundError</code>.</p>
+      <p class="wiki-p"><code>name</code> must end in <code>.txt</code>, <code>.json</code>, <code>.png</code>, <code>.jpg</code>, <code>.jpeg</code> or <code>.webp</code> (images saved with <code>save_image()</code>). Unlike <code>erase()</code>, which leaves an empty file, <code>burn()</code> removes the file entirely. Attempting to <code>read_txt()</code> a burned file will raise <code>FileNotFoundError</code>.</p>
 
       <h2 class="wiki-h2">Behaviour by context</h2>
       <table class="wiki-param-table">
@@ -18055,7 +18199,7 @@ def update():
       <h2 class="wiki-h2">Parameters</h2>
       <table class="wiki-param-table">
         <tr><th>Name</th><th>Type</th><th>Description</th></tr>
-        <tr><td>name</td><td>str</td><td>Filename. Must end in <code>.txt</code> or <code>.json</code>.</td></tr>
+        <tr><td>name</td><td>str</td><td>Filename. Must end in <code>.txt</code>, <code>.json</code>, <code>.png</code>, <code>.jpg</code>, <code>.jpeg</code> or <code>.webp</code>.</td></tr>
       </table>
 
       <div class="wiki-example">
@@ -18077,6 +18221,50 @@ def update():
       <div class="wiki-ref-list">
         <div class="wiki-ref" onclick="openWikiPage('write_fn')">write()</div>
         <div class="wiki-ref" onclick="openWikiPage('erase_fn')">erase()</div>
+      </div>
+    `
+  },
+
+  "file_exists_fn": {
+    title: "file_exists()",
+    category: "Text & JSON",
+    type: "function",
+    desc: "Checks whether a file with the given name exists. In the editor it looks in the Assets tab; in an exported game it looks at the files built into the game and the browser cache.",
+    signature: `<span class="ws-fn">file_exists</span><span class="ws-pun">(</span><span class="ws-param">name</span><span class="ws-pun">: str) →</span> <span class="ws-cls">bool</span>`,
+    body: `
+      <p class="wiki-p">Returns <code>True</code> if a file called <code>name</code> exists, <code>False</code> if not. Names are case-sensitive and include the extension. Use it before reading a file that may not have been created yet, such as a save file.</p>
+
+      <h2 class="wiki-h2">Behaviour by context</h2>
+      <table class="wiki-param-table">
+        <tr><th>Context</th><th>What is checked</th></tr>
+        <tr><td>IDE</td><td>The Assets tab. Every kind of asset counts: images, sounds, fonts, text, JSON and library files, whether you uploaded them or the program created them with <code>write()</code> or <code>save_image()</code>.</td></tr>
+        <tr><td>Exported HTML</td><td>The files that were built into the game (everything that was on the Assets tab when you built it) and the browser cache (<code>localStorage</code>): files the game stored there with <code>write()</code> or <code>save_image()</code>. A file emptied with <code>erase()</code> still exists; one removed with <code>burn()</code> does not.</td></tr>
+      </table>
+
+      <h2 class="wiki-h2">Parameters</h2>
+      <table class="wiki-param-table">
+        <tr><th>Name</th><th>Type</th><th>Description</th></tr>
+        <tr><td>name</td><td>str</td><td>Filename, including its extension.</td></tr>
+      </table>
+
+      <div class="wiki-example">
+        <div class="wiki-example-title">Load a save file if there is one</div>
+<pre>
+if file_exists("save.json"):
+    data = read_json("save.json")
+else:
+    data = {"level": 1, "coins": 0}
+    write("save.json", to_json(data))
+</pre>
+      </div>
+
+      <div class="wiki-note"><b>Note:</b> <code>file_exists()</code> says nothing about whether a file can be read as text or loaded as an image; it only tells you that a file with that name is there.</div>
+
+      <div class="wiki-ref-list">
+        <div class="wiki-ref" onclick="openWikiPage('write_fn')">write()</div>
+        <div class="wiki-ref" onclick="openWikiPage('burn_fn')">burn()</div>
+        <div class="wiki-ref" onclick="openWikiPage('read_txt_fn')">read_txt()</div>
+        <div class="wiki-ref" onclick="openWikiPage('save_image_fn')">save_image()</div>
       </div>
     `
   },
