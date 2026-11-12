@@ -1217,7 +1217,8 @@ class Target {
   }
   get width() { return this.w; }
   get height() { return this.h; }
-  toDataURL(type, quality) { return this.R.targetToCanvas(this).toDataURL(type, quality); }
+  toCanvas() { return this.R.targetToCanvas(this); }
+  toDataURL(type, quality) { return this.toCanvas().toDataURL(type, quality); }
 }
 
 // ───────────────────────── the renderer ─────────────────────────
@@ -2021,7 +2022,7 @@ class Renderer {
     if (typeof HTMLImageElement !== 'undefined' && src instanceof HTMLImageElement) { w = src.naturalWidth; h = src.naturalHeight; }
     else { w = src.videoWidth || src.width; h = src.videoHeight || src.height; }
     if (!(w > 0 && h > 0)) return null;
-    const isImg = typeof HTMLImageElement !== 'undefined' && src instanceof HTMLImageElement;
+    const isImg = (typeof HTMLImageElement !== 'undefined' && src instanceof HTMLImageElement) || src._bpStill === true;   // _bpStill: a snapshot canvas (surfaceSnapshot)
     if (isImg) {      // a still image that has its texture already is answered first: only still images are put in imgTex
       const e = this.imgTex.get(src);
       if (e && e.w === w && e.h === h && e.epoch === this.epoch && e.src === src.currentSrc) return e;
@@ -5134,7 +5135,20 @@ function _bpHostFactory() {
       return { url: c.toDataURL(mime, 0.92) };
     } catch (e) { return { err: 'blocked' }; }
   }
-  return { clipWrite, clipRead, parseColor, imageToDataURL, fullscreen, isFullscreen, fsStop, fsExit, fsHooks, _clip: clip, _fs: fsx };
+  // ── Surface.to_image() ──
+  // A snapshot of a surface as a finished picture. It is a canvas of its own, so it can be drawn the moment it exists (an <img> needs
+  // a moment to load), and it answers like a loaded image: complete / naturalWidth / naturalHeight. _bpStill tells the WebGL renderer
+  // the pixels never change, so it keeps one texture for it, like it does for an <img>.
+  function surfaceSnapshot(sfc) {
+    const from = sfc && sfc._canvas;
+    if (!from) return null;
+    let c;
+    if (typeof from.toCanvas === 'function') c = from.toCanvas();         // a WebGL surface: its pixels are read back
+    else { c = document.createElement('canvas'); c.width = from.width; c.height = from.height; c.getContext('2d').drawImage(from, 0, 0); }
+    Object.defineProperties(c, { complete: { value: true }, naturalWidth: { value: c.width }, naturalHeight: { value: c.height }, _bpStill: { value: true } });
+    return c;
+  }
+  return { clipWrite, clipRead, parseColor, imageToDataURL, surfaceSnapshot, fullscreen, isFullscreen, fsStop, fsExit, fsHooks, _clip: clip, _fs: fsx };
 }
 
 const _bpHost = _bpHostFactory();
@@ -5475,12 +5489,7 @@ window._py = {
       } else ctx.drawImage(sfc._canvas, x, y);
     } finally { ctx.imageSmoothingEnabled = keepSmooth; }
   },
-  surface_to_image(sfc) {
-    if (!sfc || !sfc._canvas) return null;
-    const img = new window.Image();
-    img.src = sfc._canvas.toDataURL('image/png');
-    return img;
-  },
+  surface_to_image(sfc) { return _bpHost.surfaceSnapshot(sfc); },
   surface_screen() {
     return BE.surfaceScreen();
   },
@@ -7759,7 +7768,7 @@ class Surface:
 
     Methods:
         s.clear(color)  – fill every pixel with color
-        s.to_image()    – snapshot as an Image
+        s.to_image()    – snapshot as an Image (ready at once)
         Surface.screen()– copy of the current screen as a Surface
 
     Properties:
@@ -7787,7 +7796,11 @@ class Surface:
         return obj
 
     def to_image(s):
-        """Return a snapshot of this surface as an Image object."""
+        """Return a snapshot of this surface as an Image object.
+
+        The image is ready at once: it can be drawn in the same frame, there is
+        nothing to wait for.  Later changes to the surface do not affect it.
+        """
         img_h = _py.surface_to_image(s._h)
         obj = Image.__new__(Image)
         obj._h = img_h
@@ -12224,7 +12237,7 @@ window._py={
   surface_set_target(sfc){if(!sfc||!sfc._ctx)return;ctx=sfc._ctx;_bpTargetCanvas=sfc._canvas;},
   surface_reset_target(){ctx=_mainCtx;_bpTargetCanvas=$canvas;},
   surface_draw(sfc,x,y,smooth){if(!sfc||!sfc._canvas)return;const keepSmooth=ctx.imageSmoothingEnabled;ctx.imageSmoothingEnabled=smooth!==false;try{x=Number(x);y=Number(y);if(smooth===false){const r=_bpSnapRect(ctx.getTransform(),x,y,sfc._canvas.width,sfc._canvas.height);ctx.drawImage(sfc._canvas,r[0],r[1],r[2],r[3]);}else ctx.drawImage(sfc._canvas,x,y);}finally{ctx.imageSmoothingEnabled=keepSmooth;}},
-  surface_to_image(sfc){if(!sfc||!sfc._canvas)return null;const img=new window.Image();img.src=sfc._canvas.toDataURL('image/png');return img;},
+  surface_to_image(sfc){return _bpHost.surfaceSnapshot(sfc);},
   surface_screen(){return BE.surfaceScreen();},
   surface_w(sfc){return sfc?sfc._canvas.width:0;},
   surface_h(sfc){return sfc?sfc._canvas.height:0;},
@@ -15741,7 +15754,7 @@ def update():
       <h2 class="wiki-h2">Properties</h2>
       <table class="wiki-param-table">
         <tr><th>Property</th><th>Type</th><th>Description</th></tr>
-        <tr><td>.ready</td><td>bool</td><td>True once the image has fully loaded.</td></tr>
+        <tr><td>.ready</td><td>bool</td><td>True once the image has fully loaded. An image made with <code>surface.to_image()</code> is ready at once.</td></tr>
         <tr><td>.width</td><td>int</td><td>Natural pixel width.</td></tr>
         <tr><td>.height</td><td>int</td><td>Natural pixel height.</td></tr>
         <tr><td>.size</td><td>tuple</td><td>(width, height) as a tuple.</td></tr>
@@ -17555,10 +17568,10 @@ def update():
     title: "Surface — to_image()",
     category: "Surface",
     type: "method",
-    desc: "Returns a snapshot of the surface as an Image object that can be used with draw_image() or stored for later use.",
+    desc: "Returns a snapshot of the surface as an Image object that can be drawn straight away with draw_image() or stored for later use.",
     signature: `<span class="ws-self">surface</span><span class="ws-pun">.</span><span class="ws-fn">to_image</span><span class="ws-pun">() →</span> <span class="ws-cls">Image</span>`,
     body: `
-      <p class="wiki-p">Creates a static <code>Image</code> from the surface's current pixels. The image is independent of the surface — further changes to the surface won't affect it.</p>
+      <p class="wiki-p">Creates a static <code>Image</code> from the surface's current pixels. The image is independent of the surface — further changes to the surface won't affect it. It is <b>ready at once</b>: <code>img.ready</code> is already <code>True</code> and <code>draw_image()</code> works in the same frame, so you can swap in a new snapshot whenever the surface changes without the picture going missing for a moment.</p>
 
       <div class="wiki-example">
         <div class="wiki-example-title">Bake a procedural texture into an Image</div>
